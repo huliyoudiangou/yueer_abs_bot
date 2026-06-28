@@ -1,0 +1,2623 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/patrickmn/go-cache"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+)
+
+type User struct {
+	gorm.Model
+	TelegramID      int64  `gorm:"uniqueIndex;not null"`
+	Username        string `gorm:"uniqueIndex;not null"`
+	AbsUserID       string `gorm:"not null"`
+	SecurityCode    string `gorm:"not null"`
+	Status          string `gorm:"default:'active'"`
+	ExpireAt        *time.Time
+	Points          int `gorm:"default:0"`
+	LastSignAt      *time.Time
+	IsWhitelist     bool `gorm:"default:false"`
+	WhitelistExpire *time.Time
+	Role            string `gorm:"default:'user'"`
+	AccountType     string `gorm:"index;default:'formal'"`
+	TrialStartedAt  *time.Time
+	TrialEndsAt     *time.Time
+	IsSuspended     bool `gorm:"default:false"` // 记录该账号是否已被系统封禁
+	IsCompensated   bool `gorm:"default:false"` // 老玩家历史对账补偿标记位
+}
+
+// 每月连续签到记录。
+// MonthKey 格式：202601
+// 每个月单独统计，天然实现“每月清零”。
+type MonthlySignInStreak struct {
+	gorm.Model
+
+	UserID       int64  `gorm:"index;not null"`
+	MonthKey     string `gorm:"index;not null"`
+	StreakDays   int    `gorm:"default:0"`
+	LastSignDate string `gorm:"index"`
+
+	Rewarded3Days  bool `gorm:"default:false"`
+	Rewarded7Days  bool `gorm:"default:false"`
+	Rewarded14Days bool `gorm:"default:false"`
+	Rewarded21Days bool `gorm:"default:false"`
+	RewardedFull   bool `gorm:"default:false"`
+}
+
+func (MonthlySignInStreak) TableName() string {
+	return "monthly_sign_in_streaks"
+}
+
+// 全局连续签到状态表。
+// 新签到逻辑不再按月份统计，只维护用户当前连续签到状态。
+// 30 天为一个奖励周期，CycleSeq 用于区分第几轮，防止断签后奖励 ref_id 冲突。
+type SignInStreak struct {
+	gorm.Model
+
+	UserID int64 `gorm:"index;not null"`
+
+	CurrentStreakDays int `gorm:"default:0"` // 当前连续签到天数
+	LongestStreakDays int `gorm:"default:0"` // 历史最长连续签到天数，可用于后续排行榜
+	TotalSignDays     int `gorm:"default:0"` // 累计签到总天数
+
+	LastSignDate string     `gorm:"index"` // YYYY-MM-DD
+	LastSignAt   *time.Time // 完整签到时间
+
+	CycleSeq   int `gorm:"default:1"` // 奖励周期序号，断签或跨过 30 天周期时递增
+	BreakCount int `gorm:"default:0"` // 断签次数，后续可用于统计
+}
+
+func (SignInStreak) TableName() string {
+	return "sign_in_streaks"
+}
+
+// 每日签到日志表。
+// 用于防止同一天重复签到，并为后续签到日历、补签、审计留数据基础。
+type SignInLog struct {
+	gorm.Model
+
+	UserID int64 `gorm:"index;not null"`
+
+	SignDate string    `gorm:"index;not null"` // YYYY-MM-DD
+	SignAt   time.Time `gorm:"index;not null"`
+
+	BasePoints int `gorm:"default:0"`
+
+	StreakDaysAfter int `gorm:"default:0"` // 签到后的连续天数
+	CycleSeq        int `gorm:"default:1"` // 签到后所在奖励周期
+	DayInCycle      int `gorm:"default:1"` // 当前 30 天周期内第几天
+}
+
+func (SignInLog) TableName() string {
+	return "sign_in_logs"
+}
+
+// 连签奖励领取记录表。
+// 用 ref_id 做幂等保护，防止同一用户同一轮同一档位重复发奖。
+type SignInRewardClaim struct {
+	gorm.Model
+
+	UserID int64 `gorm:"index;not null"`
+
+	RewardType    string `gorm:"index;not null"` // cycle_streak
+	CycleSeq      int    `gorm:"index;not null"`
+	MilestoneDays int    `gorm:"index;not null"` // 3 / 7 / 14 / 21 / 30
+
+	Points      int
+	Description string
+
+	RefID     string    `gorm:"index;not null"`
+	ClaimedAt time.Time `gorm:"index;not null"`
+}
+
+func (SignInRewardClaim) TableName() string {
+	return "sign_in_reward_claims"
+}
+
+type RedPacket struct {
+	ID          string `gorm:"primaryKey"`
+	SenderID    int64  `gorm:"not null"`
+	SenderName  string
+	TotalPoints int  `gorm:"not null"`
+	Count       int  `gorm:"not null"`
+	LeftCount   int  `gorm:"not null"`
+	LeftPoints  int  `gorm:"not null"`
+	IsFinished  bool `gorm:"default:false;index"`
+	CreatedAt   time.Time
+	RefType     string `gorm:"index"`
+	RefID       string `gorm:"index"`
+	ClaimScope  string `gorm:"index"`
+}
+
+const redPacketClaimScopeWorldBossParticipant = "world_boss_participant"
+
+// 抢红包明细防刷记录。
+// 注意：唯一索引不写在 tag 里，而是在 runConsistencyMigrations() 里手动创建。
+// 这样可以先清理历史重复数据，再创建唯一索引，避免启动时迁移失败。
+type RedPacketGrab struct {
+	ID          uint   `gorm:"primaryKey"`
+	PacketID    string `gorm:"index;not null"`
+	UserID      int64  `gorm:"index;not null"`
+	GrabberName string
+	Points      int
+	GrabbedAt   time.Time
+}
+
+type RedPacketLog struct {
+	gorm.Model
+	RedPacketID string `gorm:"index"`
+	GrabberID   int64
+	GrabberName string
+	Points      int
+}
+
+type InviteCode struct {
+	gorm.Model
+
+	// Code 不再保存真实邀请码。
+	// 新数据只保存 internal-* 占位值；旧明文数据会在迁移时改成 legacy-invite-ID。
+	Code string `gorm:"index;not null"`
+
+	// CodeHash 用于验证用户输入的邀请码。
+	CodeHash string `gorm:"index"`
+
+	// CodePreview 只保存脱敏展示，例如 abcd****wxyz。
+	CodePreview string
+
+	IsUsed   bool `gorm:"default:false"`
+	UsedByID int64
+}
+
+type RenewCode struct {
+	gorm.Model
+
+	// Code 不再保存真实续期卡。
+	// 新数据只保存 internal-* 占位值；旧明文数据会在迁移时改成 legacy-renew-ID。
+	Code string `gorm:"index;not null"`
+
+	// CodeHash 用于验证用户输入的续期卡。
+	CodeHash string `gorm:"index"`
+
+	// CodePreview 只保存脱敏展示，例如 R30-****abcd。
+	CodePreview string
+
+	Days     int
+	IsUsed   bool `gorm:"default:false"`
+	UsedByID int64
+}
+
+type SectShopRenewClaim struct {
+	gorm.Model
+
+	SectID   int64  `gorm:"index;not null"`
+	UserID   int64  `gorm:"index;not null"`
+	MonthKey string `gorm:"index;not null"`
+	SlotNo   int    `gorm:"not null"`
+
+	PurchaseID uint `gorm:"index"`
+}
+
+func (SectShopRenewClaim) TableName() string {
+	return "sect_shop_renew_claims"
+}
+
+type GithubBenefitClaim struct {
+	gorm.Model
+
+	TelegramID  int64  `gorm:"index;not null"`
+	GithubID    int64  `gorm:"index"`
+	GithubLogin string `gorm:"index"`
+
+	GithubCreatedAt *time.Time
+	VerifyCode      string    `gorm:"index;not null"`
+	Status          string    `gorm:"index;not null;default:'pending'"`
+	ExpiresAt       time.Time `gorm:"index;not null"`
+	ClaimedAt       *time.Time
+
+	InviteCodeID      uint
+	InviteCodePreview string
+	RenewCodeID       uint
+	RenewCodePreview  string
+	RewardType        string `gorm:"index"`
+	RewardDays        int
+}
+
+func (GithubBenefitClaim) TableName() string {
+	return "github_benefit_claims"
+}
+
+type ReferralCode struct {
+	gorm.Model
+
+	UserID    int64  `gorm:"index;not null"`
+	Code      string `gorm:"index;not null"`
+	IsEnabled bool   `gorm:"default:true;index"`
+}
+
+func (ReferralCode) TableName() string {
+	return "referral_codes"
+}
+
+type ReferralActivation struct {
+	gorm.Model
+
+	CodeID    uint  `gorm:"index;not null"`
+	InviterID int64 `gorm:"index;not null"`
+	InviteeID int64 `gorm:"index;not null"`
+
+	Status string `gorm:"index;not null;default:'active'"`
+
+	TrialStartedAt time.Time  `gorm:"index;not null"`
+	TrialEndsAt    time.Time  `gorm:"index;not null"`
+	EffectiveAt    *time.Time `gorm:"index"`
+	ExtendedAt     *time.Time
+	RewardedAt     *time.Time
+
+	RawSecondsAtEffective float64
+	RewardPoints          int
+	ActivationDayKey      string `gorm:"index"`
+	RewardDayKey          string `gorm:"index"`
+	RewardMonthKey        string `gorm:"index"`
+}
+
+func (ReferralActivation) TableName() string {
+	return "referral_activations"
+}
+
+type ReferralDailyActivationQuota struct {
+	ID        uint `gorm:"primaryKey"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
+
+	InviterID       int64  `gorm:"index;not null"`
+	DayKey          string `gorm:"index;not null"`
+	ActivationCount int    `gorm:"not null;default:0"`
+}
+
+func (ReferralDailyActivationQuota) TableName() string {
+	return "referral_daily_activation_quotas"
+}
+
+type ReferralMonthlyRewardQuota struct {
+	ID        uint `gorm:"primaryKey"`
+	CreatedAt time.Time
+	UpdatedAt time.Time
+
+	InviterID    int64  `gorm:"index;not null"`
+	MonthKey     string `gorm:"index;not null"`
+	RewardPoints int    `gorm:"not null;default:0"`
+}
+
+func (ReferralMonthlyRewardQuota) TableName() string {
+	return "referral_monthly_reward_quotas"
+}
+
+type MarketplaceListing struct {
+	gorm.Model
+
+	SellerID     int64  `gorm:"index;not null"`
+	SellerName   string `gorm:"index"`
+	Name         string `gorm:"index;not null"`
+	Description  string
+	ListingType  string     `gorm:"index;not null;default:'secret'"`
+	SecretSource string     `gorm:"index"`
+	ItemName     string     `gorm:"index"`
+	UnitQuantity int        `gorm:"default:1"`
+	Price        int        `gorm:"index;not null"`
+	Status       string     `gorm:"index;not null;default:'active'"`
+	SoldCount    int        `gorm:"default:0"`
+	ExpiresAt    *time.Time `gorm:"index"`
+}
+
+func (MarketplaceListing) TableName() string {
+	return "marketplace_listings"
+}
+
+type MarketplaceSecret struct {
+	gorm.Model
+
+	ListingID   uint   `gorm:"index;not null"`
+	SellerID    int64  `gorm:"index;not null"`
+	CodeHash    string `gorm:"index;not null"`
+	CodeEnc     string `gorm:"not null"`
+	Preview     string
+	TokenSource string `gorm:"index"`
+	TokenRefID  uint   `gorm:"index"`
+	Status      string `gorm:"index;not null;default:'available'"`
+	BuyerID     int64  `gorm:"index"`
+	SoldAt      *time.Time
+}
+
+func (MarketplaceSecret) TableName() string {
+	return "marketplace_secrets"
+}
+
+type MarketplacePurchase struct {
+	gorm.Model
+
+	ListingID    uint   `gorm:"index;not null"`
+	SecretID     uint   `gorm:"index;not null"`
+	SellerID     int64  `gorm:"index;not null"`
+	BuyerID      int64  `gorm:"index;not null"`
+	ItemName     string `gorm:"index;not null"`
+	DeliveryType string `gorm:"index;not null;default:'secret'"`
+	Quantity     int    `gorm:"default:1"`
+	Price        int
+	GrossAmount  int
+	FeeAmount    int
+	SellerAmount int
+	Status       string `gorm:"index;not null;default:'paid'"`
+	CodePreview  string
+}
+
+func (MarketplacePurchase) TableName() string {
+	return "marketplace_purchases"
+}
+
+type MarketplaceDispute struct {
+	gorm.Model
+
+	PurchaseID uint   `gorm:"index;not null"`
+	ListingID  uint   `gorm:"index;not null"`
+	SellerID   int64  `gorm:"index;not null"`
+	BuyerID    int64  `gorm:"index;not null"`
+	Reason     string `gorm:"not null"`
+	Status     string `gorm:"index;not null;default:'open'"`
+}
+
+func (MarketplaceDispute) TableName() string {
+	return "marketplace_disputes"
+}
+
+// 全局动态配置表
+type SystemConfig struct {
+	gorm.Model
+	Key   string `gorm:"index;not null"`
+	Value string
+}
+
+// 数据库迁移版本表。
+// 用于记录一次性迁移是否已经执行，避免启动时重复跑重迁移。
+type SchemaMigration struct {
+	ID        uint      `gorm:"primaryKey"`
+	Version   string    `gorm:"uniqueIndex;not null"`
+	AppliedAt time.Time `gorm:"index;not null"`
+}
+
+func (SchemaMigration) TableName() string {
+	return "schema_migrations"
+}
+
+// 管理员审计日志。
+// 所有高危操作都应该写入这里，方便事后追责和回滚核查。
+type AuditLog struct {
+	gorm.Model
+	ActorID   int64  `gorm:"index;not null"` // 操作者 Telegram ID
+	ActorRole string `gorm:"index"`          // 操作者角色
+	Action    string `gorm:"index;not null"` // 操作类型
+	Target    string `gorm:"index"`          // 操作对象
+	Delta     int    `gorm:"default:0"`      // 积分变动等数值型变化，没有则为 0
+	Detail    string // 详细说明，包含原因、旧值、新值等
+}
+
+// 安全校验失败锁定表。
+// 用于把安全码错误次数从内存缓存迁移到数据库，保证服务重启后锁定仍然生效。
+type SecurityAttemptLock struct {
+	gorm.Model
+
+	UserID  int64  `gorm:"index;not null"`
+	Purpose string `gorm:"index;not null"`
+
+	FailCount   int `gorm:"default:0"`
+	LockedUntil *time.Time
+	LastFailAt  *time.Time
+}
+
+func (SecurityAttemptLock) TableName() string {
+	return "security_attempt_locks"
+}
+
+// 用户积分流水。
+// 只记录用户积分变化，不记录系统奖池水位。
+// Delta > 0 表示积分增加，Delta < 0 表示积分减少。
+type PointTransaction struct {
+	gorm.Model
+
+	UserID   int64  `gorm:"index;not null"`
+	UserName string `gorm:"index"`
+
+	Type string `gorm:"index;not null"` // sign_in / redpacket_send / dice_bet 等
+
+	Delta         int
+	BalanceBefore int
+	BalanceAfter  int
+
+	Description string
+	RefType     string `gorm:"index"`
+	RefID       string `gorm:"index"`
+}
+
+func (PointTransaction) TableName() string {
+	return "point_transactions"
+}
+
+// ==========================================
+// 乾坤袋与丹药系统专属数据表
+// ==========================================
+
+type Inventory struct {
+	gorm.Model
+	UserID   int64  `gorm:"index;not null"`
+	ItemName string `gorm:"index;not null"`
+	Quantity int    `gorm:"default:0"`
+}
+
+// 药园灵田。
+// 同一用户同一块田只能存在一条有效记录，唯一性由迁移索引兜底。
+type GardenPlot struct {
+	gorm.Model
+	UserID     int64     `gorm:"index;not null"`
+	PlotNo     int       `gorm:"index;not null"`
+	UnlockedAt time.Time `gorm:"index;not null"`
+}
+
+func (GardenPlot) TableName() string {
+	return "garden_plots"
+}
+
+// 药园种植记录。
+// MVP 中成熟按 matures_at 即时计算，status=growing 表示未收获。
+type GardenPlanting struct {
+	gorm.Model
+	UserID           int64      `gorm:"index;not null"`
+	PlotID           uint       `gorm:"index;not null"`
+	PlotNo           int        `gorm:"index;not null"`
+	SeedKey          string     `gorm:"index;not null"`
+	SeedName         string     `gorm:"not null"`
+	HerbName         string     `gorm:"index;not null"`
+	PlantedAt        time.Time  `gorm:"index;not null"`
+	MaturesAt        time.Time  `gorm:"index;not null"`
+	HarvestedAt      *time.Time `gorm:"index"`
+	MatureNotifiedAt *time.Time `gorm:"index"`
+	Quantity         int        `gorm:"default:0"`
+	Status           string     `gorm:"index;not null;default:'growing'"`
+}
+
+func (GardenPlanting) TableName() string {
+	return "garden_plantings"
+}
+
+// 药园种子每日限购。
+// day_key 使用北京时间 YYYY-MM-DD。
+type GardenSeedPurchase struct {
+	gorm.Model
+	UserID   int64  `gorm:"index;not null"`
+	SeedKey  string `gorm:"index;not null"`
+	DayKey   string `gorm:"index;not null"`
+	Quantity int    `gorm:"default:0"`
+}
+
+func (GardenSeedPurchase) TableName() string {
+	return "garden_seed_purchases"
+}
+
+// GardenHerbMarketSale records per-user daily urgent herb market quota.
+// day_key uses Beijing date YYYY-MM-DD.
+type GardenHerbMarketSale struct {
+	gorm.Model
+	UserID   int64  `gorm:"index;not null"`
+	SeedKey  string `gorm:"index;not null"`
+	DayKey   string `gorm:"index;not null"`
+	Quantity int    `gorm:"default:0"`
+}
+
+func (GardenHerbMarketSale) TableName() string {
+	return "garden_herb_market_sales"
+}
+
+// 丹方解锁记录。
+// 丹方永久解锁，同一用户同一丹方只允许一条有效记录。
+type GardenRecipeUnlock struct {
+	gorm.Model
+	UserID     int64     `gorm:"index;not null"`
+	RecipeKey  string    `gorm:"index;not null"`
+	UnlockedAt time.Time `gorm:"index;not null"`
+}
+
+func (GardenRecipeUnlock) TableName() string {
+	return "garden_recipe_unlocks"
+}
+
+// 丹药使用日志。
+// 用于记录每一次实际吞服丹药的时间。
+// 老逻辑和新逻辑都会用到它，所以不能删除。
+type ItemUsageLog struct {
+	gorm.Model
+	UserID   int64     `gorm:"index;not null"`
+	ItemName string    `gorm:"index;not null"`
+	UsedAt   time.Time `gorm:"index"`
+}
+
+// 丹药周期额度表。
+// 用于保证“每周 / 每月最多使用几次”的限制在并发下也安全。
+// 例如：user_id + item_name + period_key 唯一。
+type ItemUsageQuota struct {
+	gorm.Model
+	UserID    int64  `gorm:"index;not null"`
+	ItemName  string `gorm:"index;not null"`
+	PeriodKey string `gorm:"index;not null"`
+	UsedCount int    `gorm:"default:0"`
+}
+
+func (ItemUsageQuota) TableName() string {
+	return "item_usage_quotas"
+}
+
+// 赛马下注记录表。
+// 用于保证同一局比赛中，同一个用户只能下注一次。
+// Status:
+// active   = 已扣费，等待结算
+// settled  = 已正常结算
+// refunded = 已退款
+type RaceBet struct {
+	gorm.Model
+	RaceID   string `gorm:"index;not null"`
+	ChatID   int64  `gorm:"index;not null"`
+	UserID   int64  `gorm:"index;not null"`
+	UserName string
+	HorseNum int
+	Points   int
+	Status   string `gorm:"index;default:'active'"`
+}
+
+func (RaceBet) TableName() string {
+	return "race_bets"
+}
+
+// 骰子下注记录表。
+// 用于保证同一局骰子中，同一个用户只能下注一次，并支持异常重启兜底退款。
+type DiceBet struct {
+	gorm.Model
+	DiceID    string `gorm:"index;not null"`
+	ChatID    int64  `gorm:"index;not null"`
+	UserID    int64  `gorm:"index;not null"`
+	UserName  string
+	Choice    string `gorm:"index;not null"`
+	Points    int
+	Status    string `gorm:"index;default:'active'"`
+	Result    string
+	Payout    int `gorm:"default:0"`
+	PoolShare int `gorm:"default:0"`
+	Bonus     int `gorm:"default:0"`
+	Withheld  int `gorm:"default:0"`
+}
+
+func (DiceBet) TableName() string {
+	return "dice_bets"
+}
+
+// 骰子每日净盈利表。
+// NetProfit = 当日骰子实发奖励 - 当日骰子下注本金，用于执行每日 200 积分净盈利上限。
+type DiceDailyProfit struct {
+	gorm.Model
+	UserID    int64  `gorm:"index;not null"`
+	DayKey    string `gorm:"index;not null"`
+	NetProfit int    `gorm:"default:0"`
+}
+
+func (DiceDailyProfit) TableName() string {
+	return "dice_daily_profits"
+}
+
+// 用户求书工单表。
+// Status:
+// pending   = 待接单
+// claimed   = 已接单/处理中
+// need_info = 需要用户补充信息
+// uploaded  = 已上传
+// rejected  = 暂无资源
+// cancelled = 已取消
+type BookRequest struct {
+	gorm.Model
+
+	UserID   int64 `gorm:"index;not null"`
+	UserName string
+
+	XmlyLink  string `gorm:"not null"`
+	UserNote  string
+	AdminNote string
+
+	Status string `gorm:"index;not null;default:'pending'"`
+
+	AdminID   int64
+	AdminName string
+
+	AssigneeID   int64 `gorm:"index"`
+	AssigneeName string
+	ClaimedAt    *time.Time
+	LastActionAt *time.Time `gorm:"index"`
+
+	AdminChatID    int64
+	AdminMessageID int
+
+	CompletedAt *time.Time
+}
+
+func (BookRequest) TableName() string {
+	return "book_requests"
+}
+
+// 求书工单处理日志。
+// 记录接单、备注、要求补充信息、用户补充、上传、暂无资源等所有动作。
+type BookRequestLog struct {
+	gorm.Model
+
+	RequestID uint  `gorm:"index;not null"`
+	ActorID   int64 `gorm:"index;not null"`
+	ActorName string
+
+	Action string `gorm:"index;not null"`
+
+	OldStatus string
+	NewStatus string
+	Note      string
+}
+
+func (BookRequestLog) TableName() string {
+	return "book_request_logs"
+}
+
+var DB *gorm.DB
+var goCacheInstance *cache.Cache
+
+func InitDB() {
+	var err error
+
+	ensureSQLiteDatabaseDir(AppConfig.DbURL)
+
+	DB, err = gorm.Open(sqlite.Open(AppConfig.DbURL+"?_journal_mode=WAL&_busy_timeout=5000"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		log.Fatalf("数据库连接失败: %s", formatPlainError(err))
+	}
+
+	sqlDB, err := DB.DB()
+	if err == nil {
+		// SQLite 同一时间只有一个 writer。
+		// 这里限制为单连接，避免多连接并发写入互相抢锁，造成 database is locked。
+		sqlDB.SetMaxOpenConns(AppConfig.DatabaseMaxOpenConns)
+		sqlDB.SetMaxIdleConns(AppConfig.DatabaseMaxIdleConns)
+		sqlDB.SetConnMaxLifetime(time.Hour)
+
+		if err := DB.Exec(fmt.Sprintf("PRAGMA busy_timeout = %d", AppConfig.DatabaseBusyTimeoutMS)).Error; err != nil {
+			log.Printf("⚠️ 设置 SQLite busy_timeout 失败: %s", formatPlainError(err))
+		}
+		if err := DB.Exec("PRAGMA journal_mode = WAL").Error; err != nil {
+			log.Printf("⚠️ 设置 SQLite WAL 模式失败: %s", formatPlainError(err))
+		}
+		if err := DB.Exec("PRAGMA synchronous = NORMAL").Error; err != nil {
+			log.Printf("⚠️ 设置 SQLite synchronous=NORMAL 失败: %s", formatPlainError(err))
+		}
+	}
+
+	if err := DB.AutoMigrate(
+		&User{},
+		&InviteCode{},
+		&RenewCode{},
+		&GithubBenefitClaim{},
+		&ReferralCode{},
+		&ReferralActivation{},
+		&ReferralDailyActivationQuota{},
+		&ReferralMonthlyRewardQuota{},
+		&MarketplaceListing{},
+		&MarketplaceSecret{},
+		&MarketplacePurchase{},
+		&MarketplaceDispute{},
+		&RedPacket{},
+		&RedPacketGrab{},
+		&RedPacketLog{},
+		&SystemConfig{},
+		&SchemaMigration{},
+		&AuditLog{},
+		&SecurityAttemptLock{},
+		&ListeningAbuseRecord{},
+		&PointTransaction{},
+		&MonthlySignInStreak{},
+		&SignInStreak{},
+		&SignInLog{},
+		&SignInRewardClaim{},
+		&AutoDeleteMsg{},
+		&Cultivation{},
+		&CultivationRealmConfig{},
+		&CultivationMinorRealmConfig{},
+		&BreakthroughConfig{},
+		&BreakthroughAttempt{},
+		&WorldBossEvent{},
+		&WorldBossParticipant{},
+		&Inventory{},
+		&GardenPlot{},
+		&GardenPlanting{},
+		&GardenSeedPurchase{},
+		&GardenHerbMarketSale{},
+		&GardenRecipeUnlock{},
+		&ItemUsageLog{},
+		&ItemUsageQuota{},
+		&RaceBet{},
+		&DiceBet{},
+		&DiceDailyProfit{},
+		&BookRequest{},
+		&BookRequestLog{},
+		&LotteryActivity{},
+		&LotteryPrize{},
+		&LotteryParticipant{},
+		&LotteryWinner{},
+		&LotteryClaimLog{},
+		&Sect{},
+		&SectMember{},
+		&SectContributionLog{},
+		&SectDailyTaskClaim{},
+		&SectWeeklyTaskSettlement{},
+		&SectListeningDailyProgress{},
+		&DailyListeningStat{},
+		&SectShopPurchase{},
+		&SectShopRenewClaim{},
+		&SectCaveRetreat{},
+		&SectTechnology{},
+		&SectTechnologyLog{},
+		&SectSecretRealmEvent{},
+		&SectSecretRealmParticipant{},
+		&SectHornBroadcast{},
+		&SectHornDelivery{},
+		&SectLottery{},
+		&SectLotteryEntry{},
+		&SectLotteryPrize{},
+		&SectLotteryWinner{},
+		&SectLotteryReminder{},
+	); err != nil {
+		log.Fatalf("数据库迁移失败: %s", formatPlainError(err))
+	}
+	runOneTimeMigration("20260105_cultivation_configs", func() error {
+		return seedDefaultCultivationConfigs()
+	})
+	// 第二阶段：数据一致性迁移。
+	// 先清理历史重复数据，再创建唯一索引。
+	runConsistencyMigrations()
+	runSectLotteryMigrations()
+	// 第四阶段：敏感数据迁移。
+	// 把旧明文安全码、邀请码、续期卡转换为 HMAC 哈希。
+	runSensitiveDataMigrations()
+	runSecurityAttemptLockMigration()
+	// 初始化修仙配置缓存。当前阶段只加载和刷新配置，不改变现有修仙运行逻辑。
+	InitCultivationRuleCache()
+	cleanupStalePlainBackups()
+	// 初始化缓存，设置默认 5 分钟过期，每 10 分钟自动清理一次过期 Key。
+	goCacheInstance = cache.New(5*time.Minute, 10*time.Minute)
+}
+
+func ensureSQLiteDatabaseDir(dsn string) {
+	dir := sqliteDatabaseDir(dsn)
+	if dir == "" {
+		return
+	}
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		log.Fatalf("❌ 创建数据库目录失败: dir=%s err=%s", formatPlainValue(dir), formatPlainError(err))
+	}
+}
+
+func sqliteDatabaseDir(dsn string) string {
+	dbPath := strings.TrimSpace(dsn)
+	if dbPath == "" || dbPath == ":memory:" {
+		return ""
+	}
+
+	if idx := strings.Index(dbPath, "?"); idx >= 0 {
+		dbPath = dbPath[:idx]
+	}
+	dbPath = strings.TrimPrefix(dbPath, "file:")
+	if dbPath == "" || dbPath == ":memory:" || strings.HasPrefix(dbPath, "mode=memory") {
+		return ""
+	}
+
+	dir := filepath.Dir(dbPath)
+	if dir == "." || dir == "" {
+		return ""
+	}
+	return dir
+}
+
+func CheckRateLimit(userID int64, action string, cooldown time.Duration) bool {
+	key := strconv.FormatInt(userID, 10) + "_" + action
+
+	if lastReqVal, found := goCacheInstance.Get(key); found {
+		if time.Since(lastReqVal.(time.Time)) < cooldown {
+			return false
+		}
+	}
+
+	goCacheInstance.Set(key, time.Now(), cooldown)
+	return true
+}
+
+func runConsistencyMigrations() {
+	log.Println("🔧 开始执行第二阶段数据一致性迁移...")
+
+	assertNoDuplicateGroups("cultivations(user_id)", `
+		SELECT CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+		FROM cultivations
+		GROUP BY user_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	// 修仙档案按 Telegram 用户唯一。丹药药力 upsert 依赖该唯一索引。
+	mustExecMigration(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_cultivations_user_unique
+		ON cultivations(user_id);
+	`)
+
+	// 1. 清理已经软删除的背包记录，避免影响唯一索引。
+	mustExecMigration(`
+		DELETE FROM inventories
+		WHERE deleted_at IS NOT NULL;
+	`)
+
+	// 2. 合并重复背包记录：同一个 user_id + item_name 只保留一行，数量合并到最小 id 那一行。
+	mustExecMigration(`
+		UPDATE inventories
+		SET quantity = (
+			SELECT COALESCE(SUM(i2.quantity), 0)
+			FROM inventories i2
+			WHERE i2.user_id = inventories.user_id
+			  AND i2.item_name = inventories.item_name
+		)
+		WHERE id IN (
+			SELECT MIN(id)
+			FROM inventories
+			GROUP BY user_id, item_name
+		);
+	`)
+
+	mustExecMigration(`
+		DELETE FROM inventories
+		WHERE id NOT IN (
+			SELECT keep_id FROM (
+				SELECT MIN(id) AS keep_id
+				FROM inventories
+				GROUP BY user_id, item_name
+			)
+		);
+	`)
+
+	// 3. 清理红包重复领取记录：同一个红包 + 同一个用户只保留最早一条。
+	mustExecMigration(`
+		DELETE FROM red_packet_grabs
+		WHERE id NOT IN (
+			SELECT keep_id FROM (
+				SELECT MIN(id) AS keep_id
+				FROM red_packet_grabs
+				GROUP BY packet_id, user_id
+			)
+		);
+	`)
+
+	assertNoDuplicateGroups("inventories(user_id, item_name)", `
+		SELECT CAST(user_id AS TEXT) || ':' || item_name AS key, COUNT(*) AS count
+		FROM inventories
+		WHERE deleted_at IS NULL
+		GROUP BY user_id, item_name
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureInventoryPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("inventory unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("system_configs(key)", `
+		SELECT key, COUNT(*) AS count
+		FROM system_configs
+		WHERE deleted_at IS NULL
+		GROUP BY key
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureSystemConfigKeyPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("system config key unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("sect_shop_renew_claims(sect_id, month_key, slot_no)", `
+		SELECT CAST(sect_id AS TEXT) || ':' || month_key || ':' || CAST(slot_no AS TEXT) AS key, COUNT(*) AS count
+		FROM sect_shop_renew_claims
+		WHERE deleted_at IS NULL
+		GROUP BY sect_id, month_key, slot_no
+		HAVING COUNT(*) > 1;
+	`)
+
+	assertNoDuplicateGroups("sect_shop_renew_claims(user_id, month_key)", `
+		SELECT CAST(user_id AS TEXT) || ':' || month_key AS key, COUNT(*) AS count
+		FROM sect_shop_renew_claims
+		WHERE deleted_at IS NULL
+		GROUP BY user_id, month_key
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureSectShopRenewClaimPartialUniqueIndexes(DB); err != nil {
+		log.Fatalf("sect shop renew claim unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("red_packet_grabs(packet_id, user_id)", `
+		SELECT packet_id || ':' || CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+		FROM red_packet_grabs
+		GROUP BY packet_id, user_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	// 5. 创建唯一索引：同一个红包同一个用户只能领一次。
+	mustExecMigration(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_red_packet_grabs_packet_user_unique
+		ON red_packet_grabs(packet_id, user_id);
+	`)
+
+	assertNoDuplicateGroups("race_bets(race_id, user_id)", `
+		SELECT race_id || ':' || CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+		FROM race_bets
+		GROUP BY race_id, user_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	// 6. 创建唯一索引：同一局赛马，同一个用户只能下注一次。
+	mustExecMigration(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_race_bets_race_user_unique
+		ON race_bets(race_id, user_id);
+	`)
+	// 6.1 历史赛马记录兼容迁移。
+	// 老版本 RaceBet 没有 status 字段。
+	// AutoMigrate 增加字段后，旧记录可能为空或被默认成 active。
+	// 为避免启动时把历史已结算下注误判为未结算下注并退款，这里统一标记为 settled。
+	mustExecMigration(`
+		UPDATE race_bets
+		SET status = 'settled'
+		WHERE status IS NULL OR status = '';
+	`)
+
+	assertNoDuplicateGroups("dice_bets(dice_id, user_id)", `
+		SELECT dice_id || ':' || CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+		FROM dice_bets
+		GROUP BY dice_id, user_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	// 6.2 创建唯一索引：同一局骰子，同一个用户只能下注一次。
+	mustExecMigration(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_dice_bets_dice_user_unique
+		ON dice_bets(dice_id, user_id);
+	`)
+	// 6.3 历史骰子记录兼容迁移。
+	mustExecMigration(`
+		UPDATE dice_bets
+		SET status = 'settled'
+		WHERE status IS NULL OR status = '';
+	`)
+
+	assertNoDuplicateGroups("dice_daily_profits(user_id, day_key)", `
+		SELECT CAST(user_id AS TEXT) || ':' || day_key AS key, COUNT(*) AS count
+		FROM dice_daily_profits
+		WHERE deleted_at IS NULL
+		GROUP BY user_id, day_key
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureDiceDailyProfitPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("dice daily profit unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("item_usage_quotas(user_id, item_name, period_key)", `
+		SELECT CAST(user_id AS TEXT) || ':' || item_name || ':' || period_key AS key, COUNT(*) AS count
+		FROM item_usage_quotas
+		WHERE deleted_at IS NULL
+		GROUP BY user_id, item_name, period_key
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureItemUsageQuotaPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("item usage quota unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("monthly_sign_in_streaks(user_id, month_key)", `
+		SELECT CAST(user_id AS TEXT) || ':' || month_key AS key, COUNT(*) AS count
+		FROM monthly_sign_in_streaks
+		WHERE deleted_at IS NULL
+		GROUP BY user_id, month_key
+		HAVING COUNT(*) > 1;
+	`)
+
+	assertNoDuplicateGroups("sign_in_streaks(user_id)", `
+		SELECT CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+		FROM sign_in_streaks
+		WHERE deleted_at IS NULL
+		GROUP BY user_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	assertNoDuplicateGroups("sect_technologies(sect_id, tech_key)", `
+		SELECT CAST(sect_id AS TEXT) || ':' || tech_key AS key, COUNT(*) AS count
+		FROM sect_technologies
+		WHERE deleted_at IS NULL
+		GROUP BY sect_id, tech_key
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureSectTechnologyUniqueIndex(DB); err != nil {
+		log.Fatalf("sect technology unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("sect_secret_realm_events(realm_id)", `
+		SELECT realm_id AS key, COUNT(*) AS count
+		FROM sect_secret_realm_events
+		WHERE deleted_at IS NULL
+		GROUP BY realm_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureSectSecretRealmEventIDPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("sect secret realm event id unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("sect_secret_realm_events(active sect_id)", `
+		SELECT CAST(sect_id AS TEXT) AS key, COUNT(*) AS count
+		FROM sect_secret_realm_events
+		WHERE status = 'active' AND deleted_at IS NULL
+		GROUP BY sect_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureSectSecretRealmActiveUniqueIndex(DB); err != nil {
+		log.Fatalf("sect secret realm active unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("sect_secret_realm_participants(realm_id, user_id)", `
+		SELECT realm_id || ':' || CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+		FROM sect_secret_realm_participants
+		WHERE deleted_at IS NULL
+		GROUP BY realm_id, user_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureSectSecretRealmParticipantPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("sect secret realm participant unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("sect_horn_broadcasts(horn_id)", `
+		SELECT horn_id AS key, COUNT(*) AS count
+		FROM sect_horn_broadcasts
+		WHERE deleted_at IS NULL
+		GROUP BY horn_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureSectHornBroadcastIDPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("sect horn broadcast id unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("sect_horn_deliveries(horn_id, user_id)", `
+		SELECT horn_id || ':' || CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+		FROM sect_horn_deliveries
+		WHERE deleted_at IS NULL
+		GROUP BY horn_id, user_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureSectHornDeliveryPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("sect horn delivery unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("sign_in_logs(user_id, sign_date)", `
+		SELECT CAST(user_id AS TEXT) || ':' || sign_date AS key, COUNT(*) AS count
+		FROM sign_in_logs
+		WHERE deleted_at IS NULL
+		GROUP BY user_id, sign_date
+		HAVING COUNT(*) > 1;
+	`)
+
+	// 7.3 创建唯一索引：同一个用户同一天只能签到一次。
+	mustExecMigration(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sign_in_logs_user_date_unique
+		ON sign_in_logs(user_id, sign_date)
+		WHERE deleted_at IS NULL;
+	`)
+
+	assertNoDuplicateGroups("sign_in_reward_claims(ref_id)", `
+		SELECT ref_id AS key, COUNT(*) AS count
+		FROM sign_in_reward_claims
+		WHERE ref_id <> '' AND deleted_at IS NULL
+		GROUP BY ref_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	// 7.4 创建唯一索引：同一轮同一档位奖励只能领取一次。
+	mustExecMigration(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sign_in_reward_claims_ref_unique
+		ON sign_in_reward_claims(ref_id)
+		WHERE ref_id <> '' AND deleted_at IS NULL;
+	`)
+
+	if err := ensureSignInPartialUniqueIndexes(DB); err != nil {
+		log.Fatalf("sign-in unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("github_benefit_claims(claimed telegram_id)", `
+		SELECT CAST(telegram_id AS TEXT) AS key, COUNT(*) AS count
+		FROM github_benefit_claims
+		WHERE status = 'claimed' AND deleted_at IS NULL
+		GROUP BY telegram_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	assertNoDuplicateGroups("github_benefit_claims(claimed github_id)", `
+		SELECT CAST(github_id AS TEXT) AS key, COUNT(*) AS count
+		FROM github_benefit_claims
+		WHERE github_id > 0 AND status = 'claimed' AND deleted_at IS NULL
+		GROUP BY github_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureGithubBenefitClaimedPartialUniqueIndexes(DB); err != nil {
+		log.Fatalf("github benefit claimed unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("cultivation_realm_configs(major_realm)", `
+		SELECT CAST(major_realm AS TEXT) AS key, COUNT(*) AS count
+		FROM cultivation_realm_configs
+		WHERE deleted_at IS NULL
+		GROUP BY major_realm
+		HAVING COUNT(*) > 1;
+	`)
+
+	assertNoDuplicateGroups("users(abs_user_id)", `
+		SELECT abs_user_id AS key, COUNT(*) AS count
+		FROM users
+		WHERE abs_user_id <> '' AND deleted_at IS NULL
+		GROUP BY abs_user_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	assertNoDuplicateGroups("cultivation_minor_realm_configs(major_realm, minor_realm)", `
+		SELECT CAST(major_realm AS TEXT) || ':' || CAST(minor_realm AS TEXT) AS key, COUNT(*) AS count
+		FROM cultivation_minor_realm_configs
+		WHERE deleted_at IS NULL
+		GROUP BY major_realm, minor_realm
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureCultivationMinorRealmConfigPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("cultivation minor realm config unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("breakthrough_configs(from_major_realm)", `
+		SELECT CAST(from_major_realm AS TEXT) AS key, COUNT(*) AS count
+		FROM breakthrough_configs
+		WHERE deleted_at IS NULL
+		GROUP BY from_major_realm
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureCultivationConfigPartialUniqueIndexes(DB); err != nil {
+		log.Fatalf("cultivation config unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	if err := seedDefaultCultivationConfigs(); err != nil {
+		log.Fatalf("cultivation config seed after index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	// 8. 创建唯一索引：ABS 用户 ID 不允许重复绑定。
+	if err := ensureUsersAbsUserIDPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("users abs_user_id unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("sects(name)", `
+		SELECT name AS key, COUNT(*) AS count
+		FROM sects
+		WHERE deleted_at IS NULL
+		GROUP BY name
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureSectNamePartialUniqueIndex(DB); err != nil {
+		log.Fatalf("sect name unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("sect_members(user_id)", `
+		SELECT CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+		FROM sect_members
+		WHERE deleted_at IS NULL
+		GROUP BY user_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureSectMemberUserPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("sect member user unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("sect_daily_task_claims(user_id, day_key)", `
+		SELECT CAST(user_id AS TEXT) || ':' || day_key AS key, COUNT(*) AS count
+		FROM sect_daily_task_claims
+		WHERE deleted_at IS NULL
+		GROUP BY user_id, day_key
+		HAVING COUNT(*) > 1;
+	`)
+
+	assertNoDuplicateGroups("sect_weekly_task_settlements(sect_id, week_key)", `
+		SELECT CAST(sect_id AS TEXT) || ':' || week_key AS key, COUNT(*) AS count
+		FROM sect_weekly_task_settlements
+		WHERE deleted_at IS NULL
+		GROUP BY sect_id, week_key
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureSectTaskRewardPartialUniqueIndexes(DB); err != nil {
+		log.Fatalf("sect task reward unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("sect_listening_daily_progresses(user_id, day_key)", `
+		SELECT CAST(user_id AS TEXT) || ':' || day_key AS key, COUNT(*) AS count
+		FROM sect_listening_daily_progresses
+		WHERE deleted_at IS NULL
+		GROUP BY user_id, day_key
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureSectListeningDailyProgressPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("sect listening daily progress unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("daily_listening_stats(user_id, day_key)", `
+		SELECT CAST(user_id AS TEXT) || ':' || day_key AS key, COUNT(*) AS count
+		FROM daily_listening_stats
+		WHERE deleted_at IS NULL
+		GROUP BY user_id, day_key
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureDailyListeningStatsPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("daily listening stats unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("referral_codes(user_id)", `
+		SELECT CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+		FROM referral_codes
+		WHERE deleted_at IS NULL
+		GROUP BY user_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	assertNoDuplicateGroups("referral_codes(code)", `
+		SELECT code AS key, COUNT(*) AS count
+		FROM referral_codes
+		WHERE deleted_at IS NULL
+		GROUP BY code
+		HAVING COUNT(*) > 1;
+	`)
+
+	assertNoDuplicateGroups("referral_activations(invitee_id)", `
+		SELECT CAST(invitee_id AS TEXT) AS key, COUNT(*) AS count
+		FROM referral_activations
+		WHERE deleted_at IS NULL
+		GROUP BY invitee_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureReferralPartialUniqueIndexes(DB); err != nil {
+		log.Fatalf("referral unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	mustExecMigration(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_daily_activation_quotas_unique
+		ON referral_daily_activation_quotas(inviter_id, day_key);
+	`)
+
+	mustExecMigration(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_monthly_reward_quotas_unique
+		ON referral_monthly_reward_quotas(inviter_id, month_key);
+	`)
+
+	mustExecMigration(`
+		UPDATE referral_activations
+		SET activation_day_key = strftime('%Y-%m-%d', created_at, '+8 hours')
+		WHERE deleted_at IS NULL
+		  AND (activation_day_key IS NULL OR activation_day_key = '');
+	`)
+
+	mustExecMigration(`
+		INSERT INTO referral_daily_activation_quotas (
+			created_at,
+			updated_at,
+			inviter_id,
+			day_key,
+			activation_count
+		)
+		SELECT
+			CURRENT_TIMESTAMP,
+			CURRENT_TIMESTAMP,
+			inviter_id,
+			activation_day_key,
+			COUNT(*)
+		FROM referral_activations
+		WHERE deleted_at IS NULL
+		  AND activation_day_key <> ''
+		GROUP BY inviter_id, activation_day_key
+		ON CONFLICT(inviter_id, day_key) DO UPDATE SET
+			activation_count = MAX(referral_daily_activation_quotas.activation_count, excluded.activation_count),
+			updated_at = excluded.updated_at;
+	`)
+
+	mustExecMigration(`
+		INSERT INTO referral_monthly_reward_quotas (
+			created_at,
+			updated_at,
+			inviter_id,
+			month_key,
+			reward_points
+		)
+		SELECT
+			CURRENT_TIMESTAMP,
+			CURRENT_TIMESTAMP,
+			inviter_id,
+			reward_month_key,
+			COALESCE(SUM(reward_points), 0)
+		FROM referral_activations
+		WHERE deleted_at IS NULL
+		  AND reward_month_key <> ''
+		GROUP BY inviter_id, reward_month_key
+		ON CONFLICT(inviter_id, month_key) DO UPDATE SET
+			reward_points = MAX(referral_monthly_reward_quotas.reward_points, excluded.reward_points),
+			updated_at = excluded.updated_at;
+	`)
+
+	assertNoDuplicateGroups("listening_abuse_records(user_id, day_key, action)", `
+		SELECT CAST(user_id AS TEXT) || ':' || day_key || ':' || action AS key, COUNT(*) AS count
+		FROM listening_abuse_records
+		WHERE deleted_at IS NULL
+		GROUP BY user_id, day_key, action
+		HAVING COUNT(*) > 1;
+	`)
+
+	assertNoDuplicateGroups("listening_abuse_records(active freeze user)", `
+		SELECT CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+		FROM listening_abuse_records
+		WHERE deleted_at IS NULL AND action = 'freeze' AND status = 'active'
+		GROUP BY user_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureListeningAbuseRecordPartialUniqueIndexes(DB); err != nil {
+		log.Fatalf("listening abuse record unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	mustExecMigration(`
+		INSERT OR IGNORE INTO daily_listening_stats (
+			created_at,
+			updated_at,
+			user_id,
+			day_key,
+			raw_seconds,
+			capped_seconds,
+			effective_hours,
+			last_fetched_at,
+			source
+		)
+		SELECT
+			created_at,
+			updated_at,
+			user_id,
+			day_key,
+			raw_seconds,
+			CASE WHEN raw_seconds > 86400 THEN 86400 ELSE raw_seconds END,
+			effective_hours,
+			last_fetched_at,
+			'legacy_sect_cache'
+		FROM sect_listening_daily_progresses
+		WHERE deleted_at IS NULL
+		  AND raw_seconds > 0;
+	`)
+
+	mustExecMigration(`
+		DELETE FROM world_boss_participants
+		WHERE id NOT IN (
+			SELECT keep_id FROM (
+				SELECT MIN(id) AS keep_id
+				FROM world_boss_participants
+				WHERE deleted_at IS NULL
+				GROUP BY boss_id, user_id
+			)
+		)
+		AND deleted_at IS NULL;
+	`)
+
+	assertNoDuplicateGroups("world_boss_events(boss_id)", `
+		SELECT boss_id AS key, COUNT(*) AS count
+		FROM world_boss_events
+		WHERE deleted_at IS NULL
+		GROUP BY boss_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureWorldBossEventIDPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("world boss event id unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("world_boss_participants(boss_id, user_id)", `
+		SELECT boss_id || ':' || CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+		FROM world_boss_participants
+		WHERE deleted_at IS NULL
+		GROUP BY boss_id, user_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureWorldBossParticipantPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("world boss participant unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	mustExecMigration(`
+		CREATE INDEX IF NOT EXISTS idx_book_requests_status_last_action
+		ON book_requests(status, last_action_at);
+	`)
+
+	mustExecMigration(`
+		CREATE INDEX IF NOT EXISTS idx_book_requests_assignee_status
+		ON book_requests(assignee_id, status);
+	`)
+
+	mustExecMigration(`
+		UPDATE book_requests
+		SET last_action_at = updated_at
+		WHERE last_action_at IS NULL;
+	`)
+
+	assertNoDuplicateGroups("lottery_participants(activity_id, user_id)", `
+		SELECT CAST(activity_id AS TEXT) || ':' || CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+		FROM lottery_participants
+		WHERE deleted_at IS NULL
+		GROUP BY activity_id, user_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	assertNoDuplicateGroups("lottery_winners(activity_id, user_id)", `
+		SELECT CAST(activity_id AS TEXT) || ':' || CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+		FROM lottery_winners
+		WHERE deleted_at IS NULL
+		GROUP BY activity_id, user_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureLotteryEntryPartialUniqueIndexes(DB); err != nil {
+		log.Fatalf("lottery entry unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("garden_plots(user_id, plot_no)", `
+		SELECT CAST(user_id AS TEXT) || ':' || CAST(plot_no AS TEXT) AS key, COUNT(*) AS count
+		FROM garden_plots
+		WHERE deleted_at IS NULL
+		GROUP BY user_id, plot_no
+		HAVING COUNT(*) > 1;
+	`)
+
+	assertNoDuplicateGroups("garden_plantings(active plot)", `
+		SELECT CAST(plot_id AS TEXT) AS key, COUNT(*) AS count
+		FROM garden_plantings
+		WHERE deleted_at IS NULL AND status = 'growing'
+		GROUP BY plot_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureGardenPlotPartialUniqueIndexes(DB); err != nil {
+		log.Fatalf("garden plot unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("garden_seed_purchases(user_id, seed_key, day_key)", `
+		SELECT CAST(user_id AS TEXT) || ':' || seed_key || ':' || day_key AS key, COUNT(*) AS count
+		FROM garden_seed_purchases
+		WHERE deleted_at IS NULL
+		GROUP BY user_id, seed_key, day_key
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureGardenSeedPurchasePartialUniqueIndex(DB); err != nil {
+		log.Fatalf("garden seed purchase unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("garden_herb_market_sales(user_id, seed_key, day_key)", `
+		SELECT CAST(user_id AS TEXT) || ':' || seed_key || ':' || day_key AS key, COUNT(*) AS count
+		FROM garden_herb_market_sales
+		WHERE deleted_at IS NULL
+		GROUP BY user_id, seed_key, day_key
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureGardenHerbMarketSalePartialUniqueIndex(DB); err != nil {
+		log.Fatalf("garden herb market sale unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("garden_recipe_unlocks(user_id, recipe_key)", `
+		SELECT CAST(user_id AS TEXT) || ':' || recipe_key AS key, COUNT(*) AS count
+		FROM garden_recipe_unlocks
+		WHERE deleted_at IS NULL
+		GROUP BY user_id, recipe_key
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureGardenRecipeUnlockPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("garden recipe unlock unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("sect_cave_retreats(active user)", `
+		SELECT CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+		FROM sect_cave_retreats
+		WHERE deleted_at IS NULL AND status = 'active'
+		GROUP BY user_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureSectCaveRetreatActivePartialUniqueIndex(DB); err != nil {
+		log.Fatalf("sect cave retreat unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	if installed, err := ensureMarketplaceOpenDisputeUniqueIndex(DB); err != nil {
+		log.Fatalf("marketplace open dispute unique index migration failed; startup blocked: %s", formatPlainError(err))
+	} else if !installed {
+		log.Fatal("duplicate marketplace open disputes detected; startup blocked. Resolve duplicate marketplace_disputes rows before restart")
+	}
+
+	if installed, err := ensureMarketplaceActiveSecretHashUniqueIndex(DB); err != nil {
+		log.Fatalf("marketplace active secret hash unique index migration failed; startup blocked: %s", formatPlainError(err))
+	} else if !installed {
+		log.Fatal("duplicate active marketplace secret hashes detected; startup blocked. Resolve duplicate marketplace_secrets rows before restart")
+	}
+
+	assertNoDuplicateGroups("marketplace_purchases(secret_id)", `
+		SELECT CAST(secret_id AS TEXT) AS key, COUNT(*) AS count
+		FROM marketplace_purchases
+		WHERE secret_id > 0 AND deleted_at IS NULL
+		GROUP BY secret_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureMarketplacePurchaseSecretPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("marketplace purchase secret unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	markMigrationAppliedIfMissing("20260101_consistency_indexes")
+	log.Println("consistency migration completed")
+}
+
+func runSectLotteryMigrations() {
+	runOneTimeMigration("20260618_sect_lottery_indexes", func() error {
+		assertNoDuplicateGroups("sect_lottery_entries(lottery_id, user_id)", `
+			SELECT CAST(lottery_id AS TEXT) || ':' || CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+			FROM sect_lottery_entries
+			WHERE deleted_at IS NULL
+			GROUP BY lottery_id, user_id
+			HAVING COUNT(*) > 1;
+		`)
+
+		assertNoDuplicateGroups("sect_lottery_winners(lottery_id, user_id)", `
+			SELECT CAST(lottery_id AS TEXT) || ':' || CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+			FROM sect_lottery_winners
+			WHERE deleted_at IS NULL
+			GROUP BY lottery_id, user_id
+			HAVING COUNT(*) > 1;
+		`)
+
+		assertNoDuplicateGroups("sect_lottery_winners(lottery_id, prize_id)", `
+			SELECT CAST(lottery_id AS TEXT) || ':' || CAST(prize_id AS TEXT) AS key, COUNT(*) AS count
+			FROM sect_lottery_winners
+			WHERE deleted_at IS NULL
+			GROUP BY lottery_id, prize_id
+			HAVING COUNT(*) > 1;
+		`)
+
+		if err := ensureSectLotteryPartialUniqueIndexes(DB); err != nil {
+			return fmt.Errorf("sect lottery unique index migration failed: %w", err)
+		}
+
+		return nil
+	})
+
+	runOneTimeMigration("20260618_sect_lottery_reminder_indexes", func() error {
+		assertNoDuplicateGroups("sect_lottery_reminders(lottery_id, user_id)", `
+			SELECT CAST(lottery_id AS TEXT) || ':' || CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+			FROM sect_lottery_reminders
+			GROUP BY lottery_id, user_id
+			HAVING COUNT(*) > 1;
+		`)
+
+		mustExecMigration(`
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_lottery_reminders_lottery_user_unique
+			ON sect_lottery_reminders(lottery_id, user_id);
+		`)
+
+		return nil
+	})
+
+	runOneTimeMigration("20260623_sect_lottery_partial_unique_indexes", func() error {
+		assertNoDuplicateGroups("sect_lottery_entries(lottery_id, user_id)", `
+			SELECT CAST(lottery_id AS TEXT) || ':' || CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+			FROM sect_lottery_entries
+			WHERE deleted_at IS NULL
+			GROUP BY lottery_id, user_id
+			HAVING COUNT(*) > 1;
+		`)
+
+		assertNoDuplicateGroups("sect_lottery_winners(lottery_id, user_id)", `
+			SELECT CAST(lottery_id AS TEXT) || ':' || CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+			FROM sect_lottery_winners
+			WHERE deleted_at IS NULL
+			GROUP BY lottery_id, user_id
+			HAVING COUNT(*) > 1;
+		`)
+
+		assertNoDuplicateGroups("sect_lottery_winners(lottery_id, prize_id)", `
+			SELECT CAST(lottery_id AS TEXT) || ':' || CAST(prize_id AS TEXT) AS key, COUNT(*) AS count
+			FROM sect_lottery_winners
+			WHERE deleted_at IS NULL
+			GROUP BY lottery_id, prize_id
+			HAVING COUNT(*) > 1;
+		`)
+
+		return ensureSectLotteryPartialUniqueIndexes(DB)
+	})
+}
+
+type duplicateGroup struct {
+	Key   string `gorm:"column:key"`
+	Count int64  `gorm:"column:count"`
+}
+
+func migrationAlreadyApplied(version string) bool {
+	var m SchemaMigration
+	err := DB.Where("version = ?", version).First(&m).Error
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false
+	}
+	log.Fatalf("schema migration version lookup failed; startup blocked: version=%s err=%s", formatPlainValue(version), formatPlainError(err))
+	return false
+}
+
+func markMigrationAppliedIfMissing(version string) {
+	if migrationAlreadyApplied(version) {
+		return
+	}
+
+	res := DB.Create(&SchemaMigration{
+		Version:   version,
+		AppliedAt: time.Now(),
+	})
+	if res.Error != nil {
+		err := res.Error
+		log.Fatalf("schema migration version record failed; startup blocked: version=%s err=%s", formatPlainValue(version), formatPlainError(err))
+	}
+	if res.RowsAffected == 0 {
+		err := fmt.Errorf("SCHEMA_MIGRATION_CREATE_MISSED")
+		log.Fatalf("schema migration version record missed; startup blocked: version=%s err=%s", formatPlainValue(version), formatPlainError(err))
+	}
+}
+
+func runOneTimeMigration(version string, fn func() error) {
+	if migrationAlreadyApplied(version) {
+		log.Printf("schema migration already applied; skip: version=%s", formatPlainValue(version))
+		return
+	}
+
+	if err := fn(); err != nil {
+		log.Fatalf("schema migration failed; startup blocked: version=%s err=%s", formatPlainValue(version), formatPlainError(err))
+	}
+
+	markMigrationAppliedIfMissing(version)
+	log.Printf("schema migration completed: version=%s", formatPlainValue(version))
+}
+
+func assertNoDuplicateGroups(title string, sql string) {
+	var dups []duplicateGroup
+	if err := DB.Raw(sql).Scan(&dups).Error; err != nil {
+		log.Fatalf("data consistency precheck failed; startup blocked: title=%s err=%s", formatPlainValue(title), formatPlainError(err))
+	}
+
+	if len(dups) == 0 {
+		return
+	}
+
+	log.Printf("data consistency precheck failed: title=%s duplicate rows detected", formatPlainValue(title))
+	for i, d := range dups {
+		if i >= 20 {
+			log.Printf("... remaining duplicate groups omitted; query the database directly for details")
+			break
+		}
+		log.Printf("duplicate group: key=%s count=%d", formatPlainValue(d.Key), d.Count)
+	}
+
+	log.Fatalf("duplicate data detected; startup blocked. Clean conflicting rows first: title=%s", formatPlainValue(title))
+}
+
+func ensureSoftDeletePartialUniqueIndex(db *gorm.DB, indexName string, createSQL string) error {
+	if db == nil {
+		return fmt.Errorf("DB_EMPTY")
+	}
+	if strings.TrimSpace(indexName) == "" || strings.TrimSpace(createSQL) == "" {
+		return fmt.Errorf("INDEX_MIGRATION_INVALID")
+	}
+
+	var existing struct {
+		SQL string `gorm:"column:sql"`
+	}
+	if err := db.Raw(`
+		SELECT sql
+		FROM sqlite_master
+		WHERE type = 'index'
+		  AND name = ?;
+	`, indexName).Scan(&existing).Error; err != nil {
+		return err
+	}
+
+	if existing.SQL != "" && !sqliteIndexDefinitionsEqual(existing.SQL, createSQL) {
+		if err := db.Exec(fmt.Sprintf("DROP INDEX IF EXISTS %s;", indexName)).Error; err != nil {
+			return err
+		}
+	}
+
+	return db.Exec(createSQL).Error
+}
+
+func sqliteIndexDefinitionsEqual(existingSQL string, desiredSQL string) bool {
+	return sqliteIndexDefinitionSignature(existingSQL) == sqliteIndexDefinitionSignature(desiredSQL)
+}
+
+func sqliteIndexDefinitionSignature(sql string) string {
+	normalized := strings.ToLower(strings.TrimSpace(sql))
+	normalized = strings.TrimRight(normalized, " ;")
+	normalized = strings.Join(strings.Fields(normalized), " ")
+	normalized = strings.Replace(normalized, "create unique index if not exists ", "create unique index ", 1)
+	normalized = strings.Replace(normalized, "create index if not exists ", "create index ", 1)
+	return normalized
+}
+
+func ensureCultivationMinorRealmConfigPartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_cultivation_minor_realm_configs_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_cultivation_minor_realm_configs_unique
+		ON cultivation_minor_realm_configs(major_realm, minor_realm)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureCultivationConfigPartialUniqueIndexes(db *gorm.DB) error {
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_cultivation_realm_configs_major_realm", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_cultivation_realm_configs_major_realm
+		ON cultivation_realm_configs(major_realm)
+		WHERE deleted_at IS NULL;
+	`); err != nil {
+		return err
+	}
+
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_breakthrough_configs_from_major_realm", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_breakthrough_configs_from_major_realm
+		ON breakthrough_configs(from_major_realm)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureUsersAbsUserIDPartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_users_abs_user_id_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_users_abs_user_id_unique
+		ON users(abs_user_id)
+		WHERE abs_user_id <> '' AND deleted_at IS NULL;
+	`)
+}
+
+func ensureSectNamePartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_sects_name", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sects_name
+		ON sects(name)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureSectMemberUserPartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_sect_members_user_id", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_members_user_id
+		ON sect_members(user_id)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureSystemConfigKeyPartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_system_configs_key", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_system_configs_key
+		ON system_configs(key)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureGardenSeedPurchasePartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_garden_seed_purchases_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_garden_seed_purchases_unique
+		ON garden_seed_purchases(user_id, seed_key, day_key)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureGardenHerbMarketSalePartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_garden_herb_market_sales_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_garden_herb_market_sales_unique
+		ON garden_herb_market_sales(user_id, seed_key, day_key)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureGardenRecipeUnlockPartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_garden_recipe_unlocks_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_garden_recipe_unlocks_unique
+		ON garden_recipe_unlocks(user_id, recipe_key)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureItemUsageQuotaPartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_item_usage_quotas_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_item_usage_quotas_unique
+		ON item_usage_quotas(user_id, item_name, period_key)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureSectShopRenewClaimPartialUniqueIndexes(db *gorm.DB) error {
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_sect_shop_renew_claim_slot", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_shop_renew_claim_slot
+		ON sect_shop_renew_claims(sect_id, month_key, slot_no)
+		WHERE deleted_at IS NULL;
+	`); err != nil {
+		return err
+	}
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_sect_shop_renew_claim_user_month", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_shop_renew_claim_user_month
+		ON sect_shop_renew_claims(user_id, month_key)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureSignInPartialUniqueIndexes(db *gorm.DB) error {
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_monthly_sign_in_streaks_user_month_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_monthly_sign_in_streaks_user_month_unique
+		ON monthly_sign_in_streaks(user_id, month_key)
+		WHERE deleted_at IS NULL;
+	`); err != nil {
+		return err
+	}
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_sign_in_streaks_user_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sign_in_streaks_user_unique
+		ON sign_in_streaks(user_id)
+		WHERE deleted_at IS NULL;
+	`); err != nil {
+		return err
+	}
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_sign_in_logs_user_date_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sign_in_logs_user_date_unique
+		ON sign_in_logs(user_id, sign_date)
+		WHERE deleted_at IS NULL;
+	`); err != nil {
+		return err
+	}
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_sign_in_reward_claims_ref_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sign_in_reward_claims_ref_unique
+		ON sign_in_reward_claims(ref_id)
+		WHERE ref_id <> '' AND deleted_at IS NULL;
+	`)
+}
+
+func ensureReferralPartialUniqueIndexes(db *gorm.DB) error {
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_referral_codes_user_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_codes_user_unique
+		ON referral_codes(user_id)
+		WHERE deleted_at IS NULL;
+	`); err != nil {
+		return err
+	}
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_referral_codes_code_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_codes_code_unique
+		ON referral_codes(code)
+		WHERE deleted_at IS NULL;
+	`); err != nil {
+		return err
+	}
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_referral_activations_invitee_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_activations_invitee_unique
+		ON referral_activations(invitee_id)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureGithubBenefitClaimedPartialUniqueIndexes(db *gorm.DB) error {
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_github_benefit_claims_tg_claimed_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_github_benefit_claims_tg_claimed_unique
+		ON github_benefit_claims(telegram_id)
+		WHERE status = 'claimed' AND deleted_at IS NULL;
+	`); err != nil {
+		return err
+	}
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_github_benefit_claims_github_claimed_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_github_benefit_claims_github_claimed_unique
+		ON github_benefit_claims(github_id)
+		WHERE github_id > 0 AND status = 'claimed' AND deleted_at IS NULL;
+	`)
+}
+
+func ensureSectTaskRewardPartialUniqueIndexes(db *gorm.DB) error {
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_sect_daily_task_claims_user_day_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_daily_task_claims_user_day_unique
+		ON sect_daily_task_claims(user_id, day_key)
+		WHERE deleted_at IS NULL;
+	`); err != nil {
+		return err
+	}
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_sect_weekly_task_settlements_sect_week_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_weekly_task_settlements_sect_week_unique
+		ON sect_weekly_task_settlements(sect_id, week_key)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureSectSecretRealmParticipantPartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_sect_secret_realm_participants_realm_user_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_secret_realm_participants_realm_user_unique
+		ON sect_secret_realm_participants(realm_id, user_id)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureSectHornBroadcastIDPartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_sect_horn_broadcasts_horn_id", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_horn_broadcasts_horn_id
+		ON sect_horn_broadcasts(horn_id)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureSectHornDeliveryPartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_sect_horn_deliveries_horn_user_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_horn_deliveries_horn_user_unique
+		ON sect_horn_deliveries(horn_id, user_id)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureWorldBossEventIDPartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_world_boss_events_boss_id", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_world_boss_events_boss_id
+		ON world_boss_events(boss_id)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureWorldBossParticipantPartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_world_boss_participants_boss_user_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_world_boss_participants_boss_user_unique
+		ON world_boss_participants(boss_id, user_id)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureLotteryEntryPartialUniqueIndexes(db *gorm.DB) error {
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_lottery_participants_activity_user_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_lottery_participants_activity_user_unique
+		ON lottery_participants(activity_id, user_id)
+		WHERE deleted_at IS NULL;
+	`); err != nil {
+		return err
+	}
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_lottery_winners_activity_user_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_lottery_winners_activity_user_unique
+		ON lottery_winners(activity_id, user_id)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureListeningAbuseRecordPartialUniqueIndexes(db *gorm.DB) error {
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_listening_abuse_records_user_day_action_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_listening_abuse_records_user_day_action_unique
+		ON listening_abuse_records(user_id, day_key, action)
+		WHERE deleted_at IS NULL;
+	`); err != nil {
+		return err
+	}
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_listening_abuse_records_active_user_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_listening_abuse_records_active_user_unique
+		ON listening_abuse_records(user_id)
+		WHERE deleted_at IS NULL AND action = 'freeze' AND status = 'active';
+	`)
+}
+
+func ensureMarketplacePurchaseSecretPartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_marketplace_purchases_secret_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_marketplace_purchases_secret_unique
+		ON marketplace_purchases(secret_id)
+		WHERE secret_id > 0 AND deleted_at IS NULL;
+	`)
+}
+
+func ensureSectLotteryPartialUniqueIndexes(db *gorm.DB) error {
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_sect_lottery_entries_lottery_user_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_lottery_entries_lottery_user_unique
+		ON sect_lottery_entries(lottery_id, user_id)
+		WHERE deleted_at IS NULL;
+	`); err != nil {
+		return err
+	}
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_sect_lottery_winners_lottery_user_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_lottery_winners_lottery_user_unique
+		ON sect_lottery_winners(lottery_id, user_id)
+		WHERE deleted_at IS NULL;
+	`); err != nil {
+		return err
+	}
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_sect_lottery_winners_lottery_prize_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_lottery_winners_lottery_prize_unique
+		ON sect_lottery_winners(lottery_id, prize_id)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureSensitiveCodeHashPartialUniqueIndexes(db *gorm.DB) error {
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_invite_codes_code_hash_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_invite_codes_code_hash_unique
+		ON invite_codes(code_hash)
+		WHERE code_hash <> '' AND deleted_at IS NULL;
+	`); err != nil {
+		return err
+	}
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_renew_codes_code_hash_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_renew_codes_code_hash_unique
+		ON renew_codes(code_hash)
+		WHERE code_hash <> '' AND deleted_at IS NULL;
+	`)
+}
+
+func ensureSecurityAttemptLockPartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_security_attempt_locks_user_purpose_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_security_attempt_locks_user_purpose_unique
+		ON security_attempt_locks(user_id, purpose)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureGardenPlotPartialUniqueIndexes(db *gorm.DB) error {
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_garden_plots_user_plot_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_garden_plots_user_plot_unique
+		ON garden_plots(user_id, plot_no)
+		WHERE deleted_at IS NULL;
+	`); err != nil {
+		return err
+	}
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_garden_plantings_active_plot_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_garden_plantings_active_plot_unique
+		ON garden_plantings(plot_id)
+		WHERE deleted_at IS NULL AND status = 'growing';
+	`)
+}
+
+func ensureSectCaveRetreatActivePartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_sect_cave_retreats_active_user_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_cave_retreats_active_user_unique
+		ON sect_cave_retreats(user_id)
+		WHERE deleted_at IS NULL AND status = 'active';
+	`)
+}
+
+func ensureInventoryPartialUniqueIndex(db *gorm.DB) error {
+	if db == nil {
+		return fmt.Errorf("DB_EMPTY")
+	}
+
+	var existing struct {
+		SQL string `gorm:"column:sql"`
+	}
+	if err := db.Raw(`
+		SELECT sql
+		FROM sqlite_master
+		WHERE type = 'index'
+		  AND name = 'idx_inventory_user_item_unique';
+	`).Scan(&existing).Error; err != nil {
+		return err
+	}
+
+	normalized := strings.ToLower(existing.SQL)
+	if existing.SQL != "" &&
+		!(strings.Contains(normalized, "where") &&
+			strings.Contains(normalized, "deleted_at") &&
+			strings.Contains(normalized, "null")) {
+		if err := db.Exec(`DROP INDEX IF EXISTS idx_inventory_user_item_unique;`).Error; err != nil {
+			return err
+		}
+	}
+
+	return db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_user_item_unique
+		ON inventories(user_id, item_name)
+		WHERE deleted_at IS NULL;
+	`).Error
+}
+
+func ensureDiceDailyProfitPartialUniqueIndex(db *gorm.DB) error {
+	if db == nil {
+		return fmt.Errorf("DB_EMPTY")
+	}
+
+	var existing struct {
+		SQL string `gorm:"column:sql"`
+	}
+	if err := db.Raw(`
+		SELECT sql
+		FROM sqlite_master
+		WHERE type = 'index'
+		  AND name = 'idx_dice_daily_profits_user_day_unique';
+	`).Scan(&existing).Error; err != nil {
+		return err
+	}
+
+	normalized := strings.ToLower(existing.SQL)
+	if existing.SQL != "" &&
+		!(strings.Contains(normalized, "where") &&
+			strings.Contains(normalized, "deleted_at") &&
+			strings.Contains(normalized, "null")) {
+		if err := db.Exec(`DROP INDEX IF EXISTS idx_dice_daily_profits_user_day_unique;`).Error; err != nil {
+			return err
+		}
+	}
+
+	return db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_dice_daily_profits_user_day_unique
+		ON dice_daily_profits(user_id, day_key)
+		WHERE deleted_at IS NULL;
+	`).Error
+}
+
+func ensureSectTechnologyUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_sect_technologies_sect_key_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_technologies_sect_key_unique
+		ON sect_technologies(sect_id, tech_key)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureSectSecretRealmEventIDPartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_sect_secret_realm_events_realm_id", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_secret_realm_events_realm_id
+		ON sect_secret_realm_events(realm_id)
+		WHERE deleted_at IS NULL;
+	`)
+}
+
+func ensureSectSecretRealmActiveUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_sect_secret_realm_events_active_sect_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_secret_realm_events_active_sect_unique
+		ON sect_secret_realm_events(sect_id)
+		WHERE status = 'active' AND deleted_at IS NULL;
+	`)
+}
+
+func ensureSectListeningDailyProgressPartialUniqueIndex(db *gorm.DB) error {
+	if db == nil {
+		return fmt.Errorf("DB_EMPTY")
+	}
+
+	var existing struct {
+		SQL string `gorm:"column:sql"`
+	}
+	if err := db.Raw(`
+		SELECT sql
+		FROM sqlite_master
+		WHERE type = 'index'
+		  AND name = 'idx_sect_listening_daily_progresses_user_day_unique';
+	`).Scan(&existing).Error; err != nil {
+		return err
+	}
+
+	normalized := strings.ToLower(existing.SQL)
+	if existing.SQL != "" &&
+		!(strings.Contains(normalized, "where") &&
+			strings.Contains(normalized, "deleted_at") &&
+			strings.Contains(normalized, "null")) {
+		if err := db.Exec(`DROP INDEX IF EXISTS idx_sect_listening_daily_progresses_user_day_unique;`).Error; err != nil {
+			return err
+		}
+	}
+
+	return db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_listening_daily_progresses_user_day_unique
+		ON sect_listening_daily_progresses(user_id, day_key)
+		WHERE deleted_at IS NULL;
+	`).Error
+}
+
+func ensureDailyListeningStatsPartialUniqueIndex(db *gorm.DB) error {
+	if db == nil {
+		return fmt.Errorf("DB_EMPTY")
+	}
+
+	var existing struct {
+		SQL string `gorm:"column:sql"`
+	}
+	if err := db.Raw(`
+		SELECT sql
+		FROM sqlite_master
+		WHERE type = 'index'
+		  AND name = 'idx_daily_listening_stats_user_day_unique';
+	`).Scan(&existing).Error; err != nil {
+		return err
+	}
+
+	normalized := strings.ToLower(existing.SQL)
+	if existing.SQL != "" &&
+		!(strings.Contains(normalized, "where") &&
+			strings.Contains(normalized, "deleted_at") &&
+			strings.Contains(normalized, "null")) {
+		if err := db.Exec(`DROP INDEX IF EXISTS idx_daily_listening_stats_user_day_unique;`).Error; err != nil {
+			return err
+		}
+	}
+
+	return db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_listening_stats_user_day_unique
+		ON daily_listening_stats(user_id, day_key)
+		WHERE deleted_at IS NULL;
+	`).Error
+}
+
+func ensureMarketplaceOpenDisputeUniqueIndex(db *gorm.DB) (bool, error) {
+	dups, err := marketplaceOpenDisputeDuplicateGroups(db)
+	if err != nil {
+		return false, err
+	}
+	if len(dups) > 0 {
+		for i, d := range dups {
+			if i >= 20 {
+				log.Println("... remaining duplicate marketplace open disputes omitted; query marketplace_disputes directly")
+				break
+			}
+			log.Printf("duplicate marketplace open dispute: purchase_key=%s count=%d", formatPlainValue(d.Key), d.Count)
+		}
+		return false, nil
+	}
+
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_marketplace_disputes_open_purchase_buyer_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_marketplace_disputes_open_purchase_buyer_unique
+		ON marketplace_disputes(purchase_id, buyer_id)
+		WHERE status = 'open' AND deleted_at IS NULL;
+	`); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func marketplaceOpenDisputeDuplicateGroups(db *gorm.DB) ([]duplicateGroup, error) {
+	var dups []duplicateGroup
+	if db == nil {
+		return dups, fmt.Errorf("db is nil")
+	}
+	err := db.Raw(`
+		SELECT CAST(purchase_id AS TEXT) || ':' || CAST(buyer_id AS TEXT) AS key, COUNT(*) AS count
+		FROM marketplace_disputes
+		WHERE status = 'open' AND deleted_at IS NULL
+		GROUP BY purchase_id, buyer_id
+		HAVING COUNT(*) > 1;
+	`).Scan(&dups).Error
+	return dups, err
+}
+
+func ensureMarketplaceActiveSecretHashUniqueIndex(db *gorm.DB) (bool, error) {
+	dups, err := marketplaceActiveSecretHashDuplicateGroups(db)
+	if err != nil {
+		return false, err
+	}
+	if len(dups) > 0 {
+		for i, d := range dups {
+			if i >= 20 {
+				log.Println("... remaining duplicate available marketplace secret hashes omitted; query marketplace_secrets directly")
+				break
+			}
+			log.Printf("duplicate available marketplace secret hash: code_hash=%s count=%d", formatPlainValue(d.Key), d.Count)
+		}
+		closed, err := quarantineDuplicateMarketplaceAvailableSecrets(db, dups)
+		if err != nil {
+			return false, err
+		}
+		if closed > 0 {
+			log.Printf("quarantined duplicate available marketplace secrets: closed=%d", closed)
+		}
+	}
+
+	if err := ensureSoftDeletePartialUniqueIndex(db, "idx_marketplace_secrets_active_code_hash_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_marketplace_secrets_active_code_hash_unique
+		ON marketplace_secrets(code_hash)
+		WHERE code_hash <> '' AND status = 'available' AND deleted_at IS NULL;
+	`); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func marketplaceActiveSecretHashDuplicateGroups(db *gorm.DB) ([]duplicateGroup, error) {
+	var dups []duplicateGroup
+	if db == nil {
+		return dups, fmt.Errorf("db is nil")
+	}
+	err := db.Raw(`
+		SELECT code_hash AS key, COUNT(*) AS count
+		FROM marketplace_secrets
+		WHERE code_hash <> '' AND status = 'available' AND deleted_at IS NULL
+		GROUP BY code_hash
+		HAVING COUNT(*) > 1;
+	`).Scan(&dups).Error
+	return dups, err
+}
+
+func quarantineDuplicateMarketplaceAvailableSecrets(db *gorm.DB, dups []duplicateGroup) (int64, error) {
+	if db == nil {
+		return 0, fmt.Errorf("db is nil")
+	}
+	var total int64
+	now := time.Now()
+
+	for _, dup := range dups {
+		var keepID uint
+		if err := db.Model(&MarketplaceSecret{}).
+			Where("code_hash = ? AND status = ? AND deleted_at IS NULL", dup.Key, marketplaceSecretAvailable).
+			Order("id ASC").
+			Limit(1).
+			Pluck("id", &keepID).Error; err != nil {
+			return total, err
+		}
+		if keepID == 0 {
+			continue
+		}
+
+		res := db.Model(&MarketplaceSecret{}).
+			Where("code_hash = ? AND status = ? AND id <> ? AND deleted_at IS NULL", dup.Key, marketplaceSecretAvailable, keepID).
+			Updates(map[string]interface{}{
+				"status":     marketplaceSecretClosed,
+				"updated_at": now,
+			})
+		if res.Error != nil {
+			return total, res.Error
+		}
+		total += res.RowsAffected
+	}
+
+	if total > 0 {
+		if err := writeAuditLogInTx(
+			db,
+			0,
+			"MARKETPLACE_DUPLICATE_SECRET_QUARANTINE",
+			"marketplace_secrets",
+			0,
+			fmt.Sprintf("closed duplicate available marketplace secrets during startup migration; count=%d", total),
+		); err != nil {
+			log.Printf("marketplace duplicate secret quarantine audit failed: err=%s", formatPlainError(err))
+		}
+	}
+
+	return total, nil
+}
+
+func mustExecMigration(sql string) {
+	if err := DB.Exec(sql).Error; err != nil {
+		log.Fatalf("critical database migration failed; startup blocked: %s\nsql=%s", formatPlainError(err), formatPlainValue(sql))
+	}
+}
+
+func runSensitiveDataMigrations() {
+	log.Println("starting sensitive data migration")
+
+	if getSensitivePepper() == "" {
+		log.Fatal("SECURITY_PEPPER is not configured; startup blocked. Configure a long-term fixed SECURITY_PEPPER in .env")
+	}
+
+	runOneTimeMigration("20260102_sensitive_tokens_hmac", func() error {
+		if err := migrateUserSecurityCodesInBatches(); err != nil {
+			return err
+		}
+		if err := migrateInviteCodesInBatches(); err != nil {
+			return err
+		}
+		if err := migrateRenewCodesInBatches(); err != nil {
+			return err
+		}
+		return nil
+	})
+
+	assertNoDuplicateGroups("invite_codes(code_hash)", `
+		SELECT code_hash AS key, COUNT(*) AS count
+		FROM invite_codes
+		WHERE code_hash <> '' AND deleted_at IS NULL
+		GROUP BY code_hash
+		HAVING COUNT(*) > 1;
+	`)
+
+	assertNoDuplicateGroups("renew_codes(code_hash)", `
+		SELECT code_hash AS key, COUNT(*) AS count
+		FROM renew_codes
+		WHERE code_hash <> '' AND deleted_at IS NULL
+		GROUP BY code_hash
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureSensitiveCodeHashPartialUniqueIndexes(DB); err != nil {
+		log.Fatalf("sensitive code hash unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	markMigrationAppliedIfMissing("20260103_sensitive_code_hash_unique_indexes")
+
+	log.Println("sensitive data migration completed")
+}
+
+func runSecurityAttemptLockMigration() {
+	log.Println("starting security attempt lock migration")
+
+	if !migrationAlreadyApplied("20260104_security_attempt_locks") {
+		assertNoDuplicateGroups("security_attempt_locks(user_id, purpose)", `
+			SELECT CAST(user_id AS TEXT) || ':' || purpose AS key, COUNT(*) AS count
+			FROM security_attempt_locks
+			WHERE deleted_at IS NULL
+			GROUP BY user_id, purpose
+			HAVING COUNT(*) > 1;
+		`)
+
+		if err := ensureSecurityAttemptLockPartialUniqueIndex(DB); err != nil {
+			log.Fatalf("security attempt lock unique index migration failed; startup blocked: %s", formatPlainError(err))
+		}
+
+		markMigrationAppliedIfMissing("20260104_security_attempt_locks")
+	} else {
+		log.Println("security attempt lock migration already applied; skip")
+	}
+
+	runOneTimeMigration("20260623_security_attempt_lock_partial_unique_index", func() error {
+		assertNoDuplicateGroups("security_attempt_locks(user_id, purpose)", `
+			SELECT CAST(user_id AS TEXT) || ':' || purpose AS key, COUNT(*) AS count
+			FROM security_attempt_locks
+			WHERE deleted_at IS NULL
+			GROUP BY user_id, purpose
+			HAVING COUNT(*) > 1;
+		`)
+
+		return ensureSecurityAttemptLockPartialUniqueIndex(DB)
+	})
+
+	log.Println("security attempt lock migration completed")
+}
+
+func migrateUserSecurityCodesInBatches() error {
+	var users []User
+
+	return DB.
+		Where("security_code <> '' AND security_code NOT LIKE ?", sensitiveHashPrefix+"%").
+		FindInBatches(&users, 500, func(tx *gorm.DB, batch int) error {
+			for _, u := range users {
+				hashed := hashSensitiveToken(u.SecurityCode)
+				if hashed == "" {
+					return fmt.Errorf("user security code hash failed: user_id=%d", u.TelegramID)
+				}
+
+				res := tx.Model(&User{}).
+					Where("id = ?", u.ID).
+					Update("security_code", hashed)
+				if res.Error != nil {
+					return fmt.Errorf("user security code migration failed: user_id=%d err=%w", u.TelegramID, res.Error)
+				}
+				if res.RowsAffected == 0 {
+					return fmt.Errorf("user security code migration missed: user_id=%d", u.TelegramID)
+				}
+			}
+			return nil
+		}).Error
+}
+
+func migrateInviteCodesInBatches() error {
+	var inviteCodes []InviteCode
+
+	return DB.
+		Where("code <> '' AND (code_hash = '' OR code_preview = '' OR (code NOT LIKE ? AND code NOT LIKE ?))",
+			"internal-invite-%",
+			"legacy-invite-%",
+		).
+		FindInBatches(&inviteCodes, 500, func(tx *gorm.DB, batch int) error {
+			for _, c := range inviteCodes {
+				updates := map[string]interface{}{}
+
+				if c.CodeHash == "" && c.Code != "" {
+					codeHash := hashSensitiveToken(c.Code)
+					if codeHash == "" {
+						return fmt.Errorf("invite code hash failed: id=%d", c.ID)
+					}
+					updates["code_hash"] = codeHash
+				}
+
+				if c.CodePreview == "" && c.Code != "" {
+					updates["code_preview"] = maskSecret(c.Code)
+				}
+
+				if c.Code != "" &&
+					!strings.HasPrefix(c.Code, "internal-invite-") &&
+					!strings.HasPrefix(c.Code, "legacy-invite-") {
+					updates["code"] = fmt.Sprintf("legacy-invite-%d", c.ID)
+				}
+
+				if len(updates) > 0 {
+					res := tx.Model(&InviteCode{}).
+						Where("id = ?", c.ID).
+						Updates(updates)
+					if res.Error != nil {
+						return fmt.Errorf("invite code migration failed: id=%d err=%w", c.ID, res.Error)
+					}
+					if res.RowsAffected == 0 {
+						return fmt.Errorf("invite code migration missed: id=%d", c.ID)
+					}
+				}
+			}
+			return nil
+		}).Error
+}
+
+func migrateRenewCodesInBatches() error {
+	var renewCodes []RenewCode
+
+	return DB.
+		Where("code <> '' AND (code_hash = '' OR code_preview = '' OR (code NOT LIKE ? AND code NOT LIKE ?))",
+			"internal-renew-%",
+			"legacy-renew-%",
+		).
+		FindInBatches(&renewCodes, 500, func(tx *gorm.DB, batch int) error {
+			for _, c := range renewCodes {
+				updates := map[string]interface{}{}
+
+				if c.CodeHash == "" && c.Code != "" {
+					codeHash := hashSensitiveToken(c.Code)
+					if codeHash == "" {
+						return fmt.Errorf("renew code hash failed: id=%d", c.ID)
+					}
+					updates["code_hash"] = codeHash
+				}
+
+				if c.CodePreview == "" && c.Code != "" {
+					updates["code_preview"] = maskSecret(c.Code)
+				}
+
+				if c.Code != "" &&
+					!strings.HasPrefix(c.Code, "internal-renew-") &&
+					!strings.HasPrefix(c.Code, "legacy-renew-") {
+					updates["code"] = fmt.Sprintf("legacy-renew-%d", c.ID)
+				}
+
+				if len(updates) > 0 {
+					res := tx.Model(&RenewCode{}).
+						Where("id = ?", c.ID).
+						Updates(updates)
+					if res.Error != nil {
+						return fmt.Errorf("renew code migration failed: id=%d err=%w", c.ID, res.Error)
+					}
+					if res.RowsAffected == 0 {
+						return fmt.Errorf("renew code migration missed: id=%d", c.ID)
+					}
+				}
+			}
+			return nil
+		}).Error
+}

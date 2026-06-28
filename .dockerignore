@@ -1,0 +1,36 @@
+# Git
+.git
+.gitignore
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data
+data/
+backups/
+logs/
+tmp/
+reports/
+.tools/
+
+# SQLite files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Encrypted backups
+*.enc
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Build artifacts
+abs_bot
+bot
+*.out
