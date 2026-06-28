@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>药园</title>
+    <link rel="stylesheet" href="/garden/styles.css?v=20260619-garden-fieldfirst-4" />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  </head>
+  <body>
+    <div class="cultivation-backdrop" aria-hidden="true">
+      <span class="backdrop-mountain mountain-left"></span>
+      <span class="backdrop-mountain mountain-right"></span>
+      <span class="backdrop-mist mist-veil-a"></span>
+      <span class="backdrop-mist mist-veil-b"></span>
+      <span class="backdrop-sword sword-trace-a"></span>
+      <span class="backdrop-sword sword-trace-b"></span>
+      <span class="backdrop-formation formation-a"></span>
+      <span class="backdrop-formation formation-b"></span>
+      <span class="backdrop-rune rune-a"></span>
+      <span class="backdrop-rune rune-b"></span>
+    </div>
+    <main class="app-shell">
+      <div id="offlineBanner" class="offline-banner" hidden>
+        <span>📡</span>
+        <strong>离线模式</strong>
+        <em>操作可能不被保存，正在重连...</em>
+      </div>
+      <section id="statusBar" class="status-bar" hidden></section>
+      <section id="content" class="content" aria-live="polite"></section>
+      <nav id="bottomDock" class="bottom-dock" aria-label="药园快捷码头"></nav>
+    </main>
+
+    <script src="/garden/app.js?v=20260619-garden-fieldfirst-4"></script>
+  </body>
+</html>
