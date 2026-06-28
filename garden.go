@@ -21,12 +21,7 @@ const (
 	gardenStatusHarvest           = "harvested"
 	gardenCallbackPrefix          = "garden:"
 	gardenMarketOfferMax          = 2
-	gardenMarketLimitMin          = 8
-	gardenMarketLimitMax          = 30
-	gardenBaseReturnPct           = 90
-	gardenMarketReturnMin         = 108
-	gardenMarketReturnMax         = 118
-	gardenZiyuzhiMarketMinProfit  = 10
+	gardenBaseReturnPct           = 75
 	gardenMaturityNoticeInterval  = 1 * time.Minute
 	gardenMaturityNoticeBatchSize = 200
 )
@@ -63,6 +58,13 @@ type gardenHerbMarketOffer struct {
 	HerbName string
 	Price    int
 	Limit    int
+}
+
+type gardenHerbEconomyConfig struct {
+	MarketPriceMin int
+	MarketPriceMax int
+	MarketLimitMin int
+	MarketLimitMax int
 }
 
 type gardenRecipeConfig struct {
@@ -117,6 +119,15 @@ var gardenSeeds = []gardenSeedConfig{
 	{Key: "tianxin", SeedName: "天心莲种子", HerbName: "天心莲", Price: 0, GrowDuration: 36 * time.Hour, YieldMin: 1, YieldMax: 1, SellPrice: 120, DailyLimit: 0, Purchasable: false},
 }
 
+var gardenHerbEconomy = map[string]gardenHerbEconomyConfig{
+	"ninglu":   {MarketPriceMin: 5, MarketPriceMax: 6, MarketLimitMin: 8, MarketLimitMax: 12},
+	"qingling": {MarketPriceMin: 10, MarketPriceMax: 11, MarketLimitMin: 6, MarketLimitMax: 10},
+	"chiyang":  {MarketPriceMin: 20, MarketPriceMax: 22, MarketLimitMin: 4, MarketLimitMax: 6},
+	"yuehua":   {MarketPriceMin: 40, MarketPriceMax: 43, MarketLimitMin: 2, MarketLimitMax: 4},
+	"xuanshen": {MarketPriceMin: 60, MarketPriceMax: 64, MarketLimitMin: 1, MarketLimitMax: 2},
+	"ziyuzhi":  {MarketPriceMin: 140, MarketPriceMax: 148, MarketLimitMin: 1, MarketLimitMax: 1},
+}
+
 var gardenRecipes = []gardenRecipeConfig{
 	{Key: "juling", Name: "聚灵丹方", ProductName: "聚灵丹", UnlockPrice: 20, AlchemyCost: 3, Materials: []gardenMaterial{{ItemName: "凝露草", Quantity: 8}, {ItemName: "青灵叶", Quantity: 5}}},
 	{Key: "zhuji", Name: "筑基丹方", ProductName: "筑基丹", UnlockPrice: 30, AlchemyCost: 5, Materials: []gardenMaterial{{ItemName: "凝露草", Quantity: 3}, {ItemName: "赤阳花", Quantity: 1}}},
@@ -151,11 +162,23 @@ func gardenHerbBaseSellPrice(cfg gardenSeedConfig) int {
 	if !cfg.Purchasable {
 		return cfg.SellPrice
 	}
-	price := gardenHerbReturnUnitPrice(cfg, gardenBaseReturnPct)
+	price := gardenHerbReturnUnitPriceFloor(cfg, gardenBaseReturnPct)
 	if price < cfg.SellPrice {
 		return cfg.SellPrice
 	}
 	return price
+}
+
+func gardenHerbReturnUnitPriceFloor(cfg gardenSeedConfig, returnPct int) int {
+	if !cfg.Purchasable || cfg.Price <= 0 || cfg.YieldMin <= 0 || cfg.YieldMax <= 0 {
+		return cfg.SellPrice
+	}
+
+	denom := cfg.YieldMin + cfg.YieldMax
+	if returnPct <= 0 {
+		returnPct = 100
+	}
+	return cfg.Price * returnPct * 2 / (denom * 100)
 }
 
 func gardenHerbReturnUnitPrice(cfg gardenSeedConfig, returnPct int) int {
@@ -187,11 +210,18 @@ func gardenHerbMarketPrice(cfg gardenSeedConfig, dayKey string) int {
 		return basePrice
 	}
 
-	spread := gardenMarketReturnMax - gardenMarketReturnMin + 1
-	returnPct := gardenMarketReturnMin + gardenMarketScore(dayKey, cfg.Key, "price")%spread
-	price := gardenHerbReturnUnitPrice(cfg, returnPct)
-	if cfg.Key == "ziyuzhi" && cfg.Price > 0 && price < cfg.Price+gardenZiyuzhiMarketMinProfit {
-		price = cfg.Price + gardenZiyuzhiMarketMinProfit
+	economy, ok := gardenHerbEconomy[cfg.Key]
+	if !ok {
+		return basePrice + 1
+	}
+	minPrice := economy.MarketPriceMin
+	maxPrice := economy.MarketPriceMax
+	if maxPrice < minPrice {
+		maxPrice = minPrice
+	}
+	price := minPrice
+	if maxPrice > minPrice {
+		price += gardenMarketScore(dayKey, cfg.Key, "price") % (maxPrice - minPrice + 1)
 	}
 	if price <= basePrice {
 		return basePrice + 1
@@ -199,17 +229,28 @@ func gardenHerbMarketPrice(cfg gardenSeedConfig, dayKey string) int {
 	return price
 }
 
-func gardenHerbMarketLimit(cfg gardenSeedConfig) int {
-	if !cfg.Purchasable || cfg.DailyLimit <= 0 || cfg.YieldMin <= 0 || cfg.YieldMax <= 0 {
-		return gardenMarketLimitMin
+func gardenHerbMarketLimit(cfg gardenSeedConfig, dayKey string) int {
+	economy, ok := gardenHerbEconomy[cfg.Key]
+	if !cfg.Purchasable || !ok {
+		return 0
 	}
-
-	limit := cfg.DailyLimit * (cfg.YieldMin + cfg.YieldMax) / 2
-	if limit < gardenMarketLimitMin {
-		return gardenMarketLimitMin
+	minLimit := economy.MarketLimitMin
+	maxLimit := economy.MarketLimitMax
+	if minLimit < 0 {
+		minLimit = 0
 	}
-	if limit > gardenMarketLimitMax {
-		return gardenMarketLimitMax
+	if maxLimit < minLimit {
+		maxLimit = minLimit
+	}
+	limit := minLimit
+	if maxLimit > minLimit {
+		limit += gardenMarketScore(dayKey, cfg.Key, "limit") % (maxLimit - minLimit + 1)
+	}
+	if cfg.DailyLimit > 0 {
+		maxBySeed := cfg.DailyLimit * (cfg.YieldMin + cfg.YieldMax) / 2
+		if maxBySeed > 0 && limit > maxBySeed {
+			limit = maxBySeed
+		}
 	}
 	return limit
 }
@@ -259,7 +300,7 @@ func gardenTodayHerbMarketOffers(t time.Time) []gardenHerbMarketOffer {
 			SeedKey:  cfg.Key,
 			HerbName: cfg.HerbName,
 			Price:    gardenHerbMarketPrice(cfg, dayKey),
-			Limit:    gardenHerbMarketLimit(cfg),
+			Limit:    gardenHerbMarketLimit(cfg, dayKey),
 		})
 	}
 	return offers
