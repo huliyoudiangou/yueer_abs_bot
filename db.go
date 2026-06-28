@@ -770,6 +770,7 @@ func InitDB() {
 		&SectWeeklyTaskSettlement{},
 		&SectListeningDailyProgress{},
 		&DailyListeningStat{},
+		&AbsLiveListeningCheckpoint{},
 		&SectShopPurchase{},
 		&SectShopRenewClaim{},
 		&SectCaveRetreat{},
@@ -1289,6 +1290,18 @@ func runConsistencyMigrations() {
 
 	if err := ensureDailyListeningStatsPartialUniqueIndex(DB); err != nil {
 		log.Fatalf("daily listening stats unique index migration failed; startup blocked: %s", formatPlainError(err))
+	}
+
+	assertNoDuplicateGroups("abs_live_listening_checkpoints(user_id, session_key, item_key)", `
+		SELECT CAST(user_id AS TEXT) || ':' || session_key || ':' || item_key AS key, COUNT(*) AS count
+		FROM abs_live_listening_checkpoints
+		WHERE deleted_at IS NULL
+		GROUP BY user_id, session_key, item_key
+		HAVING COUNT(*) > 1;
+	`)
+
+	if err := ensureAbsLiveListeningCheckpointPartialUniqueIndex(DB); err != nil {
+		log.Fatalf("abs live listening checkpoint unique index migration failed; startup blocked: %s", formatPlainError(err))
 	}
 
 	assertNoDuplicateGroups("referral_codes(user_id)", `
@@ -2279,6 +2292,14 @@ func ensureDailyListeningStatsPartialUniqueIndex(db *gorm.DB) error {
 		ON daily_listening_stats(user_id, day_key)
 		WHERE deleted_at IS NULL;
 	`).Error
+}
+
+func ensureAbsLiveListeningCheckpointPartialUniqueIndex(db *gorm.DB) error {
+	return ensureSoftDeletePartialUniqueIndex(db, "idx_abs_live_listening_checkpoints_unique", `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_abs_live_listening_checkpoints_unique
+		ON abs_live_listening_checkpoints(user_id, session_key, item_key)
+		WHERE deleted_at IS NULL;
+	`)
 }
 
 func ensureMarketplaceOpenDisputeUniqueIndex(db *gorm.DB) (bool, error) {

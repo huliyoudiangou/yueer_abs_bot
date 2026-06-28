@@ -274,14 +274,18 @@ type DailyListeningStat struct {
 	AbsUserID string `gorm:"index"`
 	DayKey    string `gorm:"index;not null"` // 北京时间日期 YYYY-MM-DD
 
-	RawSeconds     float64
-	CappedSeconds  float64
-	EffectiveHours float64
-	LastFetchedAt  time.Time `gorm:"index"`
-	Source         string
-	FetchStatus    string
-	FetchError     string
-	RefreshReason  string
+	RawSeconds            float64
+	CappedSeconds         float64
+	EffectiveHours        float64
+	LastFetchedAt         time.Time `gorm:"index"`
+	OfficialRawSeconds    float64
+	LiveRawSeconds        float64
+	LastOfficialFetchedAt time.Time `gorm:"index"`
+	LastLiveFetchedAt     time.Time `gorm:"index"`
+	Source                string
+	FetchStatus           string
+	FetchError            string
+	RefreshReason         string
 }
 
 func (DailyListeningStat) TableName() string {
@@ -3367,7 +3371,7 @@ func cappedListeningSeconds(seconds float64) float64 {
 }
 
 func recordDailyListeningStatsFromABSDays(userID int64, absUserID string, days map[string]float64, fetchedAt time.Time) error {
-	if DB == nil || userID == 0 || len(days) == 0 {
+	if DB == nil || userID == 0 {
 		return nil
 	}
 
@@ -3375,7 +3379,8 @@ func recordDailyListeningStatsFromABSDays(userID int64, absUserID string, days m
 		fetchedAt = time.Now()
 	}
 
-	records := make([]DailyListeningStat, 0, len(days))
+	officialByDay := make(map[string]float64, len(days))
+	daySet := make(map[string]bool, len(days))
 	for dayKey, rawSeconds := range days {
 		dayKey = strings.TrimSpace(dayKey)
 		if dayKey == "" {
@@ -3384,21 +3389,92 @@ func recordDailyListeningStatsFromABSDays(userID int64, absUserID string, days m
 		if rawSeconds <= 0 {
 			continue
 		}
+		officialByDay[dayKey] = rawSeconds
+		daySet[dayKey] = true
+	}
+
+	liveDeltas := estimateDailyListeningLiveDeltas(userID, absUserID, fetchedAt)
+	for dayKey, rawSeconds := range liveDeltas {
+		dayKey = strings.TrimSpace(dayKey)
+		if dayKey == "" || rawSeconds <= 0 {
+			continue
+		}
+		daySet[dayKey] = true
+	}
+
+	if len(daySet) == 0 {
+		return nil
+	}
+
+	dayKeys := make([]string, 0, len(daySet))
+	for dayKey := range daySet {
+		dayKeys = append(dayKeys, dayKey)
+	}
+
+	existingByDay := make(map[string]DailyListeningStat, len(dayKeys))
+	var existing []DailyListeningStat
+	if err := DB.Where("user_id = ? AND day_key IN ?", userID, dayKeys).Find(&existing).Error; err != nil {
+		log.Printf("每日听书统计旧记录读取失败: user=%d err=%s", userID, formatPlainError(err))
+		return err
+	}
+	for _, stat := range existing {
+		existingByDay[stat.DayKey] = stat
+	}
+
+	records := make([]DailyListeningStat, 0, len(dayKeys))
+	for _, dayKey := range dayKeys {
+		existingStat := existingByDay[dayKey]
+		officialRawSeconds, hasOfficial := officialByDay[dayKey]
+		if !hasOfficial {
+			officialRawSeconds = existingStat.OfficialRawSeconds
+			if officialRawSeconds <= 0 && existingStat.Source == "abs_days" {
+				officialRawSeconds = existingStat.RawSeconds
+			}
+		}
+		liveDeltaSeconds := liveDeltas[dayKey]
+		liveRawSeconds := existingStat.LiveRawSeconds + liveDeltaSeconds
+		rawSeconds := officialRawSeconds
+		source := "abs_days"
+		fetchStatus := "ok"
+		refreshReason := "abs_refresh"
+		if liveRawSeconds > rawSeconds {
+			rawSeconds = liveRawSeconds
+			source = dailyListeningLiveCheckpointSource
+			fetchStatus = dailyListeningLiveProvisionalStatus
+			refreshReason = "abs_refresh_live_session_fallback"
+			if officialRawSeconds > 0 {
+				source = "mixed"
+				fetchStatus = "mixed"
+			}
+		}
+		if rawSeconds <= 0 {
+			continue
+		}
 
 		cappedSeconds := cappedListeningSeconds(rawSeconds)
 		records = append(records, DailyListeningStat{
-			UserID:         userID,
-			AbsUserID:      strings.TrimSpace(absUserID),
-			DayKey:         dayKey,
-			RawSeconds:     rawSeconds,
-			CappedSeconds:  cappedSeconds,
-			EffectiveHours: calculateSectEffectiveHoursFromSeconds(rawSeconds),
-			LastFetchedAt:  fetchedAt,
-			Source:         "abs_days",
-			FetchStatus:    "ok",
-			FetchError:     "",
-			RefreshReason:  "abs_refresh",
+			UserID:                userID,
+			AbsUserID:             strings.TrimSpace(absUserID),
+			DayKey:                dayKey,
+			RawSeconds:            rawSeconds,
+			CappedSeconds:         cappedSeconds,
+			EffectiveHours:        calculateSectEffectiveHoursFromSeconds(rawSeconds),
+			LastFetchedAt:         fetchedAt,
+			OfficialRawSeconds:    officialRawSeconds,
+			LiveRawSeconds:        liveRawSeconds,
+			LastOfficialFetchedAt: existingStat.LastOfficialFetchedAt,
+			LastLiveFetchedAt:     existingStat.LastLiveFetchedAt,
+			Source:                source,
+			FetchStatus:           fetchStatus,
+			FetchError:            "",
+			RefreshReason:         refreshReason,
 		})
+		if hasOfficial {
+			records[len(records)-1].LastOfficialFetchedAt = fetchedAt
+		}
+		if liveDeltaSeconds > 0 {
+			records[len(records)-1].LastLiveFetchedAt = fetchedAt
+		}
 	}
 
 	if len(records) == 0 {
@@ -3431,17 +3507,21 @@ func dailyListeningStatOnConflict(now time.Time) clause.OnConflict {
 			clause.Eq{Column: clause.Column{Name: "deleted_at"}, Value: nil},
 		}},
 		DoUpdates: clause.Assignments(map[string]interface{}{
-			"raw_seconds":     gorm.Expr("excluded.raw_seconds"),
-			"capped_seconds":  gorm.Expr("excluded.capped_seconds"),
-			"effective_hours": gorm.Expr("excluded.effective_hours"),
-			"abs_user_id":     gorm.Expr("excluded.abs_user_id"),
-			"last_fetched_at": gorm.Expr("excluded.last_fetched_at"),
-			"source":          gorm.Expr("excluded.source"),
-			"fetch_status":    gorm.Expr("excluded.fetch_status"),
-			"fetch_error":     gorm.Expr("excluded.fetch_error"),
-			"refresh_reason":  gorm.Expr("excluded.refresh_reason"),
-			"updated_at":      now,
-			"deleted_at":      nil,
+			"raw_seconds":              gorm.Expr("excluded.raw_seconds"),
+			"capped_seconds":           gorm.Expr("excluded.capped_seconds"),
+			"effective_hours":          gorm.Expr("excluded.effective_hours"),
+			"abs_user_id":              gorm.Expr("excluded.abs_user_id"),
+			"last_fetched_at":          gorm.Expr("excluded.last_fetched_at"),
+			"official_raw_seconds":     gorm.Expr("excluded.official_raw_seconds"),
+			"live_raw_seconds":         gorm.Expr("excluded.live_raw_seconds"),
+			"last_official_fetched_at": gorm.Expr("excluded.last_official_fetched_at"),
+			"last_live_fetched_at":     gorm.Expr("excluded.last_live_fetched_at"),
+			"source":                   gorm.Expr("excluded.source"),
+			"fetch_status":             gorm.Expr("excluded.fetch_status"),
+			"fetch_error":              gorm.Expr("excluded.fetch_error"),
+			"refresh_reason":           gorm.Expr("excluded.refresh_reason"),
+			"updated_at":               now,
+			"deleted_at":               nil,
 		}),
 	}
 }

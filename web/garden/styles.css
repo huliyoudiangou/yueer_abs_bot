@@ -5760,6 +5760,10 @@ svg.item-logo {
   flex: 1 1 130px;
 }
 
+.counter-panel .actions .qty-row {
+  flex: 1 1 220px;
+}
+
 .btn {
   min-height: 38px;
   border: 1px solid var(--green);

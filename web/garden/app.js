@@ -51,7 +51,7 @@ const gardenStateCacheKey = "garden_snapshot";
 const gardenSnapshotMaxAgeMs = 300000;
 const gardenApiTimeoutMs = 8000;
 const gardenApiRetryCount = 2;
-const writeActions = new Set(["harvest-all", "open-plot", "buy-seed", "plant", "plant-all", "harvest", "sell-one", "sell-all", "buy-recipe", "alchemy"]);
+const writeActions = new Set(["harvest-all", "open-plot", "buy-seed", "plant", "plant-all", "harvest", "sell-one", "sell-custom", "buy-recipe", "alchemy"]);
 const localMockEnabled = !tg && isLocalDevHost() && new URLSearchParams(window.location.search).get("mock") === "1";
 
 const content = document.querySelector("#content");
@@ -1939,7 +1939,8 @@ function renderHerbWarehouseGuide(herb) {
 function renderHerbCounter(herb) {
   if (!herb) return `<section class="counter-panel"><div class="empty">暂无草药</div></section>`;
   const canSell = herb.inventory > 0 && herb.sellable && !app.busy;
-  const preview = herbSellPreview(herb);
+  const defaultQty = Math.max(1, Math.min(Number(herb.inventory || 0), 1));
+  const preview = herbSellPreview(herb, defaultQty);
   const marketMeter = herbMarketPercent(herb);
   return `
     <section class="counter-panel market-counter">
@@ -1958,7 +1959,7 @@ function renderHerbCounter(herb) {
       </div>
       <div class="sell-preview ${preview.urgentQty > 0 ? "urgent-preview" : ""}">
         <span>
-          <em>整箱预估</em>
+          <em>当前预估</em>
           <strong>${preview.total} 积分</strong>
         </span>
         <span>
@@ -1980,7 +1981,10 @@ function renderHerbCounter(herb) {
       </div>
       <div class="actions">
         <button class="btn secondary" type="button" data-action="sell-one" data-seed="${escapeAttr(herb.key)}" ${canSell ? "" : "disabled"}>回收 1 株</button>
-        <button class="btn" type="button" data-action="sell-all" data-seed="${escapeAttr(herb.key)}" ${canSell ? "" : "disabled"}>整箱回收</button>
+        <label class="qty-row">
+          <input type="number" min="1" max="${Math.max(1, Number(herb.inventory || 0))}" value="${defaultQty}" inputmode="numeric" data-sell-qty="${escapeAttr(herb.key)}" ${canSell ? "" : "disabled"}>
+          <button class="btn" type="button" data-action="sell-custom" data-seed="${escapeAttr(herb.key)}" ${canSell ? "" : "disabled"}>指定回收</button>
+        </label>
       </div>
     </section>
   `;
@@ -2204,7 +2208,15 @@ function handleAction(action, dataset, button) {
   if (action === "plant-all") return runAction("/api/garden/plant-all", { seedKey: dataset.seed }, "一键种植完成");
   if (action === "harvest") return runAction("/api/garden/harvest", { plotNo: Number(dataset.plot) }, "收获成功");
   if (action === "sell-one") return runAction("/api/garden/sell-herb", { seedKey: dataset.seed, quantity: 1 }, "药草回收完成");
-  if (action === "sell-all") return runAction("/api/garden/sell-herb", { seedKey: dataset.seed, quantity: -1 }, "药草回收完成");
+  if (action === "sell-custom") {
+    const quantity = readMarketSellQuantity(dataset.seed);
+    if (quantity <= 0) {
+      setStatus("请输入有效的回收数量", true);
+      haptic("error");
+      return;
+    }
+    return runAction("/api/garden/sell-herb", { seedKey: dataset.seed, quantity }, "药草回收完成");
+  }
   if (action === "open-seeds") return switchTab("seeds");
   if (action === "open-herbs") return switchTab("herbs");
   if (action === "open-market") return switchTab("market");
@@ -3099,10 +3111,21 @@ function selectedRecipe() {
   return app.state.recipes.find((item) => item.key === app.selectedRecipeKey) || app.state.recipes[0] || null;
 }
 
-function herbSellPreview(herb) {
+function readMarketSellQuantity(seedKey) {
+  const input = Array.from(content.querySelectorAll("[data-sell-qty]")).find((node) => node.dataset.sellQty === seedKey);
+  if (!input) return 0;
+  const qty = Math.floor(Number(input.value || 0));
+  const max = Math.floor(Number(input.max || 0));
+  if (qty <= 0) return 0;
+  if (max > 0 && qty > max) return max;
+  return qty;
+}
+
+function herbSellPreview(herb, requestedQty) {
   const inventory = Math.max(0, Number(herb.inventory || 0));
-  const urgentQty = herb.urgent ? Math.min(inventory, Math.max(0, Number(herb.marketLeft || 0))) : 0;
-  const baseQty = Math.max(0, inventory - urgentQty);
+  const qty = Math.max(0, Math.min(inventory, Math.floor(Number(requestedQty || 0))));
+  const urgentQty = herb.urgent ? Math.min(qty, Math.max(0, Number(herb.marketLeft || 0))) : 0;
+  const baseQty = Math.max(0, qty - urgentQty);
   const urgentPrice = Number(herb.marketPrice || 0);
   const basePrice = Number(herb.basePrice || 0);
   return {

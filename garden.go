@@ -366,7 +366,7 @@ func handleGardenSellCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text s
 
 	parts := strings.Fields(text)
 	if len(parts) != 3 {
-		replyText(bot, msg.Chat.ID, "用法：回收灵草 玄参根 1\n也可以发送：回收灵草 玄参根 全部")
+		replyText(bot, msg.Chat.ID, "用法：回收灵草 玄参根 1\n请填写要回收的具体数量。")
 		return true
 	}
 
@@ -376,16 +376,10 @@ func handleGardenSellCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text s
 		return true
 	}
 
-	qty := 0
-	if parts[2] == "全部" || strings.EqualFold(parts[2], "all") {
-		qty = -1
-	} else {
-		n, err := strconv.Atoi(parts[2])
-		if err != nil || n <= 0 {
-			replyText(bot, msg.Chat.ID, "回收数量必须是正整数，或使用“全部”。")
-			return true
-		}
-		qty = n
+	qty, err := strconv.Atoi(parts[2])
+	if err != nil || qty <= 0 {
+		replyText(bot, msg.Chat.ID, "回收数量必须是正整数，请发送：回收灵草 玄参根 1")
+		return true
 	}
 
 	points, soldQty, err := gardenSellHerbQuantity(msg.From.ID, cfg.Key, qty)
@@ -530,13 +524,12 @@ func handleGardenCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		answerCallback(bot, cb.ID, "药铺回收已刷新")
 		text, markup := renderGardenHerbMarket(userID)
 		editGardenScreen(bot, chatID, messageID, text, markup)
-	case "sellone", "sellall":
+	case "sellone":
 		if len(parts) < 3 {
 			answerCallback(bot, cb.ID, "药草参数异常")
 			return true
 		}
-		all := parts[1] == "sellall"
-		points, err := gardenSellHerb(userID, parts[2], all)
+		points, _, err := gardenSellHerbQuantity(userID, parts[2], 1)
 		if err != nil {
 			answerCallback(bot, cb.ID, gardenActionErrorText(err))
 		} else {
@@ -544,6 +537,23 @@ func handleGardenCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		}
 		text, markup := renderGardenHerbMarket(userID)
 		editGardenScreen(bot, chatID, messageID, text, markup)
+	case "sellqty":
+		if len(parts) < 3 {
+			answerCallback(bot, cb.ID, "药草参数异常")
+			return true
+		}
+		cfg, ok := gardenSeedByKey(parts[2])
+		if !ok {
+			answerCallback(bot, cb.ID, "药草参数异常")
+			return true
+		}
+		session := getSession(userID)
+		session.SetStep("WAITING_GARDEN_SELL_QTY")
+		session.SetTemp("garden_sell_seed_key", cfg.Key)
+		session.SetTemp("garden_sell_herb_name", cfg.HerbName)
+		UserSessions.Store(userID, session)
+		answerCallback(bot, cb.ID, "请发送回收数量")
+		sendPlainText(bot, chatID, fmt.Sprintf("药铺准备回收【%s】。\n请发送要回收的数量，例如：3\n发送“取消”可退出。", cfg.HerbName))
 	case "recipes":
 		answerCallback(bot, cb.ID, "丹方已刷新")
 		text, markup := renderGardenRecipes(userID)
@@ -914,7 +924,7 @@ func renderGardenHerbMarket(userID int64) (string, tgbotapi.InlineKeyboardMarkup
 			if marketSalesErr == nil {
 				rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 					tgbotapi.NewInlineKeyboardButtonData("回收1株 "+cfg.HerbName, "garden:sellone:"+cfg.Key),
-					tgbotapi.NewInlineKeyboardButtonData("全部回收", "garden:sellall:"+cfg.Key),
+					tgbotapi.NewInlineKeyboardButtonData("指定数量", "garden:sellqty:"+cfg.Key),
 				))
 			}
 		}
@@ -1406,11 +1416,7 @@ func gardenHarvestAll(userID int64) (int, int, error) {
 	return harvestedPlots, harvestedQty, nil
 }
 
-func gardenSellHerb(userID int64, seedKey string, all bool) (int, error) {
-	qty := 1
-	if all {
-		qty = -1
-	}
+func gardenSellHerb(userID int64, seedKey string, qty int) (int, error) {
 	gained, _, err := gardenSellHerbQuantity(userID, seedKey, qty)
 	return gained, err
 }
@@ -1424,7 +1430,7 @@ func gardenSellHerbQuantity(userID int64, seedKey string, requestedQty int) (int
 	if basePrice <= 0 {
 		return 0, 0, errGardenHerbNotSellable
 	}
-	if requestedQty == 0 || requestedQty < -1 {
+	if requestedQty <= 0 {
 		return 0, 0, errGardenHerbQuantityInvalid
 	}
 
@@ -1437,16 +1443,6 @@ func gardenSellHerbQuantity(userID int64, seedKey string, requestedQty int) (int
 		txGained := 0
 		txSoldQty := 0
 		qty := requestedQty
-		if requestedQty == -1 {
-			var inv Inventory
-			if err := tx.Where("user_id = ? AND item_name = ? AND quantity > 0", userID, cfg.HerbName).First(&inv).Error; err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return errGardenHerbNotEnough
-				}
-				return err
-			}
-			qty = inv.Quantity
-		}
 		if qty <= 0 {
 			return errGardenHerbQuantityInvalid
 		}

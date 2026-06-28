@@ -5090,6 +5090,33 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	switch session.GetStep() {
+	case "WAITING_GARDEN_SELL_QTY":
+		seedKey := strings.TrimSpace(session.GetTemp("garden_sell_seed_key"))
+		herbName := strings.TrimSpace(session.GetTemp("garden_sell_herb_name"))
+		if seedKey == "" {
+			sendPlainText(bot, chatID, "药铺回收状态已失效，请重新进入药铺。")
+			clearSession(userID)
+			return
+		}
+		qty, err := strconv.Atoi(strings.TrimSpace(text))
+		if err != nil || qty <= 0 {
+			sendPlainText(bot, chatID, "回收数量必须是正整数，请重新发送数量，或发送“取消”退出。")
+			return
+		}
+		points, soldQty, err := gardenSellHerbQuantity(userID, seedKey, qty)
+		if err != nil {
+			replyText(bot, chatID, gardenActionErrorText(err))
+			return
+		}
+		if herbName == "" {
+			if cfg, ok := gardenSeedByKey(seedKey); ok {
+				herbName = cfg.HerbName
+			}
+		}
+		replyText(bot, chatID, fmt.Sprintf("✅ 药铺回收【%s】x%d，获得 %d 积分。", inventoryItemMarkdownName(herbName), soldQty, points))
+		clearSession(userID)
+		return
+
 	case "WAITING_CONFIRM_SECT_HORN":
 		handleSectHornSession(bot, msg, session, text)
 

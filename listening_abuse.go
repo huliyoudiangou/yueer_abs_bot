@@ -271,6 +271,18 @@ func dailyRawListeningHours(userID int64, dayKey string) (float64, bool, error) 
 		}
 		return 0, false, err
 	}
+	if stat.FetchStatus == dailyListeningLiveProvisionalStatus || stat.Source == dailyListeningLiveCheckpointSource {
+		return 0, false, nil
+	}
+	if stat.FetchStatus == "mixed" || stat.Source == "mixed" {
+		if stat.OfficialRawSeconds <= 0 {
+			return 0, false, nil
+		}
+		return stat.OfficialRawSeconds / 3600, true, nil
+	}
+	if stat.OfficialRawSeconds > 0 {
+		return stat.OfficialRawSeconds / 3600, true, nil
+	}
 	return stat.RawSeconds / 3600, true, nil
 }
 
