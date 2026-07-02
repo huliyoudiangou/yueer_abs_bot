@@ -95,6 +95,7 @@ var (
 	errMarketplaceSellerMismatch     = errors.New("MARKETPLACE_SELLER_MISMATCH")
 	errMarketplaceMixedSecretSource  = errors.New("MARKETPLACE_MIXED_SECRET_SOURCE")
 	errMarketplaceVerifiedInvalid    = errors.New("MARKETPLACE_VERIFIED_SECRET_INVALID")
+	errMarketplaceUnverifiedSecret   = errors.New("MARKETPLACE_UNVERIFIED_SECRET")
 	errCreateInviteCodeFailed        = errors.New("CREATE_INVITE_CODE_FAILED")
 	errCreateRenewCodeFailed         = errors.New("CREATE_RENEW_CODE_FAILED")
 	errCreateRedPacketFailed         = errors.New("CREATE_REDPACKET_FAILED")
@@ -217,6 +218,7 @@ func isKnownBusinessErrorCode(code string) bool {
 		errMarketplaceSellerMismatch.Error(),
 		errMarketplaceMixedSecretSource.Error(),
 		errMarketplaceVerifiedInvalid.Error(),
+		errMarketplaceUnverifiedSecret.Error(),
 		errSectHornInvalidScope.Error(),
 		errSectHornNoRecipients.Error(),
 		errSectHornContentEmpty.Error(),

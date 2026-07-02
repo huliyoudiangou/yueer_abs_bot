@@ -578,7 +578,7 @@ func classifyMarketplaceSecretTx(tx *gorm.DB, codeHash string) (marketplaceSecre
 		return marketplaceSecretClassification{}, err
 	}
 
-	return marketplaceSecretClassification{CodeHash: codeHash, Source: marketplaceSecretSourceThirdParty}, nil
+	return marketplaceSecretClassification{}, errMarketplaceUnverifiedSecret
 }
 
 func marketplaceSecretListingSource(secrets []marketplaceSecretClassification) (string, error) {
@@ -586,6 +586,9 @@ func marketplaceSecretListingSource(secrets []marketplaceSecretClassification) (
 		return "", errInvalidMarketplaceListing
 	}
 	source := marketplaceSecretSource(secrets[0].Source)
+	if source == marketplaceSecretSourceThirdParty {
+		return "", errMarketplaceUnverifiedSecret
+	}
 	for _, secret := range secrets[1:] {
 		if marketplaceSecretSource(secret.Source) != source {
 			return "", errMarketplaceMixedSecretSource
@@ -865,6 +868,8 @@ func marketplaceErrorCode(err error) string {
 		return "MARKETPLACE_MIXED_SECRET_SOURCE"
 	case errors.Is(err, errMarketplaceVerifiedInvalid):
 		return "MARKETPLACE_VERIFIED_SECRET_INVALID"
+	case errors.Is(err, errMarketplaceUnverifiedSecret):
+		return "MARKETPLACE_UNVERIFIED_SECRET"
 	case errors.Is(err, errPointsNotEnough):
 		return "POINTS_NOT_ENOUGH"
 	case errors.Is(err, errSecurityPepperNotConfigured):
@@ -893,6 +898,7 @@ func knownMarketplaceErrorCode(code string) string {
 		"MARKETPLACE_REALM_TOO_LOW",
 		"MARKETPLACE_MIXED_SECRET_SOURCE",
 		"MARKETPLACE_VERIFIED_SECRET_INVALID",
+		"MARKETPLACE_UNVERIFIED_SECRET",
 		"POINTS_NOT_ENOUGH",
 		"SECURITY_PEPPER_NOT_CONFIGURED":
 		return code
@@ -902,6 +908,12 @@ func knownMarketplaceErrorCode(code string) string {
 }
 
 func marketplaceCreateErrorText(err error) string {
+	if errors.Is(err, errMarketplaceMixedSecretSource) {
+		return "❌ 同一件自由卡密商品不能混放邀请码和续期卡，请拆分后分别上架。"
+	}
+	if errors.Is(err, errMarketplaceUnverifiedSecret) {
+		return "❌ 交易行仅允许上架 Bot 生成的邀请码或续期卡，未识别卡密不可上架。"
+	}
 	if err == nil {
 		return "❌ 上架失败，请稍后再试。"
 	}
@@ -1388,6 +1400,9 @@ func marketplaceSellPointDescription(itemName string, quantity int, feeAmount in
 }
 
 func marketplaceBuyErrorText(err error) string {
+	if errors.Is(err, errMarketplaceUnverifiedSecret) {
+		return "❌ 卡密来源无法通过系统校验，交易已中止，请换其他商品或联系卖家。"
+	}
 	if err == nil {
 		return "❌ 购买失败，请稍后再试。"
 	}
@@ -1431,6 +1446,7 @@ func marketplaceBuyErrorShouldLog(err error) bool {
 		"MARKETPLACE_OUT_OF_STOCK",
 		"MARKETPLACE_QUANTITY_TOO_LARGE",
 		"MARKETPLACE_VERIFIED_SECRET_INVALID",
+		"MARKETPLACE_UNVERIFIED_SECRET",
 		"POINTS_NOT_ENOUGH":
 		return false
 	default:
@@ -1558,6 +1574,7 @@ func purchaseMarketplaceListing(buyerID int64, listingID uint, buyQty int) (mark
 	grossAmount := 0
 	feeAmount := 0
 	sellerAmount := 0
+	invalidSecretID := uint(0)
 
 	runTx := func(tx *gorm.DB) error {
 		if err := marketplaceActiveListingQuery(tx, time.Now()).Where("id = ?", listingID).
@@ -1597,24 +1614,22 @@ func purchaseMarketplaceListing(buyerID int64, listingID uint, buyQty int) (mark
 				}
 				return err
 			}
-			if secret.TokenSource == "" {
-				secret.TokenSource = listing.SecretSource
-			}
-			usable, err := marketplaceVerifiedSecretUsableTx(tx, secret)
-			if err != nil {
-				return err
-			}
-			if !usable {
-				res := tx.Model(&MarketplaceSecret{}).
-					Where("id = ? AND status = ?", secret.ID, marketplaceSecretAvailable).
-					Update("status", marketplaceSecretClosed)
-				if res.Error != nil {
-					return res.Error
+			if listing.ListingType == marketplaceTypeSecret {
+				if secret.TokenSource == "" {
+					secret.TokenSource = listing.SecretSource
 				}
-				if res.RowsAffected == 0 {
-					continue
+				if marketplaceSecretSource(secret.TokenSource) == marketplaceSecretSourceThirdParty {
+					invalidSecretID = secret.ID
+					return errMarketplaceUnverifiedSecret
 				}
-				continue
+				usable, err := marketplaceVerifiedSecretUsableTx(tx, secret)
+				if err != nil {
+					return err
+				}
+				if !usable {
+					invalidSecretID = secret.ID
+					return errMarketplaceVerifiedInvalid
+				}
 			}
 
 			now := time.Now()
@@ -1753,6 +1768,11 @@ func purchaseMarketplaceListing(buyerID int64, listingID uint, buyQty int) (mark
 
 	err := runFusionPoolLockedTransaction(runTx)
 	if err != nil {
+		if invalidSecretID != 0 && (errors.Is(err, errMarketplaceVerifiedInvalid) || errors.Is(err, errMarketplaceUnverifiedSecret)) {
+			if quarantineErr := quarantineMarketplaceInvalidSecret(DB, listingID, invalidSecretID); quarantineErr != nil {
+				log.Printf("⚠️ 交易行异常卡密暂停商品失败: listing=%d secret=%d err=%s", listingID, invalidSecretID, formatPlainError(quarantineErr))
+			}
+		}
 		return marketplacePurchaseResult{}, err
 	}
 
@@ -1765,6 +1785,31 @@ func purchaseMarketplaceListing(buyerID int64, listingID uint, buyQty int) (mark
 		FeeAmount:    feeAmount,
 		SellerAmount: sellerAmount,
 	}, nil
+}
+
+func quarantineMarketplaceInvalidSecret(db *gorm.DB, listingID uint, secretID uint) error {
+	if db == nil || listingID == 0 || secretID == 0 {
+		return errMarketplaceListingNotFound
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		secretRes := tx.Model(&MarketplaceSecret{}).
+			Where("id = ? AND listing_id = ? AND status = ?", secretID, listingID, marketplaceSecretAvailable).
+			Update("status", marketplaceSecretClosed)
+		if secretRes.Error != nil {
+			return secretRes.Error
+		}
+
+		listingRes := tx.Model(&MarketplaceListing{}).
+			Where("id = ? AND status = ?", listingID, marketplaceStatusActive).
+			Update("status", marketplaceStatusReview)
+		if listingRes.Error != nil {
+			return listingRes.Error
+		}
+		if listingRes.RowsAffected == 0 && secretRes.RowsAffected == 0 {
+			return errMarketplaceListingNotFound
+		}
+		return nil
+	})
 }
 
 func showMyMarketplacePurchases(bot *tgbotapi.BotAPI, chatID int64, buyerID int64) {
