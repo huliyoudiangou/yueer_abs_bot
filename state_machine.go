@@ -3104,6 +3104,10 @@ func handleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 		return
 	}
 
+	if handleBookRequestAnnouncementCallback(bot, cb) {
+		return
+	}
+
 	if reqID, ok := parseBookRequestCallbackID(data, "br_view_"); ok {
 		req, found, err := loadBookRequestByID(DB, reqID, "callback view")
 		if err != nil {
@@ -3383,6 +3387,10 @@ func handleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 	}
 
 	sendPlainText(bot, req.UserID, formatBookRequestUserResultText(req))
+	callbackText := "已处理"
+	if status == bookRequestStatusUploaded {
+		callbackText = maybePromptBookRequestGroupAnnouncement(bot, cb.From.ID, req)
+	}
 
 	currentChatID := int64(0)
 	currentMessageID := 0
@@ -3402,7 +3410,7 @@ func handleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 
 	refreshStoredBookRequestAdminMessage(bot, req, true, currentChatID, currentMessageID)
 
-	answerCallback(bot, cb.ID, "已处理")
+	answerCallback(bot, cb.ID, callbackText)
 }
 
 func getTodayAuditDeltaTotalTx(tx *gorm.DB, actorID int64, action string) (int, error) {
