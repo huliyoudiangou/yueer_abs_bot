@@ -21,7 +21,7 @@ const (
 	gardenStatusHarvest           = "harvested"
 	gardenCallbackPrefix          = "garden:"
 	gardenMarketOfferMax          = 2
-	gardenBaseReturnPct           = 75
+	gardenBaseReturnPct           = 90
 	gardenMaturityNoticeInterval  = 1 * time.Minute
 	gardenMaturityNoticeBatchSize = 200
 )
@@ -120,11 +120,11 @@ var gardenSeeds = []gardenSeedConfig{
 }
 
 var gardenHerbEconomy = map[string]gardenHerbEconomyConfig{
-	"ninglu":   {MarketPriceMin: 5, MarketPriceMax: 6, MarketLimitMin: 8, MarketLimitMax: 12},
-	"qingling": {MarketPriceMin: 10, MarketPriceMax: 11, MarketLimitMin: 6, MarketLimitMax: 10},
-	"chiyang":  {MarketPriceMin: 20, MarketPriceMax: 22, MarketLimitMin: 4, MarketLimitMax: 6},
-	"yuehua":   {MarketPriceMin: 40, MarketPriceMax: 43, MarketLimitMin: 2, MarketLimitMax: 4},
-	"xuanshen": {MarketPriceMin: 60, MarketPriceMax: 64, MarketLimitMin: 1, MarketLimitMax: 2},
+	"ninglu":   {MarketPriceMin: 5, MarketPriceMax: 6, MarketLimitMin: 15, MarketLimitMax: 15},
+	"qingling": {MarketPriceMin: 10, MarketPriceMax: 11, MarketLimitMin: 12, MarketLimitMax: 12},
+	"chiyang":  {MarketPriceMin: 20, MarketPriceMax: 22, MarketLimitMin: 8, MarketLimitMax: 8},
+	"yuehua":   {MarketPriceMin: 40, MarketPriceMax: 43, MarketLimitMin: 5, MarketLimitMax: 5},
+	"xuanshen": {MarketPriceMin: 60, MarketPriceMax: 64, MarketLimitMin: 3, MarketLimitMax: 3},
 	"ziyuzhi":  {MarketPriceMin: 140, MarketPriceMax: 148, MarketLimitMin: 1, MarketLimitMax: 1},
 }
 

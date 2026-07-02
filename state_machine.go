@@ -824,6 +824,12 @@ func pointTransactionTypeText(txType string) string {
 		return "骰子退款"
 	case "dice_win":
 		return "骰子中奖"
+	case "pai_gow_bet":
+		return "牌九下注"
+	case "pai_gow_refund":
+		return "牌九退款"
+	case "pai_gow_win":
+		return "牌九中奖"
 	case "breakthrough_auto_buy":
 		return "突破代购"
 	case "breakthrough_refund":
@@ -4336,6 +4342,11 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		handleDiceGame(bot, msg)
 		return
 	}
+	if text == "发起牌九" || text == "牌九状态" || text == "取消牌九" || isPaiGowBetCommand(text) {
+		registerIncomingGroupCommandForAutoDelete(msg)
+		handlePaiGowGame(bot, msg)
+		return
+	}
 	if text == "发起赛马" || strings.HasPrefix(text, "押 ") {
 		registerIncomingGroupCommandForAutoDelete(msg)
 		handleHorseRace(bot, msg)
@@ -4449,7 +4460,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		"重载修仙配置", "设置突破成功率", "设置突破消耗", "设置突破冷却", "设置突破最低修为",
 		"设置境界门槛", "设置小境界门槛",
 		"查看秘境配置", "设置秘境档位", "设置秘境倍率", "设置秘境掉落",
-		"发起赛马", "押", "天道奖池", "乾坤袋", "药园", "回收灵草", "求书", "我的求书", "待处理求书", "我的处理工单",
+		"发起赛马", "发起牌九", "牌九状态", "取消牌九", "押", "天道奖池", "乾坤袋", "药园", "回收灵草", "求书", "我的求书", "待处理求书", "我的处理工单",
 		"交易行", "交易行帮助", "上架商品", "购买商品", "下架商品", "我的交易行", "我的购买", "我的订单", "交易行订单", "查交易订单", "举报订单",
 		"创建宗门", "加入宗门", "退出宗门", "我的宗门", "宗门排行", "宗门成员", "捐献宗门",
 		"升级宗门", "宗门改名", "确认宗门改名", "修改宗门名称", "确认修改宗门名称", "任命长老", "任命成员", "踢出宗门", "转让宗主", "宗门贡献榜", "宗门周榜",
@@ -8902,10 +8913,6 @@ const (
 	RaceBetStatusActive   = "active"
 	RaceBetStatusSettled  = "settled"
 	RaceBetStatusRefunded = "refunded"
-
-	// 赛马系统补贴比例：系统额外注入玩家总筹码的该比例作为奖池配资。
-	raceSystemSubsidyRate    = 0.10
-	raceSystemSubsidyPercent = 10
 )
 
 func createDiceBetInTx(tx *gorm.DB, bet *DiceBet) error {
@@ -9189,7 +9196,7 @@ func isDiceOpenTime(now time.Time) bool {
 	loc := time.FixedZone("CST", 8*3600)
 	local := now.In(loc)
 	minutes := local.Hour()*60 + local.Minute()
-	return (minutes >= 8*60 && minutes < 19*60+55) || (minutes >= 22*60+5 && minutes < 24*60)
+	return minutes < 17*60+55 || (minutes >= 22*60+5 && minutes < 24*60)
 }
 
 func diceDayKey(t time.Time) string {
@@ -9371,7 +9378,7 @@ func handleDiceGame(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 	if text == "发起骰子" {
 		if !isDiceOpenTime(time.Now()) {
-			sendGroupAutoDeleteMessage(bot, chatID, "⏳ **三界骰局尚未开放！**\n\n开放时间为 **08:00-19:55**、**22:05-24:00**，赛马黄金档前后各预留 5 分钟缓冲。")
+			sendGroupAutoDeleteMessage(bot, chatID, "⏳ **三界骰局尚未开放！**\n\n开放时间为 **22:05 - 次日 17:55**，18:00-19:55 为推牌九时段，20:00-22:00 为赛马时段。")
 			return
 		}
 
@@ -9996,7 +10003,7 @@ func handleHorseRace(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		globalRace.MaxBet = maxBet
 		globalRace.Mu.Unlock()
 
-		notice := fmt.Sprintf("🏇 **皇家赛马场已开放！** 🏇\n\n💰 **本局限额**：`%d` - `%d` 积分\n🌟 **福利补贴**：系统将额外注入总奖池的 **%d%%**！\n⏱ **下注时间**：60 秒\n\n👇 **请在群内回复下注，如：** `押 1 10`\n\n1️⃣号: 🔴红影\n2️⃣号: 🔵蓝电\n3️⃣号: 🟡金光\n4️⃣号: 🟢绿风\n5️⃣号: 🟣紫幻", minBet, maxBet, raceSystemSubsidyPercent)
+		notice := fmt.Sprintf("🏇 **皇家赛马场已开放！** 🏇\n\n💰 **本局限额**：`%d` - `%d` 积分\n📊 **奖池规则**：玩家筹码组成奖池，押中冠军者按本金比例瓜分\n⏱ **下注时间**：60 秒\n\n👇 **请在群内回复下注，如：** `押 1 10`\n\n1️⃣号: 🔴红影\n2️⃣号: 🔵蓝电\n3️⃣号: 🟡金光\n4️⃣号: 🟢绿风\n5️⃣号: 🟣紫幻", minBet, maxBet)
 		sendGroupAutoDeleteMessage(bot, chatID, notice)
 
 		go runHorseRaceRoutine(bot, chatID)
@@ -10330,8 +10337,7 @@ func runHorseRaceRoutine(bot *tgbotapi.BotAPI, chatID int64) {
 	if userPool != memoryUserPool {
 		log.Printf("race settlement db snapshot differs from memory: race_id=%s memory_pool=%d db_pool=%d", formatPlainValue(raceID), memoryUserPool, userPool)
 	}
-	systemSubsidy := int(float64(userPool) * raceSystemSubsidyRate)
-	totalPrizePool := userPool + systemSubsidy
+	totalPrizePool := userPool
 
 	winnerPool := 0
 	for _, bet := range betsSnapshot {
@@ -10452,15 +10458,12 @@ func runHorseRaceRoutine(bot *tgbotapi.BotAPI, chatID int64) {
 			"🏆 **比赛结束！** 🏆\n\n"+
 				"🎉 恭喜 **%d号马 (%s)** 历时 **%.2f 秒** 勇夺冠军！\n\n"+
 				"💰 玩家总筹码: `%d` 积分\n"+
-				"🤖 庄家配资(%d%%): `+%d` 积分\n"+
-				"📊 最终大奖池: `%d` 积分\n\n"+
+				"📊 玩家奖池: `%d` 积分\n\n"+
 				"**🤑 获胜名单 (按比例瓜分)：**\n%s%s",
 			winner,
 			icons[winner-1],
 			finalTime,
 			userPool,
-			raceSystemSubsidyPercent,
-			systemSubsidy,
 			totalPrizePool,
 			winList,
 			poolNotice,

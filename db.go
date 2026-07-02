@@ -619,6 +619,28 @@ func (DiceDailyProfit) TableName() string {
 	return "dice_daily_profits"
 }
 
+// 牌九下注记录表。
+// 用于保证同一局牌九中，同一个用户只能下注一次，并支持异常重启兜底退款。
+type PaiGowBet struct {
+	gorm.Model
+	GameID      string `gorm:"index;not null"`
+	ChatID      int64  `gorm:"index;not null"`
+	UserID      int64  `gorm:"index;not null"`
+	UserName    string
+	Points      int
+	Status      string `gorm:"index;default:'active'"`
+	PlayerHand  string
+	DealerHand  string
+	PlayerPoint int `gorm:"default:0"`
+	DealerPoint int `gorm:"default:0"`
+	Payout      int `gorm:"default:0"`
+	Result      string
+}
+
+func (PaiGowBet) TableName() string {
+	return "pai_gow_bets"
+}
+
 // 用户求书工单表。
 // Status:
 // pending   = 待接单
@@ -756,6 +778,7 @@ func InitDB() {
 		&RaceBet{},
 		&DiceBet{},
 		&DiceDailyProfit{},
+		&PaiGowBet{},
 		&BookRequest{},
 		&BookRequestLog{},
 		&LotteryActivity{},
@@ -1005,6 +1028,25 @@ func runConsistencyMigrations() {
 	// 6.3 历史骰子记录兼容迁移。
 	mustExecMigration(`
 		UPDATE dice_bets
+		SET status = 'settled'
+		WHERE status IS NULL OR status = '';
+	`)
+
+	assertNoDuplicateGroups("pai_gow_bets(game_id, user_id)", `
+		SELECT game_id || ':' || CAST(user_id AS TEXT) AS key, COUNT(*) AS count
+		FROM pai_gow_bets
+		GROUP BY game_id, user_id
+		HAVING COUNT(*) > 1;
+	`)
+
+	// 6.4 创建唯一索引：同一局牌九，同一个用户只能下注一次。
+	mustExecMigration(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_pai_gow_bets_game_user_unique
+		ON pai_gow_bets(game_id, user_id);
+	`)
+	// 6.5 历史牌九记录兼容迁移。
+	mustExecMigration(`
+		UPDATE pai_gow_bets
 		SET status = 'settled'
 		WHERE status IS NULL OR status = '';
 	`)
