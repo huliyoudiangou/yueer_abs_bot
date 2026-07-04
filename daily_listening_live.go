@@ -207,15 +207,17 @@ func consumeAbsLiveListeningSessionDelta(userID int64, absUserID string, session
 	}
 
 	if err == nil && !cp.LastObservedAt.IsZero() {
+		usedPositionDelta := false
 		if session.HasPosition && cp.LastPositionSeconds >= 0 {
 			delta := session.PositionSeconds - cp.LastPositionSeconds
 			if delta > 0 && livePositionDeltaAllowed(delta, cp.LastObservedAt, now) {
 				addAllocatedLiveSeconds(result, cp.LastObservedAt, now, delta)
+				usedPositionDelta = true
 			}
-		} else if !session.HasPosition && session.HasPlayingState {
-			delta := now.Sub(cp.LastObservedAt)
-			if delta > 0 && delta <= dailyListeningLiveClockFallbackMax {
-				addAllocatedLiveSeconds(result, cp.LastObservedAt, now, delta.Seconds())
+		}
+		if !usedPositionDelta && session.HasPlayingState && cp.LastIsPlaying {
+			if deltaSeconds, ok := liveClockFallbackSeconds(cp.LastObservedAt, now); ok {
+				addAllocatedLiveSeconds(result, cp.LastObservedAt, now, deltaSeconds)
 			}
 		}
 	} else if session.HasPlayingState && !session.StartedAt.IsZero() {
@@ -230,6 +232,17 @@ func consumeAbsLiveListeningSessionDelta(userID int64, absUserID string, session
 
 	upsertAbsLiveListeningCheckpoint(userID, absUserID, session, now)
 	return result
+}
+
+func liveClockFallbackSeconds(lastObservedAt time.Time, now time.Time) (float64, bool) {
+	if lastObservedAt.IsZero() || !now.After(lastObservedAt) {
+		return 0, false
+	}
+	delta := now.Sub(lastObservedAt)
+	if delta <= 0 || delta > dailyListeningLiveClockFallbackMax {
+		return 0, false
+	}
+	return delta.Seconds(), true
 }
 
 func livePositionDeltaAllowed(delta float64, lastObservedAt time.Time, now time.Time) bool {

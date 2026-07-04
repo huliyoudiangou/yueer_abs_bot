@@ -37,6 +37,7 @@ type PaiGowState struct {
 	Bets       map[int64]*PaiGowPlayerBet
 	TotalPool  int
 	Mu         sync.Mutex
+	StartedAt  time.Time
 	LastGameAt time.Time
 }
 
@@ -265,15 +266,19 @@ func handlePaiGowStart(bot *tgbotapi.BotAPI, chatID int64, state *PaiGowState) {
 	state.IsDealing = false
 	state.Bets = make(map[int64]*PaiGowPlayerBet)
 	state.TotalPool = 0
+	state.StartedAt = time.Now()
 	state.Mu.Unlock()
 
 	notice := "🃏 **推牌九开局**\n\n" +
-		"庄家：天机阁\n" +
-		"⏱ **下注时间**：60 秒\n" +
-		"💰 **下注范围**：`1` - `5` 积分\n" +
-		"🕕 **开放时段**：18:00 - 19:55\n\n" +
-		"👇 **下注格式**：`押 3`\n\n" +
-		"规则：A=1，2-9按牌面，10/J/Q/K=0；每人两张取个位，9点最大，同点庄家大半点。"
+		"庄家：天机阁坐庄\n" +
+		"下注期：60 秒，买定离手\n" +
+		"下注范围：`1` - `5` 积分\n" +
+		"开放时段：18:00 - 19:55\n" +
+		"下注格式：`押 3`\n\n" +
+		"牌规：52 张扑克牌，无大小王；A=1，2-9 按牌面，10/J/Q/K=0。\n" +
+		"计点：每人两张牌相加取个位，9 点最大，不存在 9 点半。\n" +
+		"胜负：玩家点数大于庄家即胜，按 1:1 赔付；同点视为庄家大半点。\n\n" +
+		"本局开奖结果会发布到群内，按群消息规则定时清理，不置顶。"
 	sendGroupAutoDeleteMessage(bot, chatID, notice)
 
 	go runPaiGowRoutine(bot, chatID)
@@ -290,7 +295,14 @@ func handlePaiGowStatus(bot *tgbotapi.BotAPI, chatID int64, state *PaiGowState) 
 	if state.IsDealing {
 		status = "开奖中"
 	}
-	sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("🃏 **推牌九状态**\n\n当前状态：%s\n参与人数：`%d/%d`\n总下注：`%d` 积分", status, len(state.Bets), paiGowMaxPlayers, state.TotalPool))
+	remaining := 0
+	if !state.IsDealing && !state.StartedAt.IsZero() {
+		remaining = int(time.Until(state.StartedAt.Add(paiGowBetDuration)).Seconds())
+		if remaining < 0 {
+			remaining = 0
+		}
+	}
+	sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("🃏 **推牌九状态**\n\n当前状态：%s\n剩余下注：`%d` 秒\n参与人数：`%d/%d`\n总下注：`%d` 积分\n\n下注格式：`押 3`，每位道友每局只能下注一次。", status, remaining, len(state.Bets), paiGowMaxPlayers, state.TotalPool))
 }
 
 func handlePaiGowCancel(bot *tgbotapi.BotAPI, chatID int64, userID int64, state *PaiGowState) {
@@ -332,6 +344,7 @@ func handlePaiGowCancel(bot *tgbotapi.BotAPI, chatID int64, userID int64, state 
 	state.IsDealing = false
 	state.Bets = make(map[int64]*PaiGowPlayerBet)
 	state.TotalPool = 0
+	state.StartedAt = time.Time{}
 	state.LastGameAt = time.Now()
 	state.Mu.Unlock()
 
@@ -467,9 +480,11 @@ func handlePaiGowBet(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, chatID int64, 
 	}
 	state.Bets[userID] = &PaiGowPlayerBet{UserName: safeName, Points: points}
 	state.TotalPool += points
+	playerCount := len(state.Bets)
+	totalPool := state.TotalPool
 	state.Mu.Unlock()
 
-	sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("✅ @%s 成功下注 **%d** 积分，等待天机阁开牌！", safeName, points))
+	sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("✅ @%s 已押下 **%d** 积分。\n\n本局当前：`%d/%d` 人，桌面合计 `%d` 积分。请等待天机阁开牌。", safeName, points, playerCount, paiGowMaxPlayers, totalPool))
 }
 
 func runPaiGowRoutine(bot *tgbotapi.BotAPI, chatID int64) {
@@ -496,6 +511,7 @@ func runPaiGowRoutine(bot *tgbotapi.BotAPI, chatID int64) {
 		if state.GameID == gameID {
 			state.IsActive = false
 			state.IsDealing = false
+			state.StartedAt = time.Time{}
 			state.LastGameAt = time.Now()
 		}
 		state.Mu.Unlock()
@@ -591,8 +607,12 @@ func runPaiGowRoutine(bot *tgbotapi.BotAPI, chatID int64) {
 	}
 
 	dealerHandText := paiGowHandText(dealerHand)
-	err = DB.Transaction(func(tx *gorm.DB) error {
+	poolInjected := 0
+	poolAfter := 0
+	poolBurst := false
+	err = runFusionPoolLockedTransaction(func(tx *gorm.DB) error {
 		claimedCount := 0
+		botWinTotal := 0
 		for _, player := range players {
 			values := map[string]interface{}{
 				"status":       RaceBetStatusSettled,
@@ -623,10 +643,20 @@ func runPaiGowRoutine(bot *tgbotapi.BotAPI, chatID int64) {
 				); err != nil {
 					return err
 				}
+			} else {
+				botWinTotal += player.Points
 			}
 		}
 		if claimedCount != len(players) {
 			return fmt.Errorf("PAI_GOW_SETTLEMENT_MISSED")
+		}
+		if botWinTotal > 0 {
+			var err error
+			poolInjected = botWinTotal
+			poolAfter, poolBurst, err = addPointsToFusionPoolInTx(tx, botWinTotal)
+			if err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -636,7 +666,10 @@ func runPaiGowRoutine(bot *tgbotapi.BotAPI, chatID int64) {
 	}
 	settled = true
 
-	sendPaiGowFinalAnnouncement(bot, chatID, dealerHand, dealerPoint, players)
+	if poolBurst {
+		notifyFusionPoolBurst(bot, chatID, "推牌九庄家通吃筹码注入天道")
+	}
+	sendPaiGowFinalAnnouncement(bot, chatID, dealerHand, dealerPoint, players, poolInjected, poolAfter, poolBurst)
 }
 
 func shuffledPaiGowDeck() ([]PaiGowCard, error) {
@@ -692,7 +725,7 @@ func paiGowHandText(hand []PaiGowCard) string {
 	return strings.Join(parts, "、")
 }
 
-func sendPaiGowFinalAnnouncement(bot *tgbotapi.BotAPI, chatID int64, dealerHand []PaiGowCard, dealerPoint int, players []PaiGowDealtPlayer) {
+func sendPaiGowFinalAnnouncement(bot *tgbotapi.BotAPI, chatID int64, dealerHand []PaiGowCard, dealerPoint int, players []PaiGowDealtPlayer, poolInjected int, poolAfter int, poolBurst bool) {
 	var b strings.Builder
 	b.WriteString("🃏 **推牌九开奖**\n\n")
 	b.WriteString(fmt.Sprintf("庄家：%s｜`%d点`\n\n", escapeMarkdown(paiGowHandText(dealerHand)), dealerPoint))
@@ -706,14 +739,20 @@ func sendPaiGowFinalAnnouncement(bot *tgbotapi.BotAPI, chatID int64, dealerHand 
 			b.WriteString(fmt.Sprintf("不敌庄家，失去 `%d` 积分\n\n", player.Points))
 		}
 	}
+	if poolInjected > 0 {
+		b.WriteString(fmt.Sprintf("🌊 庄家赢下 `%d` 积分，已注入天道奖池，当前水位 `%d/300`。\n", poolInjected, poolAfter))
+		if poolBurst {
+			b.WriteString("🎁 天道奖池已满，系统自动生成灵气红包。\n")
+		}
+	}
 
-	sendPaiGowPermanentMarkdown(bot, chatID, strings.TrimSpace(b.String()))
+	sendPaiGowAutoDeleteMarkdown(bot, chatID, strings.TrimSpace(b.String()))
 }
 
-func sendPaiGowPermanentMarkdown(bot *tgbotapi.BotAPI, chatID int64, text string) {
+func sendPaiGowAutoDeleteMarkdown(bot *tgbotapi.BotAPI, chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "Markdown"
-	if _, err := sendNoAutoDelete(bot, msg); err != nil {
-		log.Printf("⚠️ 发送牌九永久开奖结果失败: chat=%d err=%s", chatID, formatTelegramSendError(err))
+	if _, err := sendAutoDelete(bot, msg); err != nil {
+		log.Printf("⚠️ 发送牌九开奖结果失败: chat=%d err=%s", chatID, formatTelegramSendError(err))
 	}
 }
