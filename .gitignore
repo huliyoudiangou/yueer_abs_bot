@@ -1,0 +1,48 @@
+﻿# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data
+data/
+backups/
+logs/
+tmp/
+reports/
+.tools/
+
+# SQLite
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Encrypted backups
+*.enc
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build artifacts
+abs_bot
+abs-bot
+abs-bot.exe
+bot
+bot.exe
+*.exe
+*.out
+*.test
+coverage.out
+coverage.html
+
+# Go workspace / vendor (if local only)
+# vendor/
+
+# Local notes / scratch
+*.local.md

@@ -1,0 +1,96 @@
+{
+  "generated_at": "2026-06-22T14:35:00+08:00",
+  "description": "Accepted review baseline for agent_tasks. Only review-level findings may be accepted; todo/error findings remain blocking.",
+  "accepted_reviews": [
+    {
+      "id": "agent-e615c345a6b9556e",
+      "source": "agent_audit",
+      "kind": "abs-delete-review",
+      "title": "ABS DeleteUser is high risk and should remain guarded, audited, and documented.",
+      "file": "notifier.go",
+      "line": 628,
+      "evidence": "err := absClient.DeleteUser(u.AbsUserID)",
+      "reason": "lifecycle background deletion path; ABS delete failure preserves local record, ABS missing is recorded, and local physical delete plus system AuditLog are committed in one transaction"
+    },
+    {
+      "id": "agent-519313827de1d64d",
+      "source": "agent_audit",
+      "kind": "abs-delete-review",
+      "title": "ABS DeleteUser is high risk and should remain guarded, audited, and documented.",
+      "file": "state_machine.go",
+      "line": 5929,
+      "evidence": "if err := absClient.DeleteUser(u.AbsUserID); err != nil && !IsAbsNotFoundError(err) {",
+      "reason": "user self-delete path guarded by security code, final confirmation, and super-admin self-delete protection; ABS not-found is handled via IsAbsNotFoundError and local delete plus SELF_DELETE_USER AuditLog are committed in one transaction"
+    },
+    {
+      "id": "agent-5f34d24eab9cf8b5",
+      "source": "agent_audit",
+      "kind": "abs-delete-review",
+      "title": "ABS DeleteUser is high risk and should remain guarded, audited, and documented.",
+      "file": "state_machine.go",
+      "line": 6266,
+      "evidence": "if err := absClient.DeleteUser(id); err == nil || IsAbsNotFoundError(err) {",
+      "reason": "super-admin widow-account cleanup path; command requires super-admin flow, reason, confirmation, and ABS not-found is handled as idempotent success via IsAbsNotFoundError"
+    },
+    {
+      "id": "agent-b77598180ddc4784",
+      "source": "agent_audit",
+      "kind": "abs-delete-review",
+      "title": "ABS DeleteUser is high risk and should remain guarded, audited, and documented.",
+      "file": "state_machine.go",
+      "line": 6636,
+      "evidence": "apiErr := absClient.DeleteUser(tUser.AbsUserID)",
+      "reason": "super-admin force-delete path with reason, confirmation, repeated target validation, self-delete/super-admin protection, and local delete plus FORCE_DELETE_USER AuditLog are committed in one transaction"
+    },
+    {
+      "id": "agent-46d6445258fd979a",
+      "source": "agent_audit",
+      "kind": "abs-delete-rollback-review",
+      "title": "ABS DeleteUser is used as registration rollback; keep it scoped to compensating failed local writes.",
+      "file": "state_machine.go",
+      "line": 5594,
+      "evidence": "rollbackErr := absClient.DeleteUser(id)",
+      "reason": "registration rollback deletion is scoped to compensating a failed local registration write after ABS account creation"
+    },
+    {
+      "id": "agent-243b303518ac96fa",
+      "source": "agent_audit",
+      "kind": "destructive-data-op",
+      "title": "Destructive data operation requires explicit review before production use.",
+      "file": "db.go",
+      "line": 622,
+      "evidence": "DELETE FROM inventories",
+      "reason": "known soft-deleted inventory cleanup in consistency migration before creating unique index; revisit on inventory migration changes"
+    },
+    {
+      "id": "agent-4e3cfb44f4469d5c",
+      "source": "agent_audit",
+      "kind": "destructive-data-op",
+      "title": "Destructive data operation requires explicit review before production use.",
+      "file": "db.go",
+      "line": 642,
+      "evidence": "DELETE FROM inventories",
+      "reason": "known inventory duplicate cleanup in consistency migration before creating unique index; quantities are merged into the kept row before duplicate rows are deleted"
+    },
+    {
+      "id": "agent-3da4314ab07b8244",
+      "source": "agent_audit",
+      "kind": "destructive-data-op",
+      "title": "Destructive data operation requires explicit review before production use.",
+      "file": "db.go",
+      "line": 653,
+      "evidence": "DELETE FROM red_packet_grabs",
+      "reason": "known red packet duplicate-grab cleanup in consistency migration before creating unique index; revisit on red packet migration changes"
+    },
+    {
+      "id": "agent-17dac2510cc5d46c",
+      "source": "agent_audit",
+      "kind": "destructive-data-op",
+      "title": "Destructive data operation requires explicit review before production use.",
+      "file": "db.go",
+      "line": 917,
+      "evidence": "DELETE FROM world_boss_participants",
+      "reason": "known world boss participant deduplication migration before creating partial unique index; earliest participant row is retained"
+    }
+  ]
+}

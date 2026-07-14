@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>药园</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/garden/styles.css?v=20260710-farm-rework-4" />
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  </head>
+  <body>
+    <div class="cultivation-backdrop" aria-hidden="true">
+      <span class="backdrop-mountain mountain-left"></span>
+      <span class="backdrop-mountain mountain-right"></span>
+      <span class="backdrop-mist mist-veil-a"></span>
+      <span class="backdrop-mist mist-veil-b"></span>
+      <span class="backdrop-sword sword-trace-a"></span>
+      <span class="backdrop-sword sword-trace-b"></span>
+      <span class="backdrop-formation formation-a"></span>
+      <span class="backdrop-formation formation-b"></span>
+      <span class="backdrop-rune rune-a"></span>
+      <span class="backdrop-rune rune-b"></span>
+    </div>
+    <main class="app-shell">
+      <header class="game-header">
+        <div class="garden-brand">
+          <span class="brand-seal" aria-hidden="true">药</span>
+          <div>
+            <strong>百草灵圃</strong>
+            <em id="gardenPulse">正在巡园</em>
+          </div>
+        </div>
+        <button id="refreshBtn" class="icon-button" type="button" title="刷新园况" aria-label="刷新园况">↻</button>
+        <div class="resource-strip" aria-label="药园资源">
+          <span class="resource-chip points-chip"><i aria-hidden="true">灵</i><strong id="points">-</strong><em>积分</em></span>
+          <span class="resource-chip plots-chip"><i aria-hidden="true">田</i><strong id="plotCount">-</strong><em>灵田</em></span>
+          <span class="resource-chip ready-chip"><i aria-hidden="true">收</i><strong id="readyCount">-</strong><em>可收</em></span>
+        </div>
+      </header>
+      <div id="offlineBanner" class="offline-banner" hidden>
+        <span>📡</span>
+        <strong>离线模式</strong>
+        <em>操作可能不被保存，正在重连...</em>
+      </div>
+      <section id="statusBar" class="status-bar" hidden></section>
+      <section id="content" class="content" aria-live="polite"></section>
+      <nav id="bottomDock" class="bottom-dock" aria-label="药园快捷码头"></nav>
+    </main>
+
+    <script src="/garden/app.js?v=20260710-farm-rework-4"></script>
+  </body>
+</html>
