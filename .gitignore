@@ -1,4 +1,4 @@
-﻿# Environment secrets
+# Environment secrets
 .env
 .env.*
 !.env.example
@@ -41,7 +41,7 @@ bot.exe
 coverage.out
 coverage.html
 
-# Tests
+# Tests (local verification only; do not commit or upload)
 *_test.go
 **/*_test.go
 
