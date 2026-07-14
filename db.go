@@ -176,6 +176,11 @@ type InviteCode struct {
 
 	IsUsed   bool `gorm:"default:false"`
 	UsedByID int64
+
+	// Cash-out is a terminal consumption path distinct from account redemption.
+	CashedOutAt   *time.Time `gorm:"index"`
+	CashedOutByID int64      `gorm:"index"`
+	CashoutPoints int
 }
 
 type RenewCode struct {
@@ -200,6 +205,11 @@ type RenewCode struct {
 	// marketplace purchases transfer ownership to the buyer in the purchase tx.
 	OwnerUserID int64  `gorm:"index"`
 	Source      string `gorm:"index"`
+
+	// Cash-out is a terminal consumption path distinct from account redemption.
+	CashedOutAt   *time.Time `gorm:"index"`
+	CashedOutByID int64      `gorm:"index"`
+	CashoutPoints int
 }
 
 type SectShopRenewClaim struct {

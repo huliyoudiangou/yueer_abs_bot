@@ -87,7 +87,7 @@ const (
 	groupMemberPositiveTTL = 5 * time.Minute
 	groupMemberNegativeTTL = 1 * time.Minute
 	groupMemberFreshTTL    = 30 * time.Second
-	blindBoxCost           = 20
+	blindBoxCost           = 25
 )
 
 func getSession(userID int64) *SessionState {
@@ -738,35 +738,42 @@ func executeBlindBoxOpen(tgUser *tgbotapi.User) (string, string, error) {
 			return err
 		}
 
-		nBig, err := rand.Int(rand.Reader, big.NewInt(100))
+		nBig, err := rand.Int(rand.Reader, big.NewInt(1000))
 		if err != nil {
 			return err
 		}
 		roll := int(nBig.Int64()) + 1
 
 		switch {
-		case roll <= 71:
+		case roll <= 739:
 			txReplyMsg = resultPrefix + "💨 噗~ 里面空空如也。\n**【谢谢惠顾】**\n\n别灰心，垫子已经铺好，下发必出金！"
-		case roll <= 91:
+		case roll <= 939:
 			code := fmt.Sprintf("R%d-%s", 3, generateRandomCode(16))
 			if err := createRenewCodeRecord(tx, code, 3); err != nil {
 				return err
 			}
 			txReplyMsg = resultPrefix + fmt.Sprintf("🎉 恭喜获得保底小奖：**【3天续期卡】**！\n💳 专属卡密：`%s`\n(卡密已升级为16位安全密钥，请在此发送充值)", code)
-		case roll <= 94:
+		case roll <= 959:
 			code := generateRandomCode(16)
 			if err := createInviteCodeRecord(tx, code); err != nil {
 				return err
 			}
 			txReplyMsg = resultPrefix + fmt.Sprintf("🎉 运气不错！恭喜获得：**【专属邀请码】**！\n🎫 邀请码：`%s`\n(可直接用于开户)", code)
-		case roll <= 99:
+		case roll <= 989:
 			code := fmt.Sprintf("R%d-%s", 30, generateRandomCode(16))
 			if err := createRenewCodeRecord(tx, code, 30); err != nil {
 				return err
 			}
 			txReplyMsg = resultPrefix + fmt.Sprintf("🎊 运气爆棚！获得大奖：**【30天续期月卡】**！\n💳 专属卡密：`%s`", code)
 			txBroadcastMsg = fmt.Sprintf("🎰 **欧皇降临！**\n\n恭喜 @%s 在积分盲盒中单抽入魂，斩获大奖 **【💳 30天续期月卡】**！", safeName)
-		case roll <= 100:
+		case roll <= 999:
+			code := fmt.Sprintf("R%d-%s", 90, generateRandomCode(16))
+			if err := createRenewCodeRecord(tx, code, 90); err != nil {
+				return err
+			}
+			txReplyMsg = resultPrefix + fmt.Sprintf("🌟 鸿运当头！获得珍稀大奖：**【90天续期季卡】**！\n💳 专属卡密：`%s`", code)
+			txBroadcastMsg = fmt.Sprintf("🌟 **鸿运降临！**\n\n恭喜 @%s 在积分盲盒中斩获珍稀大奖 **【💳 90天续期季卡】**！", safeName)
+		case roll <= 1000:
 			code := fmt.Sprintf("R%d-%s", 365, generateRandomCode(16))
 			if err := createRenewCodeRecord(tx, code, 365); err != nil {
 				return err
@@ -977,6 +984,8 @@ func pointTransactionTypeText(txType string) string {
 		return "连签奖励"
 	case "blind_box_cost":
 		return "盲盒消费"
+	case "code_cashout":
+		return "本服卡密回收"
 	case "exchange_invite":
 		return "兑换邀请码"
 	case "exchange_renew":
@@ -2550,7 +2559,7 @@ func isMenuLikeBookRequestReply(text string) bool {
 
 	menuWords := []string{
 		"/start", "/admin",
-		"注册", "绑定", "签到", "兑换", "邀请码", "续期卡",
+		"注册", "绑定", "签到", "兑换", "卡密回收", "回收卡密", "邀请码", "续期卡",
 		"求书", "我的求书", "待处理求书", "我的处理工单",
 		"我的信息", "听书报告", "取消", "返回",
 	}
@@ -4836,6 +4845,18 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
+		if text == "卡密回收" || text == "回收卡密" {
+			if _, _, err := ensureUserWallet(msg.From); err != nil {
+				log.Printf("❌ 卡密回收钱包初始化失败: user=%d err=%s", userID, formatPlainError(err))
+				sendPlainText(bot, chatID, "❌ 钱包初始化失败，请稍后重试。")
+				return
+			}
+			session.SetStep("WAITING_CODE_CASHOUT_INPUT")
+			UserSessions.Store(userID, session)
+			sendPlainText(bot, chatID, "♻️ 本服卡密回收\n\n仅支持本 Bot 生成且当前真实可用的邀请码或续期卡，按当前系统定价的 60% 回收。回收后卡密永久失效且不可恢复。\n\n请发送需要回收的完整卡密，或发送“取消”退出。")
+			return
+		}
+
 		if strings.Contains(text, "兑换") {
 			u, _, walletErr := ensureUserWallet(msg.From)
 			if walletErr != nil {
@@ -5691,6 +5712,65 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 	case "WAITING_CONFIRM_BREAKTHROUGH":
 		handleBreakthroughConfirmation(bot, msg, session, text)
+
+	case "WAITING_CODE_CASHOUT_INPUT":
+		quote, err := inspectCodeCashout(text)
+		if err != nil {
+			if errors.Is(err, errCodeCashoutInvalid) {
+				sendPlainText(bot, chatID, "❌ 该卡密不是本服真实可用的邀请码或续期卡，或已经被使用/回收。请核对后重试。")
+				return
+			}
+			if errors.Is(err, errCodeCashoutPriceInvalid) {
+				sendPlainText(bot, chatID, "❌ 当前系统定价无法计算有效回收积分，本次回收已中止。")
+				clearSession(userID)
+				return
+			}
+			log.Printf("❌ 卡密回收预检失败: user=%d err=%s", userID, formatPlainError(err))
+			sendPlainText(bot, chatID, "❌ 卡密状态或回收价格读取失败，请稍后重试。")
+			clearSession(userID)
+			return
+		}
+		session.SetTemp("cashout_kind", quote.Kind)
+		session.SetTemp("cashout_record_id", strconv.FormatUint(uint64(quote.RecordID), 10))
+		session.SetTemp("cashout_hash", quote.Hash)
+		session.SetTemp("cashout_preview", quote.Preview)
+		session.SetTemp("cashout_name", quote.Name)
+		session.SetTemp("cashout_points", strconv.Itoa(quote.Points))
+		session.SetStep("WAITING_CODE_CASHOUT_CONFIRM")
+		UserSessions.Store(userID, session)
+		sendPlainText(bot, chatID, fmt.Sprintf("♻️ 本服卡密回收确认\n\n类型：%s\n卡密：%s\n回收所得：%d 积分\n\n确认后该卡密将永久失效，无法充值、交易或恢复。\n\n确认请回复：确认回收卡密\n取消请回复：取消", quote.Name, quote.Preview, quote.Points))
+
+	case "WAITING_CODE_CASHOUT_CONFIRM":
+		if text != "确认回收卡密" {
+			sendPlainText(bot, chatID, "请回复“确认回收卡密”，或发送“取消”退出。")
+			return
+		}
+		recordID, idErr := strconv.ParseUint(session.GetTemp("cashout_record_id"), 10, 64)
+		points, pointsErr := strconv.Atoi(session.GetTemp("cashout_points"))
+		quote := codeCashoutQuote{Kind: session.GetTemp("cashout_kind"), RecordID: uint(recordID), Hash: session.GetTemp("cashout_hash"), Preview: session.GetTemp("cashout_preview"), Name: session.GetTemp("cashout_name"), Points: points}
+		if idErr != nil || pointsErr != nil || quote.RecordID == 0 || quote.Points <= 0 || quote.Hash == "" {
+			sendPlainText(bot, chatID, "❌ 回收确认会话已失效，请重新发起卡密回收。")
+			clearSession(userID)
+			return
+		}
+		awarded, err := executeCodeCashout(userID, quote)
+		if err != nil {
+			switch {
+			case errors.Is(err, errCodeCashoutInvalid):
+				sendPlainText(bot, chatID, "❌ 卡密已被使用、回收或状态发生变化，本次未发放积分。")
+			case errors.Is(err, errCodeCashoutPriceChanged):
+				sendPlainText(bot, chatID, "⚠️ 系统定价在确认期间发生变化，本次未回收。请重新发起以确认最新回收价。")
+			case errors.Is(err, errCodeCashoutPriceInvalid):
+				sendPlainText(bot, chatID, "❌ 当前系统定价无法计算有效回收积分，本次回收已中止。")
+			default:
+				log.Printf("❌ 卡密回收事务失败: user=%d kind=%s record=%d err=%s", userID, formatPlainValue(quote.Kind), quote.RecordID, formatPlainError(err))
+				sendPlainText(bot, chatID, "❌ 卡密回收失败，本次未发放积分且卡密状态未改变，请稍后重试。")
+			}
+			clearSession(userID)
+			return
+		}
+		sendPlainText(bot, chatID, fmt.Sprintf("✅ 卡密回收成功\n\n类型：%s\n卡密：%s\n获得：%d 积分\n\n该卡密已永久失效。", quote.Name, quote.Preview, awarded))
+		clearSession(userID)
 
 	case "WAITING_CONFIRM_BLIND_BOX":
 		if text == "确认开启盲盒" {

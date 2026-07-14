@@ -1519,6 +1519,8 @@ func executeMarketplaceBuy(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, listingI
 		return
 	}
 
+	result.BuyerID = msg.From.ID
+	result.BuyerName = getTelegramDisplayName(msg.From)
 	if result.Listing.ListingType == marketplaceTypeInventory {
 		sendPlainText(bot, msg.Chat.ID, marketplaceInventoryPurchaseSuccessText(result))
 	} else {
@@ -1558,15 +1560,23 @@ func marketplaceSecretPurchaseSuccessText(result marketplacePurchaseResult) stri
 }
 
 func marketplaceSellerDealNoticeText(result marketplacePurchaseResult) string {
+	buyerName := marketplaceDisplayText(result.BuyerName, marketplaceDisplayNameMaxLen, "-")
+	buyerLine := fmt.Sprintf("买家：%s（Telegram ID：%d）\n", buyerName, result.BuyerID)
+	secretLine := result.SellerSecretPreviewText()
+	if secretLine != "" {
+		secretLine = "\n已售卡密（脱敏）：\n" + secretLine
+	}
 	return fmt.Sprintf(
-		"🛒 交易行成交\n\n商品：%s x%d\n%s成交额：%d 积分\n手续费：%d\n实收：%d 积分\n订单：%s",
+		"🛒 交易行成交\n\n商品：%s x%d\n%s%s成交额：%d 积分\n手续费：%d\n实收：%d 积分\n订单：%s%s",
 		marketplaceVisibleItemName(result.Listing.Name),
 		result.Quantity,
 		marketplaceListingPillEffectLine(result.Listing.ListingType, result.Listing.Name),
+		buyerLine,
 		result.GrossAmount,
 		result.FeeAmount,
 		result.SellerAmount,
 		result.PurchaseIDText(),
+		secretLine,
 	)
 }
 
@@ -1700,13 +1710,16 @@ func marketplaceVerifiedSecretUsableTx(tx *gorm.DB, secret MarketplaceSecret) (b
 }
 
 type marketplacePurchaseResult struct {
-	Codes        []string
-	Listing      MarketplaceListing
-	PurchaseIDs  []uint
-	Quantity     int
-	GrossAmount  int
-	FeeAmount    int
-	SellerAmount int
+	Codes            []string
+	PurchasePreviews []string
+	Listing          MarketplaceListing
+	BuyerID          int64
+	BuyerName        string
+	PurchaseIDs      []uint
+	Quantity         int
+	GrossAmount      int
+	FeeAmount        int
+	SellerAmount     int
 }
 
 func (r marketplacePurchaseResult) PurchaseIDText() string {
@@ -1718,6 +1731,21 @@ func (r marketplacePurchaseResult) PurchaseIDText() string {
 		parts = append(parts, fmt.Sprintf("#%d", id))
 	}
 	return strings.Join(parts, ", ")
+}
+
+func (r marketplacePurchaseResult) SellerSecretPreviewText() string {
+	if r.Listing.ListingType == marketplaceTypeInventory || len(r.PurchasePreviews) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(r.PurchasePreviews))
+	for i, preview := range r.PurchasePreviews {
+		orderText := "订单 -"
+		if i < len(r.PurchaseIDs) {
+			orderText = fmt.Sprintf("订单 #%d", r.PurchaseIDs[i])
+		}
+		lines = append(lines, fmt.Sprintf("%s｜%s", orderText, marketplaceDisplayText(preview, marketplaceDisplayPreviewMaxLen, "-")))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func createMarketplacePurchaseInTx(tx *gorm.DB, purchase *MarketplacePurchase) error {
@@ -1749,6 +1777,7 @@ func purchaseMarketplaceListing(buyerID int64, listingID uint, buyQty int) (mark
 	var listing MarketplaceListing
 	codes := make([]string, 0, buyQty)
 	purchaseIDs := make([]uint, 0, buyQty)
+	purchasePreviews := make([]string, 0, buyQty)
 	totalQuantity := 0
 	grossAmount := 0
 	feeAmount := 0
@@ -1916,6 +1945,7 @@ func purchaseMarketplaceListing(buyerID int64, listingID uint, buyQty int) (mark
 				return err
 			}
 			purchaseIDs = append(purchaseIDs, purchase.ID)
+			purchasePreviews = append(purchasePreviews, purchase.CodePreview)
 		}
 
 		res := tx.Model(&MarketplaceListing{}).
@@ -1959,13 +1989,15 @@ func purchaseMarketplaceListing(buyerID int64, listingID uint, buyQty int) (mark
 	}
 
 	return marketplacePurchaseResult{
-		Codes:        codes,
-		Listing:      listing,
-		PurchaseIDs:  purchaseIDs,
-		Quantity:     totalQuantity,
-		GrossAmount:  grossAmount,
-		FeeAmount:    feeAmount,
-		SellerAmount: sellerAmount,
+		Codes:            codes,
+		PurchasePreviews: purchasePreviews,
+		Listing:          listing,
+		BuyerID:          buyerID,
+		PurchaseIDs:      purchaseIDs,
+		Quantity:         totalQuantity,
+		GrossAmount:      grossAmount,
+		FeeAmount:        feeAmount,
+		SellerAmount:     sellerAmount,
 	}, nil
 }
 
@@ -2444,6 +2476,8 @@ func formatMarketplacePurchaseLine(purchase MarketplacePurchase, adminView bool)
 			marketplaceTypeText(purchase.DeliveryType),
 			marketplaceDisplayText(purchase.CodePreview, marketplaceDisplayPreviewMaxLen, "-"),
 		)
+	} else if strings.TrimSpace(purchase.CodePreview) != "" {
+		line += fmt.Sprintf("卡密预览：%s\n", marketplaceDisplayText(purchase.CodePreview, marketplaceDisplayPreviewMaxLen, "-"))
 	}
 	return line + "\n"
 }
