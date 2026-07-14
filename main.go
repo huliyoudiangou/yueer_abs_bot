@@ -200,6 +200,7 @@ func main() {
 	StartLotteryScheduler(bot)
 	StartSectLotteryScheduler(bot)
 	StartSectHornDispatcher(bot)
+	StartCompensationDispatcher(bot)
 	StartMarketplaceExpiryScheduler(bot)
 	StartGardenMaturityNotifier(bot)
 
@@ -285,6 +286,9 @@ func dispatchTelegramUpdate(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob
 				return
 			}
 			if handleSectMemberPageCallback(bot, cb) {
+				return
+			}
+			if handleWealthLeaderboardCallback(bot, cb) {
 				return
 			}
 			if handleMenuCallback(bot, cb) {

@@ -271,19 +271,25 @@ func dailyRawListeningHours(userID int64, dayKey string) (float64, bool, error) 
 		}
 		return 0, false, err
 	}
+	rawHours, ok := listeningAbuseRawHoursFromStat(stat)
+	return rawHours, ok, nil
+}
+
+func listeningAbuseRawHoursFromStat(stat DailyListeningStat) (float64, bool) {
 	if stat.FetchStatus == dailyListeningLiveProvisionalStatus || stat.Source == dailyListeningLiveCheckpointSource {
-		return 0, false, nil
+		return 0, false
 	}
-	if stat.FetchStatus == "mixed" || stat.Source == "mixed" {
+	if stat.FetchStatus == "mixed" || stat.Source == "mixed" ||
+		stat.FetchStatus == dailyListeningCrossDayStatus || stat.Source == dailyListeningCrossDaySource {
 		if stat.OfficialRawSeconds <= 0 {
-			return 0, false, nil
+			return 0, false
 		}
-		return stat.OfficialRawSeconds / 3600, true, nil
+		return stat.OfficialRawSeconds / 3600, true
 	}
 	if stat.OfficialRawSeconds > 0 {
-		return stat.OfficialRawSeconds / 3600, true, nil
+		return stat.OfficialRawSeconds / 3600, true
 	}
-	return stat.RawSeconds / 3600, true, nil
+	return stat.RawSeconds / 3600, true
 }
 
 func isUserExpiredAt(u User, now time.Time) bool {

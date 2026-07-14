@@ -19,6 +19,8 @@ const (
 	dailyListeningLiveClockFallbackMax  = 6 * time.Hour
 	dailyListeningLiveCheckpointSource  = "abs_live_session"
 	dailyListeningLiveProvisionalStatus = "provisional"
+	dailyListeningCrossDaySource        = "abs_sessions_cross_day"
+	dailyListeningCrossDayStatus        = "corrected"
 )
 
 type AbsLiveListeningCheckpoint struct {
@@ -41,46 +43,50 @@ func (AbsLiveListeningCheckpoint) TableName() string {
 }
 
 type absLiveListeningSession struct {
-	SessionKey      string
-	ItemKey         string
-	PositionSeconds float64
-	HasPosition     bool
-	StartedAt       time.Time
-	UpdatedAt       time.Time
-	IsPlaying       bool
-	HasPlayingState bool
+	SessionKey       string
+	ItemKey          string
+	PositionSeconds  float64
+	HasPosition      bool
+	ListeningSeconds float64
+	HasListeningTime bool
+	StartedAt        time.Time
+	UpdatedAt        time.Time
+	IsPlaying        bool
+	HasPlayingState  bool
 }
 
-func estimateDailyListeningLiveDeltas(userID int64, absUserID string, now time.Time) map[string]float64 {
+func collectDailyListeningSessionData(userID int64, absUserID string, now time.Time) (map[string]float64, []absLiveListeningSession) {
 	result := make(map[string]float64)
 	if DB == nil || absClient == nil || userID == 0 || strings.TrimSpace(absUserID) == "" {
-		return result
+		return result, nil
 	}
 	if now.IsZero() {
 		now = time.Now()
 	}
 
-	body, code, err := absClient.sendRequest("GET", "/api/sessions", nil)
+	body, code, err := absClient.sendRequest("GET", absUserListeningSessionsPath(absUserID), nil)
 	if err != nil || code != 200 {
-		log.Printf("每日听书 ABS 活跃会话读取失败: user=%d abs=%s code=%d err=%s", userID, formatPlainValue(absUserID), code, formatPlainError(err))
-		return result
+		log.Printf("每日听书 ABS 用户最新会话读取失败: user=%d abs=%s code=%d err=%s", userID, formatPlainValue(absUserID), code, formatPlainError(err))
+		return result, nil
 	}
 
 	sessions, err := parseABSSessionsPayload(body)
 	if err != nil {
-		log.Printf("每日听书 ABS 活跃会话解析失败: user=%d abs=%s err=%s", userID, formatPlainValue(absUserID), formatPlainError(err))
-		return result
+		log.Printf("每日听书 ABS 用户最新会话解析失败: user=%d abs=%s err=%s", userID, formatPlainValue(absUserID), formatPlainError(err))
+		return result, nil
 	}
 
+	parsedSessions := make([]absLiveListeningSession, 0, len(sessions))
 	for _, raw := range sessions {
 		if !absSessionBelongsToUser(raw, absUserID) {
 			continue
 		}
 		session, ok := parseAbsLiveListeningSession(raw, absUserID)
 		if !ok {
-			log.Printf("每日听书 ABS 活跃会话字段不足，跳过实时补算: user=%d abs=%s", userID, formatPlainValue(absUserID))
+			log.Printf("每日听书 ABS 用户会话字段不足，跳过统计补算: user=%d abs=%s", userID, formatPlainValue(absUserID))
 			continue
 		}
+		parsedSessions = append(parsedSessions, session)
 		deltaByDay := consumeAbsLiveListeningSessionDelta(userID, absUserID, session, now)
 		for dayKey, seconds := range deltaByDay {
 			if seconds > 0 {
@@ -89,7 +95,7 @@ func estimateDailyListeningLiveDeltas(userID int64, absUserID string, now time.T
 		}
 	}
 
-	return result
+	return result, parsedSessions
 }
 
 func parseABSSessionsPayload(body []byte) ([]map[string]interface{}, error) {
@@ -136,19 +142,23 @@ func parseAbsLiveListeningSession(raw map[string]interface{}, absUserID string) 
 		itemKey = "unknown"
 	}
 
-	startedAt, hasStart := firstTime(raw, "startedAt", "startTime", "createdAt", "start", "connectedAt")
+	startedAt, hasStart := firstTime(raw, "startedAt", "createdAt", "start", "connectedAt")
 	updatedAt, hasUpdate := firstTime(raw, "updatedAt", "lastUpdate", "lastSeenAt", "lastActivityAt", "serverUpdatedAt")
-	position, hasPosition := firstFloat(raw, "currentTime", "current_time", "position", "positionSeconds", "progress", "timeListening", "duration")
+	listeningSeconds, hasListeningTime := firstFloat(raw, "timeListening", "time_listening")
+	position, hasPosition := firstFloat(raw, "currentTime", "current_time", "position", "positionSeconds", "progress")
 	if !hasPosition {
 		position, hasPosition = nestedFirstFloat(raw, []string{"mediaProgress", "playback", "progress"}, "currentTime", "current_time", "position", "positionSeconds", "progress")
 	}
+	if !hasPosition && hasListeningTime {
+		position = listeningSeconds
+		hasPosition = true
+	}
 
 	isPlaying, hasPlaying := sessionPlayingState(raw)
+	// /api/users/{id}/listening-sessions is a historical session list. A missing
+	// playback state must never be interpreted as actively playing.
 	if !hasPlaying {
-		isPlaying = true
-	}
-	if !isPlaying {
-		hasPlaying = true
+		isPlaying = false
 	}
 
 	if sessionKey == "" {
@@ -164,15 +174,62 @@ func parseAbsLiveListeningSession(raw map[string]interface{}, absUserID string) 
 	}
 
 	return absLiveListeningSession{
-		SessionKey:      formatPlainValue(sessionKey),
-		ItemKey:         formatPlainValue(itemKey),
-		PositionSeconds: position,
-		HasPosition:     hasPosition,
-		StartedAt:       startedAt,
-		UpdatedAt:       updatedAt,
-		IsPlaying:       isPlaying,
-		HasPlayingState: hasPlaying,
+		SessionKey:       formatPlainValue(sessionKey),
+		ItemKey:          formatPlainValue(itemKey),
+		PositionSeconds:  position,
+		HasPosition:      hasPosition,
+		ListeningSeconds: listeningSeconds,
+		HasListeningTime: hasListeningTime,
+		StartedAt:        startedAt,
+		UpdatedAt:        updatedAt,
+		IsPlaying:        isPlaying,
+		HasPlayingState:  hasPlaying,
 	}, true
+}
+
+func rebalanceABSDaysForCrossDaySessions(days map[string]float64, sessions []absLiveListeningSession) (map[string]float64, map[string]bool) {
+	adjusted := make(map[string]float64, len(days))
+	for dayKey, seconds := range days {
+		dayKey = strings.TrimSpace(dayKey)
+		if dayKey != "" && seconds > 0 {
+			adjusted[dayKey] = seconds
+		}
+	}
+
+	correctedDays := make(map[string]bool)
+	for _, session := range sessions {
+		if !session.HasListeningTime || session.ListeningSeconds <= 0 || session.StartedAt.IsZero() {
+			continue
+		}
+
+		end := session.StartedAt.Add(time.Duration(session.ListeningSeconds * float64(time.Second)))
+		segments := splitDurationByBeijingDay(session.StartedAt, end)
+		if len(segments) < 2 {
+			continue
+		}
+
+		sourceDay := session.StartedAt.In(dailyOperationsLocation).Format("2006-01-02")
+		available := adjusted[sourceDay]
+		reassigned := math.Min(session.ListeningSeconds, available)
+		if reassigned <= 0 {
+			continue
+		}
+
+		adjusted[sourceDay] = math.Max(0, available-reassigned)
+		totalSegmentSeconds := 0.0
+		for _, segmentSeconds := range segments {
+			totalSegmentSeconds += segmentSeconds
+		}
+		if totalSegmentSeconds <= 0 {
+			continue
+		}
+		for dayKey, segmentSeconds := range segments {
+			adjusted[dayKey] += reassigned * (segmentSeconds / totalSegmentSeconds)
+			correctedDays[dayKey] = true
+		}
+	}
+
+	return adjusted, correctedDays
 }
 
 func absSessionBelongsToUser(raw map[string]interface{}, absUserID string) bool {
@@ -215,25 +272,23 @@ func consumeAbsLiveListeningSessionDelta(userID int64, absUserID string, session
 				usedPositionDelta = true
 			}
 		}
-		if !usedPositionDelta && session.HasPlayingState && cp.LastIsPlaying {
+		if !usedPositionDelta && canUseLiveClockFallback(session, cp) {
 			if deltaSeconds, ok := liveClockFallbackSeconds(cp.LastObservedAt, now); ok {
 				addAllocatedLiveSeconds(result, cp.LastObservedAt, now, deltaSeconds)
 			}
 		}
-	} else if session.HasPlayingState && !session.StartedAt.IsZero() {
-		start := session.StartedAt
-		if now.Sub(start) > dailyListeningLiveClockFallbackMax {
-			start = now.Add(-dailyListeningLiveClockFallbackMax)
-		}
-		if start.Before(now) {
-			addAllocatedLiveSeconds(result, start, now, now.Sub(start).Seconds())
-		}
+	} else {
+		// 首次观察只建立 checkpoint。缺少上一采样点时无法证明 StartedAt 之后始终在播放，
+		// 直接按墙钟补算会把暂停、离线和陈旧会话误计为听书时长。
 	}
 
 	upsertAbsLiveListeningCheckpoint(userID, absUserID, session, now)
 	return result
 }
 
+func canUseLiveClockFallback(session absLiveListeningSession, checkpoint AbsLiveListeningCheckpoint) bool {
+	return session.HasPlayingState && session.IsPlaying && checkpoint.LastIsPlaying
+}
 func liveClockFallbackSeconds(lastObservedAt time.Time, now time.Time) (float64, bool) {
 	if lastObservedAt.IsZero() || !now.After(lastObservedAt) {
 		return 0, false

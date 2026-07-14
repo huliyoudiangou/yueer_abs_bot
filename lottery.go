@@ -32,10 +32,12 @@ const (
 	lotteryWinnerClaimed = "claimed"
 	lotteryWinnerExpired = "expired"
 
-	lotteryPrizePoints = "points"
-	lotteryPrizeInvite = "invite"
-	lotteryPrizeRenew  = "renew"
-	lotteryPrizePill   = "pill"
+	lotteryPrizePoints     = "points"
+	lotteryPrizeInvite     = "invite"
+	lotteryPrizeRenew      = "renew"
+	lotteryPrizePill       = "pill"
+	lotteryPrizeManual     = "manual_contact"
+	lotteryPrizeCustomCode = "custom_code"
 
 	lotteryClaimAttemptPurpose = "lottery_claim"
 	lotteryClaimMaxFailures    = 5
@@ -44,6 +46,8 @@ const (
 
 	lotteryTitleRequirementText     = "2-60 个字，且不能包含换行、制表符或其他控制/分隔字符"
 	lotteryClaimCodeRequirementText = "3-40 个字，且不能包含换行、制表符或其他控制/分隔字符"
+	lotteryCustomCodeMaxRunes       = 200
+	lotteryPrizeNameMaxRunes        = 80
 )
 
 var lotteryDrawTimeLocation = time.FixedZone("CST", 8*3600)
@@ -90,11 +94,12 @@ func (LotteryActivity) TableName() string {
 type LotteryPrize struct {
 	gorm.Model
 
-	ActivityID  uint   `gorm:"index;not null"`
-	PrizeType   string `gorm:"index;not null"`
-	Amount      int
-	Quantity    int
-	DisplayName string
+	ActivityID      uint   `gorm:"index;not null"`
+	PrizeType       string `gorm:"index;not null"`
+	Amount          int
+	Quantity        int
+	DisplayName     string
+	SecretEncrypted string
 }
 
 func (LotteryPrize) TableName() string {
@@ -197,6 +202,13 @@ func createLotteryPrizeInTx(tx *gorm.DB, prize *LotteryPrize) error {
 	entry := *prize
 	entry.PrizeType = formatPlainValue(entry.PrizeType)
 	entry.DisplayName = lotteryDisplayText(entry.DisplayName, 80, "")
+	if entry.PrizeType == lotteryPrizeCustomCode {
+		if entry.Quantity != 1 || !strings.HasPrefix(strings.TrimSpace(entry.SecretEncrypted), "gcm$") {
+			return fmt.Errorf("LOTTERY_CUSTOM_CODE_PRIZE_INVALID")
+		}
+	} else if strings.TrimSpace(entry.SecretEncrypted) != "" {
+		return fmt.Errorf("LOTTERY_PRIZE_UNEXPECTED_SECRET")
+	}
 	res := tx.Create(&entry)
 	if res.Error != nil {
 		return res.Error
@@ -272,10 +284,13 @@ func createLotteryLocalUserIfMissingInTx(tx *gorm.DB, user *User) error {
 }
 
 type lotteryPrizeSpec struct {
-	PrizeType   string
-	Amount      int
-	Quantity    int
-	DisplayName string
+	PrizeType       string
+	Amount          int
+	Quantity        int
+	DisplayName     string
+	SecretValue     string
+	SecretEncrypted string
+	SecretPreview   string
 }
 
 type lotteryDrawWinnerInfo struct {
@@ -473,12 +488,16 @@ func handleLotteryCreateStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text s
 				"积分 100 3\n"+
 				"续期 30 2\n"+
 				"邀请码 1\n"+
-				"丹药 聚灵丹 1\n\n"+
+				"丹药 聚灵丹 1\n"+
+				"人工 实体纪念品 2\n"+
+				"卡密 Steam礼品卡|AAAA-BBBB-CCCC\n\n"+
 				"说明：\n"+
 				"积分 100 3 = 100 积分奖品 3 份\n"+
 				"续期 30 2 = 30 天续期卡 2 份\n"+
 				"邀请码 1 = 邀请码 1 份\n"+
-				"丹药 聚灵丹 1 = 聚灵丹 1 份")
+				"丹药 聚灵丹 1 = 聚灵丹 1 份\n"+
+				"人工 实体纪念品 2 = 中奖者凭暗号向 Bot 确认后联系管理员领奖\n"+
+				"卡密 奖品名称|卡密内容 = 每行导入一份自定义卡密；卡密只加密保存，中奖者凭暗号领取")
 
 	case "WAITING_LOTTERY_PRIZES":
 		specs, err := parseLotteryPrizeSpecs(text)
@@ -530,6 +549,7 @@ func parseLotteryPrizeSpecs(raw string) ([]lotteryPrizeSpec, error) {
 	lines := strings.Split(strings.TrimSpace(raw), "\n")
 	specs := make([]lotteryPrizeSpec, 0, len(lines))
 	totalQuantity := 0
+	seenCustomCodes := make(map[string]struct{})
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -538,7 +558,7 @@ func parseLotteryPrizeSpecs(raw string) ([]lotteryPrizeSpec, error) {
 		}
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
-			return nil, fmt.Errorf("每行至少需要奖品类型和数量")
+			return nil, fmt.Errorf("每行至少需要奖品类型和数量或内容")
 		}
 
 		switch fields[0] {
@@ -618,6 +638,54 @@ func parseLotteryPrizeSpecs(raw string) ([]lotteryPrizeSpec, error) {
 			})
 			totalQuantity += qty
 
+		case "人工", "人工领奖":
+			if len(fields) < 3 {
+				return nil, fmt.Errorf("人工领奖格式应为：人工 实体纪念品 2")
+			}
+			qty, err := strconv.Atoi(fields[len(fields)-1])
+			if err != nil || qty < 1 || qty > 100 {
+				return nil, fmt.Errorf("人工领奖奖品份数需为 1-100")
+			}
+			name := strings.Join(fields[1:len(fields)-1], " ")
+			if !validLotteryPrizeName(name) {
+				return nil, fmt.Errorf("人工领奖奖品名称需为 1-%d 个字且不能包含控制字符", lotteryPrizeNameMaxRunes)
+			}
+			specs = append(specs, lotteryPrizeSpec{
+				PrizeType:   lotteryPrizeManual,
+				Amount:      1,
+				Quantity:    qty,
+				DisplayName: name,
+			})
+			totalQuantity += qty
+
+		case "卡密", "自定义卡密":
+			payload := strings.TrimSpace(strings.TrimPrefix(line, fields[0]))
+			parts := strings.SplitN(payload, "|", 2)
+			if len(parts) != 2 {
+				return nil, fmt.Errorf("自定义卡密格式应为：卡密 Steam礼品卡|AAAA-BBBB-CCCC")
+			}
+			name := strings.TrimSpace(parts[0])
+			secret := strings.TrimSpace(parts[1])
+			if !validLotteryPrizeName(name) {
+				return nil, fmt.Errorf("自定义卡密奖品名称需为 1-%d 个字且不能包含控制字符", lotteryPrizeNameMaxRunes)
+			}
+			if !validLotteryCustomCode(secret) {
+				return nil, fmt.Errorf("自定义卡密需为 1-%d 个字且不能包含控制字符", lotteryCustomCodeMaxRunes)
+			}
+			if _, exists := seenCustomCodes[secret]; exists {
+				return nil, fmt.Errorf("存在重复自定义卡密：%s", maskSecret(secret))
+			}
+			seenCustomCodes[secret] = struct{}{}
+			specs = append(specs, lotteryPrizeSpec{
+				PrizeType:     lotteryPrizeCustomCode,
+				Amount:        1,
+				Quantity:      1,
+				DisplayName:   name,
+				SecretValue:   secret,
+				SecretPreview: maskSecret(secret),
+			})
+			totalQuantity++
+
 		default:
 			return nil, fmt.Errorf("未知奖品类型：%s", fields[0])
 		}
@@ -627,11 +695,22 @@ func parseLotteryPrizeSpecs(raw string) ([]lotteryPrizeSpec, error) {
 		return nil, fmt.Errorf("至少配置一个奖品")
 	}
 	if totalQuantity > 100 {
-		return nil, fmt.Errorf("第一版单个活动总奖品份数最多 100")
+		return nil, fmt.Errorf("单个活动总奖品份数最多 100")
 	}
 	return specs, nil
 }
 
+func validLotteryPrizeName(name string) bool {
+	name = strings.TrimSpace(name)
+	length := len([]rune(name))
+	return length >= 1 && length <= lotteryPrizeNameMaxRunes && !containsDisallowedControl(name, false)
+}
+
+func validLotteryCustomCode(code string) bool {
+	code = strings.TrimSpace(code)
+	length := len([]rune(code))
+	return length >= 1 && length <= lotteryCustomCodeMaxRunes && !containsDisallowedControl(code, false)
+}
 func isLotteryPillPrizeName(itemName string) bool {
 	switch strings.TrimSpace(itemName) {
 	case "聚灵丹", "九转造化丹", "万年仙玉髓",
@@ -747,6 +826,16 @@ func createLotteryActivityFromSession(msg *tgbotapi.Message, session *SessionSta
 	if err != nil {
 		return 0, fmt.Errorf("领奖暗号加密失败")
 	}
+	for i := range specs {
+		if specs[i].PrizeType != lotteryPrizeCustomCode {
+			continue
+		}
+		specs[i].SecretEncrypted, err = encryptLotteryCustomCode(specs[i].SecretValue)
+		if err != nil {
+			return 0, fmt.Errorf("自定义卡密加密失败")
+		}
+		specs[i].SecretValue = ""
+	}
 
 	mode := session.GetTemp("lottery_mode")
 	entryCost, err := parseLotterySessionInt(session, "lottery_entry_cost", 0, 10000)
@@ -789,11 +878,12 @@ func createLotteryActivityFromSession(msg *tgbotapi.Message, session *SessionSta
 		}
 		for _, spec := range specs {
 			if err := createLotteryPrizeInTx(tx, &LotteryPrize{
-				ActivityID:  activity.ID,
-				PrizeType:   spec.PrizeType,
-				Amount:      spec.Amount,
-				Quantity:    spec.Quantity,
-				DisplayName: spec.DisplayName,
+				ActivityID:      activity.ID,
+				PrizeType:       spec.PrizeType,
+				Amount:          spec.Amount,
+				Quantity:        spec.Quantity,
+				DisplayName:     spec.DisplayName,
+				SecretEncrypted: spec.SecretEncrypted,
 			}); err != nil {
 				return err
 			}
@@ -1523,16 +1613,27 @@ func lotteryPrizeText(prizeType string, amount int) string {
 		return fmt.Sprintf("%d 天续期卡", amount)
 	case lotteryPrizePill:
 		return "丹药"
+	case lotteryPrizeManual:
+		return "联系管理员领奖"
+	case lotteryPrizeCustomCode:
+		return "自定义卡密"
 	default:
 		return prizeType
 	}
 }
 
 func lotteryPrizeDisplayText(prizeType string, amount int, displayName string) string {
-	if prizeType == lotteryPrizePill && strings.TrimSpace(displayName) != "" {
-		return fmt.Sprintf("丹药【%s】", lotteryDisplayText(displayName, 80, "丹药"))
+	name := strings.TrimSpace(displayName)
+	switch prizeType {
+	case lotteryPrizePill:
+		return fmt.Sprintf("丹药【%s】", lotteryDisplayText(name, 80, "丹药"))
+	case lotteryPrizeManual:
+		return fmt.Sprintf("人工奖品【%s】", lotteryDisplayText(name, 80, "特殊奖品"))
+	case lotteryPrizeCustomCode:
+		return fmt.Sprintf("自定义卡密【%s】", lotteryDisplayText(name, 80, "卡密奖品"))
+	default:
+		return lotteryPrizeText(prizeType, amount)
 	}
-	return lotteryPrizeText(prizeType, amount)
 }
 
 func lotteryDisplayText(text string, maxLen int, fallback string) string {
@@ -1744,6 +1845,25 @@ func claimLotteryWinner(activity LotteryActivity, winner LotteryWinner) (string,
 			}
 			reply = fmt.Sprintf("🎲 恭喜中奖！\n\n活动：%s\n奖品：丹药【%s】 x1\n\n丹药已放入乾坤袋。", lotteryDisplayText(activity.Title, 80, "-"), lotteryDisplayText(itemName, 80, "丹药"))
 
+		case lotteryPrizeManual:
+			prizeName, err := getLotteryPrizeDisplayNameInTx(tx, activity.ID, current)
+			if err != nil {
+				return err
+			}
+			reply = fmt.Sprintf("🎲 恭喜中奖！\n\n活动：%s\n奖品：%s\n\n该奖品由管理员人工派发，请联系管理员领奖。", lotteryDisplayText(activity.Title, 80, "-"), lotteryDisplayText(prizeName, 80, "特殊奖品"))
+
+		case lotteryPrizeCustomCode:
+			prize, err := getLotteryPrizeInTx(tx, activity.ID, current)
+			if err != nil {
+				return err
+			}
+			code, err := decryptLotteryCustomCode(prize.SecretEncrypted)
+			if err != nil {
+				return err
+			}
+			current.PrizeCodePreview = maskSecret(code)
+			reply = fmt.Sprintf("🎲 恭喜中奖！\n\n活动：%s\n奖品：%s\n\n你的专属卡密：%s\n\n请妥善保存，Bot 不会在群内公开卡密。", lotteryDisplayText(activity.Title, 80, "-"), lotteryDisplayText(prize.DisplayName, 80, "卡密奖品"), code)
+
 		default:
 			return fmt.Errorf("UNKNOWN_PRIZE_TYPE")
 		}
@@ -1803,6 +1923,24 @@ func getLotteryPrizeDisplayNameInTx(tx *gorm.DB, activityID uint, winner Lottery
 	return itemName, nil
 }
 
+func getLotteryPrizeInTx(tx *gorm.DB, activityID uint, winner LotteryWinner) (LotteryPrize, error) {
+	if tx == nil {
+		return LotteryPrize{}, fmt.Errorf("DB_TX_EMPTY")
+	}
+	if activityID == 0 || winner.PrizeID == 0 {
+		return LotteryPrize{}, fmt.Errorf("PRIZE_ID_EMPTY")
+	}
+
+	var prize LotteryPrize
+	if err := tx.Where("id = ? AND activity_id = ? AND deleted_at IS NULL", winner.PrizeID, activityID).
+		First(&prize).Error; err != nil {
+		return LotteryPrize{}, err
+	}
+	if !lotteryPrizeMatchesWinner(prize, activityID, winner) {
+		return LotteryPrize{}, fmt.Errorf("LOTTERY_PRIZE_MISMATCH")
+	}
+	return prize, nil
+}
 func lotteryPrizeMatchesWinner(prize LotteryPrize, activityID uint, winner LotteryWinner) bool {
 	return activityID != 0 &&
 		prize.ID == winner.PrizeID &&
@@ -1969,6 +2107,73 @@ func decryptLotteryClaimCode(encrypted string) (string, error) {
 	return string(plain), nil
 }
 
+func encryptLotteryCustomCode(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if !validLotteryCustomCode(raw) {
+		return "", fmt.Errorf("INVALID_LOTTERY_CUSTOM_CODE")
+	}
+
+	pepper := getSensitivePepper()
+	if pepper == "" {
+		return "", errSecurityPepperNotConfigured
+	}
+
+	key := sha256.Sum256([]byte("lottery-custom-code:" + pepper))
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	sealed := gcm.Seal(nil, nonce, []byte(raw), nil)
+	return "gcm$" + base64.RawURLEncoding.EncodeToString(append(nonce, sealed...)), nil
+}
+
+func decryptLotteryCustomCode(encrypted string) (string, error) {
+	encrypted = strings.TrimSpace(encrypted)
+	if !strings.HasPrefix(encrypted, "gcm$") {
+		return "", fmt.Errorf("INVALID_LOTTERY_CUSTOM_CODE_CIPHER")
+	}
+
+	pepper := getSensitivePepper()
+	if pepper == "" {
+		return "", errSecurityPepperNotConfigured
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(encrypted, "gcm$"))
+	if err != nil {
+		return "", err
+	}
+
+	key := sha256.Sum256([]byte("lottery-custom-code:" + pepper))
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	if len(payload) <= gcm.NonceSize() {
+		return "", fmt.Errorf("INVALID_LOTTERY_CUSTOM_CODE_PAYLOAD")
+	}
+
+	plain, err := gcm.Open(nil, payload[:gcm.NonceSize()], payload[gcm.NonceSize():], nil)
+	if err != nil {
+		return "", err
+	}
+	code := string(plain)
+	if !validLotteryCustomCode(code) {
+		return "", fmt.Errorf("INVALID_LOTTERY_CUSTOM_CODE_PLAIN")
+	}
+	return code, nil
+}
 func lotteryWinnerShouldExpire(activity LotteryActivity, winner LotteryWinner, now time.Time) bool {
 	return winner.Status == lotteryWinnerPending &&
 		activity.ClaimDeadlineAt != nil &&

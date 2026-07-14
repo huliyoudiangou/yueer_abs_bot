@@ -23,6 +23,10 @@ type AbsClient struct {
 	HttpClient *http.Client
 }
 
+// absClientUserAgent avoids the generic Go default User-Agent, which may be
+// blocked by an upstream WAF while retaining a stable identifier for this bot.
+const absClientUserAgent = "YueErShengYue-ABS-Bot/1.0"
+
 type AbsAPIError struct {
 	Operation  string
 	StatusCode int
@@ -55,6 +59,10 @@ func absUserListeningStatsPath(absUserID string) string {
 	return absUserPath(absUserID) + "/listening-stats"
 }
 
+func absUserListeningSessionsPath(absUserID string) string {
+	return absUserPath(absUserID) + "/listening-sessions?itemsPerPage=100&page=0"
+}
+
 func (c *AbsClient) sendRequest(method, path string, body []byte) ([]byte, int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -79,7 +87,10 @@ func (c *AbsClient) sendRequest(method, path string, body []byte) ([]byte, int, 
 	}
 
 	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", absClientUserAgent)
+	if len(body) > 0 {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -369,6 +380,30 @@ func IsAbsNotFoundError(err error) bool {
 	return strings.Contains(msg, ": 404") || strings.Contains(msg, " 404")
 }
 
+func positiveListeningSeconds(seconds float64) float64 {
+	if seconds <= 0 {
+		return 0
+	}
+	return seconds
+}
+
+func sumPositiveABSListeningDays(days map[string]float64) float64 {
+	var total float64
+	for _, seconds := range days {
+		total += positiveListeningSeconds(seconds)
+	}
+	return total
+}
+
+func authoritativeABSListeningTotalSeconds(totalTime float64, legacyTimeListening float64, days map[string]float64) float64 {
+	if totalTime > 0 {
+		return totalTime
+	}
+	if daysTotal := sumPositiveABSListeningDays(days); daysTotal > 0 {
+		return daysTotal
+	}
+	return positiveListeningSeconds(legacyTimeListening)
+}
 func (c *AbsClient) GetPersonalReport(absUserID string) string {
 	// ==========================================
 	// 1. 获取防作弊的真实听书时长与每日明细 (来自统计接口)
@@ -387,6 +422,7 @@ func (c *AbsClient) GetPersonalReport(absUserID string) string {
 	var rawTotalSeconds float64 = 0
 	var effectiveTotalHours float64 = 0 // 经过天道法则压制后的总修为时长
 	var todayEffectiveHours float64 = 0
+	var todayRawHours float64 = 0
 	var statsDays map[string]float64
 
 	// 精准映射 ABS 的统计数据结构
@@ -401,16 +437,14 @@ func (c *AbsClient) GetPersonalReport(absUserID string) string {
 		return "❌ 听书统计暂时读取失败，请稍后再试。"
 	}
 
-	// 提取原始总时长用于面板展示
-	if stats.TotalTime > 0 {
-		rawTotalSeconds = stats.TotalTime
-	} else {
-		rawTotalSeconds = stats.TimeListening
-	}
+	// 累计实际时长优先使用 ABS 官方 totalTime；仅在旧版本字段缺失时降级。
+	rawTotalSeconds = authoritativeABSListeningTotalSeconds(stats.TotalTime, stats.TimeListening, stats.Days)
 
 	statsDays = stats.Days
 	effectiveTotalHours = calculateEffectiveCultivationHoursFromABSDays(stats.Days)
-	todayEffectiveHours = calculateSectEffectiveHoursFromSeconds(stats.Days[sectDayKey(time.Now())])
+	todaySeconds := positiveListeningSeconds(stats.Days[sectDayKey(time.Now())])
+	todayRawHours = todaySeconds / 3600.0
+	todayEffectiveHours = calculateSectEffectiveHoursFromSeconds(todaySeconds)
 
 	if rawTotalSeconds <= 0 {
 		return "💤 暂无您的有效收听记录，去听本书再来吧！"
@@ -456,22 +490,20 @@ func (c *AbsClient) GetPersonalReport(absUserID string) string {
 	var u User
 	if err := DB.Where("abs_user_id = ?", absUserID).First(&u).Error; err == nil {
 		now := time.Now()
-		if len(statsDays) == 0 {
+		if statsDays == nil {
 			log.Printf("⚠️ ABS 听书统计缺少 days 明细，跳过净修为同步: user=%d abs=%s", u.TelegramID, formatPlainValue(absUserID))
 			if cul := GetOrCreateCultivation(u.TelegramID); cul != nil {
 				effectiveTotalHours = cul.TotalAudioTime
 			}
 		} else {
 			if err := recordDailyListeningStatsFromABSDays(u.TelegramID, absUserID, statsDays, now); err == nil {
-				if syncedRawTotalSeconds, ok := sumDailyListeningRawSeconds(u.TelegramID); ok && syncedRawTotalSeconds > 0 {
-					rawTotalSeconds = syncedRawTotalSeconds
-				}
 				if syncedEffectiveTotalHours, ok := syncCultivationFromDailyListeningStatsAt(u.TelegramID, now); ok {
 					effectiveTotalHours = syncedEffectiveTotalHours
 				} else if cul := GetOrCreateCultivation(u.TelegramID); cul != nil {
 					effectiveTotalHours = cul.TotalAudioTime
 				}
 				if todayStat, ok := getTodayDailyListeningStat(u.TelegramID, now); ok {
+					todayRawHours = positiveListeningSeconds(todayStat.RawSeconds) / 3600.0
 					todayEffectiveHours = todayStat.EffectiveHours + activeSectCaveRetreatBonusHours(u.TelegramID, now)
 				}
 			} else {
@@ -495,8 +527,8 @@ func (c *AbsClient) GetPersonalReport(absUserID string) string {
 		suppressNotice = "\n*(⚠️ 天道法则感应：您的部分修炼涉嫌强行吸收灵气，转化率已受压制)*"
 	}
 
-	return fmt.Sprintf("📊 你的专属听书战绩\n\n🎧 实际听书时长: %.1f 小时\n✨ 净修仙时长: %.1f 小时\n🌅 今日净修为: %.2f 小时%s\n📚 已经听完书籍: %s 本\n📖 当前正在收听: %s 本",
-		rawHours, effectiveTotalHours, todayEffectiveHours, suppressNotice, finishedCountText, listeningCountText)
+	return fmt.Sprintf("📊 你的专属听书战绩\n\n🎧 累计实际听书: %.2f 小时\n🕒 今日实际听书: %.2f 小时\n✨ 净修仙时长: %.2f 小时\n🌅 今日净修为: %.2f 小时%s\n📚 已经听完书籍: %s 本\n📖 当前正在收听: %s 本",
+		rawHours, todayRawHours, effectiveTotalHours, todayEffectiveHours, suppressNotice, finishedCountText, listeningCountText)
 }
 
 func (c *AbsClient) GetServerStats() string {

@@ -225,7 +225,9 @@ func renderSuperAdminMenu(key string) (string, tgbotapi.InlineKeyboardMarkup) {
 			adminBackRow(),
 		)
 	case "config":
-		return "⚙️ **【系统配置】**", menuMarkup(
+		return "⚙️ **【系统配置】**\n\n⚠️ 开放注册会改变开户注册边界，用户补偿会变更全体用户资产。", menuMarkup(
+			adminCmdRow("🚪 开放注册", "open_registration"),
+			adminCmdRow("🛡 用户补偿", "user_compensation"),
 			adminCmdRow("🌐 设置线路", "set_lines"),
 			adminCmdRow("邀请码价格", "invite_price"),
 			adminCmdRow("续期卡价格", "renew_price"),
@@ -259,6 +261,8 @@ func adminMenuCommandText(key string) (command string, superOnly bool, ok bool) 
 		"whitelist":              {"白名单", true},
 		"clean_widows":           {"清理遗孀", true},
 		"adjust_points":          {"操控", true},
+		"open_registration":      {"开放注册", true},
+		"user_compensation":      {"用户补偿", true},
 		"invite_price":           {"邀请码价格", true},
 		"renew_price":            {"续期卡价格", true},
 		"gen_invite":             {"生成邀请码", true},

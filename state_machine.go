@@ -366,7 +366,13 @@ func isMessageFromNoticeGroup(msg *tgbotapi.Message) bool {
 		msg.Chat.ID == AppConfig.NoticeGroupID
 }
 
+const renewCodeSourcePointExchange = "point_exchange"
+
 func createRenewCodeRecord(tx *gorm.DB, rawCode string, days int) error {
+	return createRenewCodeRecordWithMeta(tx, rawCode, days, "", 0)
+}
+
+func createRenewCodeRecordWithMeta(tx *gorm.DB, rawCode string, days int, source string, ownerUserID int64) error {
 	if tx == nil {
 		tx = DB
 	}
@@ -381,6 +387,8 @@ func createRenewCodeRecord(tx *gorm.DB, rawCode string, days int) error {
 		CodeHash:    codeHash,
 		CodePreview: maskSecret(rawCode),
 		Days:        days,
+		Source:      strings.TrimSpace(source),
+		OwnerUserID: ownerUserID,
 	})
 	if res.Error != nil {
 		return res.Error
@@ -413,6 +421,173 @@ func createInviteCodeRecord(tx *gorm.DB, rawCode string) error {
 		return fmt.Errorf("INVITE_CODE_CREATE_MISSED")
 	}
 	return nil
+}
+
+type exchangeInviteUseMode string
+
+const (
+	exchangeInviteUseNone     exchangeInviteUseMode = ""
+	exchangeInviteUseTrial    exchangeInviteUseMode = "trial"
+	exchangeInviteUseRegister exchangeInviteUseMode = "register"
+)
+
+func determineExchangeInviteUseMode(userID int64) (exchangeInviteUseMode, error) {
+	var u User
+	err := DB.Where("telegram_id = ?", userID).First(&u).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return exchangeInviteUseRegister, nil
+	}
+	if err != nil {
+		return exchangeInviteUseNone, err
+	}
+	if isTrialAccount(u) {
+		return exchangeInviteUseTrial, nil
+	}
+	if strings.TrimSpace(u.AbsUserID) == "" {
+		return exchangeInviteUseRegister, nil
+	}
+	return exchangeInviteUseNone, nil
+}
+
+type renewRedeemResult struct {
+	Days           int
+	NewExpireAt    time.Time
+	AbsUserID      string
+	NeedReactivate bool
+}
+
+func redeemRenewCodeByHash(userID int64, renewHash string) (renewRedeemResult, error) {
+	var result renewRedeemResult
+	if strings.TrimSpace(renewHash) == "" {
+		return result, errSecurityPepperNotConfigured
+	}
+
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var rCode RenewCode
+		if err := tx.Where("code_hash = ? AND is_used = ?", renewHash, false).First(&rCode).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errInvalidRenewCode
+			}
+			return err
+		}
+
+		if rCode.Source == renewCodeSourcePointExchange && rCode.OwnerUserID != 0 && rCode.OwnerUserID != userID {
+			return errRenewCodeOwnerMismatch
+		}
+
+		var u User
+		if err := tx.Where("telegram_id = ?", userID).First(&u).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errUserNotFound
+			}
+			return err
+		}
+		if isTrialAccount(u) {
+			return errTrialCannotUseRenewCode
+		}
+
+		res := tx.Model(&RenewCode{}).
+			Where("id = ? AND is_used = ?", rCode.ID, false).
+			Updates(map[string]interface{}{
+				"is_used":    true,
+				"used_by_id": userID,
+			})
+
+		if res.Error != nil {
+			return res.Error
+		}
+
+		if res.RowsAffected == 0 {
+			return errInvalidRenewCode
+		}
+
+		now := time.Now()
+		if u.ExpireAt == nil || u.ExpireAt.Before(now) {
+			result.NewExpireAt = now.AddDate(0, 0, rCode.Days)
+		} else {
+			result.NewExpireAt = u.ExpireAt.AddDate(0, 0, rCode.Days)
+		}
+
+		userRes := tx.Model(&User{}).
+			Where("id = ? AND telegram_id = ? AND account_type <> ?", u.ID, userID, accountTypeTrial).
+			Update("expire_at", result.NewExpireAt)
+		if userRes.Error != nil {
+			return userRes.Error
+		}
+		if userRes.RowsAffected == 0 {
+			return fmt.Errorf("RENEW_USER_STATE_CHANGED")
+		}
+
+		if err := writeAuditLogInTx(
+			tx,
+			userID,
+			"USE_RENEW_CODE",
+			fmt.Sprintf("renew_code_id=%d", rCode.ID),
+			0,
+			fmt.Sprintf("user %s(%d) used renew code %s for %d days; expire_at=%s; need_reactivate=%t",
+				formatPlainValue(u.Username), userID, formatPlainValue(rCode.CodePreview), rCode.Days, result.NewExpireAt.Format(time.RFC3339), u.IsSuspended && u.AbsUserID != ""),
+		); err != nil {
+			return err
+		}
+
+		result.Days = rCode.Days
+		result.AbsUserID = u.AbsUserID
+		result.NeedReactivate = u.IsSuspended && u.AbsUserID != ""
+
+		return nil
+	})
+	if err != nil {
+		return renewRedeemResult{}, err
+	}
+	return result, nil
+}
+
+func sendRenewRedeemResult(bot *tgbotapi.BotAPI, chatID int64, userID int64, result renewRedeemResult) {
+	if result.NeedReactivate {
+		if err := absClient.SetUserActiveStatus(result.AbsUserID, true); err != nil {
+			log.Printf("⚠️ 续期后 ABS 解封失败: user=%d abs=%s err=%s", userID, formatPlainValue(result.AbsUserID), formatPlainError(err))
+			auditErr := writeAuditLogInTx(DB, userID, "RENEW_REACTIVATE_USER_FAILED", fmt.Sprintf("%d", userID), 0,
+				fmt.Sprintf("renew card extended account but ABS reactivation failed: tg=%d abs_user_id=%s expire_at=%s days=%d error=%s",
+					userID, formatPlainValue(result.AbsUserID), result.NewExpireAt.Format(time.RFC3339), result.Days, formatPlainError(err)))
+			if auditErr != nil {
+				log.Printf("⚠️ 续期 ABS 解封失败审计写入失败: user=%d abs=%s err=%s", userID, formatPlainValue(result.AbsUserID), formatPlainError(auditErr))
+				notifySuperAdminsPlain(bot, fmt.Sprintf("⚠️ 用户续期已到账，但 ABS 恢复失败，且失败审计写入失败。\n用户：%d\nABS：%s\n到期：%s\n天数：%d\nABS错误：%s\n审计错误：%s", userID, formatPlainValue(result.AbsUserID), result.NewExpireAt.Format(time.RFC3339), result.Days, formatPlainError(err), formatPlainError(auditErr)))
+			}
+
+			replyText(bot, chatID, fmt.Sprintf(
+				"⚠️ 续期已到账，新的到期时间为 `%s`。\n\nABS 解封暂时失败，系统已记录异常，请联系管理员处理。",
+				result.NewExpireAt.Format("2006-01-02"),
+			))
+			return
+		}
+
+		if err := applyRenewReactivateLocalStatusWithAudit(userID, result.AbsUserID, result.NewExpireAt, result.Days); err != nil {
+			log.Printf("⚠️ ABS 已解封，但本地解除封禁状态或审计写入失败: user=%d abs=%s err=%s", userID, formatPlainValue(result.AbsUserID), formatPlainError(err))
+			auditErr := writeAuditLogInTx(DB, userID, "RENEW_REACTIVATE_USER_LOCAL_FAILED", fmt.Sprintf("%d", userID), 0,
+				fmt.Sprintf("renew card reactivated ABS but local state/audit failed: tg=%d abs_user_id=%s expire_at=%s days=%d error=%s",
+					userID, formatPlainValue(result.AbsUserID), result.NewExpireAt.Format(time.RFC3339), result.Days, formatPlainError(err)))
+			if auditErr != nil {
+				log.Printf("⚠️ 续期 ABS 已解封，但本地失败审计写入失败: user=%d abs=%s err=%s", userID, formatPlainValue(result.AbsUserID), formatPlainError(auditErr))
+				notifySuperAdminsPlain(bot, fmt.Sprintf("⚠️ 用户续期已到账且 ABS 已恢复，但本地权限状态或成功审计失败，且本地失败审计写入失败。\n用户：%d\nABS：%s\n到期：%s\n天数：%d\n本地错误：%s\n审计错误：%s\n请立即人工核查。", userID, formatPlainValue(result.AbsUserID), result.NewExpireAt.Format(time.RFC3339), result.Days, formatPlainError(err), formatPlainError(auditErr)))
+				replyText(bot, chatID, fmt.Sprintf(
+					"⚠️ 续期已到账，新的到期时间为 `%s`。\n\nABS 已恢复，但本地权限状态和失败审计写入均异常，已通知管理员人工核查。",
+					result.NewExpireAt.Format("2006-01-02"),
+				))
+			} else {
+				replyText(bot, chatID, fmt.Sprintf(
+					"⚠️ 续期已到账，新的到期时间为 `%s`。\n\nABS 已恢复，但本地权限状态或审计写入失败，请联系管理员处理。",
+					result.NewExpireAt.Format("2006-01-02"),
+				))
+			}
+			return
+		}
+	}
+
+	replyText(bot, chatID, fmt.Sprintf(
+		"🎉 续费成功！延长 `%d` 天。\n📅 新到期时间：`%s`",
+		result.Days,
+		result.NewExpireAt.Format("2006-01-02"),
+	))
 }
 
 func getUserRoleFromDBChecked(db *gorm.DB, userID int64) (string, error) {
@@ -570,9 +745,9 @@ func executeBlindBoxOpen(tgUser *tgbotapi.User) (string, string, error) {
 		roll := int(nBig.Int64()) + 1
 
 		switch {
-		case roll <= 50:
+		case roll <= 71:
 			txReplyMsg = resultPrefix + "💨 噗~ 里面空空如也。\n**【谢谢惠顾】**\n\n别灰心，垫子已经铺好，下发必出金！"
-		case roll <= 89:
+		case roll <= 91:
 			code := fmt.Sprintf("R%d-%s", 3, generateRandomCode(16))
 			if err := createRenewCodeRecord(tx, code, 3); err != nil {
 				return err
@@ -882,6 +1057,8 @@ func pointTransactionTypeText(txType string) string {
 		return "抽奖未中奖返还"
 	case "lottery_cancel_refund":
 		return "抽奖取消退款"
+	case "service_outage_compensation":
+		return "服务异常补偿"
 	case "referral_reward":
 		return "邀请拉新奖励"
 	default:
@@ -4268,6 +4445,10 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 	role := getUserRole(userID)
 
+	if HandleAdminServiceOperations(bot, msg, text, session, role) {
+		return
+	}
+
 	if HandleReferralCommand(bot, msg, text) {
 		return
 	}
@@ -4440,6 +4621,11 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	if !msg.Chat.IsPrivate() {
+		if isWealthLeaderboardCommand(text) {
+			registerIncomingGroupCommandForAutoDelete(msg)
+			handleWealthLeaderboardCommand(bot, msg)
+			return
+		}
 		if strings.HasPrefix(text, "/") {
 			safeName := escapeMarkdown(msg.From.FirstName)
 			sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("⚠️ @%s 为了保持群内整洁，请**私聊我**执行各项操作指令哦！", safeName))
@@ -4461,7 +4647,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		"设置境界门槛", "设置小境界门槛",
 		"查看秘境配置", "设置秘境档位", "设置秘境倍率", "设置秘境掉落",
 		"发起赛马", "发起牌九", "牌九状态", "取消牌九", "押", "天道奖池", "乾坤袋", "药园", "回收灵草", "求书", "我的求书", "待处理求书", "我的处理工单",
-		"交易行", "交易行帮助", "上架商品", "购买商品", "下架商品", "我的交易行", "我的购买", "我的订单", "交易行订单", "查交易订单", "举报订单",
+		"交易行", "交易行帮助", "上架商品", "购买商品", "下架商品", "强制下架商品", "我的交易行", "我的购买", "我的订单", "交易行订单", "查交易订单", "举报订单",
 		"创建宗门", "加入宗门", "退出宗门", "我的宗门", "宗门排行", "宗门成员", "捐献宗门",
 		"升级宗门", "宗门改名", "确认宗门改名", "修改宗门名称", "确认修改宗门名称", "任命长老", "任命成员", "踢出宗门", "转让宗主", "宗门贡献榜", "宗门周榜",
 		"宗门任务", "领取宗门任务奖励", "结算宗门周目标", "宗门商店", "贡献换声望", "宗门七日续期", "确认宗门七日续期", "洞府", "解锁洞府", "闭关", "宗门闭关",
@@ -4645,39 +4831,8 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		if strings.Contains(text, "财富榜") || strings.Contains(text, "积分榜") {
-			var topUsers []User
-			var envAdminIDs []int64
-			for id := range AppConfig.AdminIDs {
-				envAdminIDs = append(envAdminIDs, id)
-			}
-			query := DB.Where("role != ? AND role != ?", "super_admin", "admin")
-			if len(envAdminIDs) > 0 {
-				query = query.Where("telegram_id NOT IN ?", envAdminIDs)
-			}
-			if err := query.Order("points desc").Limit(20).Find(&topUsers).Error; err != nil {
-				replyText(bot, chatID, "❌ 获取积分排行榜失败，请稍后重试。")
-				return
-			}
-			if len(topUsers) == 0 {
-				replyText(bot, chatID, "🫙 当前全服还没有任何平民玩家拥有积分记录。")
-				return
-			}
-			msgText := "🏆 **全服积分财富榜 Top 20**\n\n"
-			for i, u := range topUsers {
-				medal := "▪️"
-				if i == 0 {
-					medal = "🥇"
-				} else if i == 1 {
-					medal = "🥈"
-				} else if i == 2 {
-					medal = "🥉"
-				}
-				safeName := escapeMarkdown(u.Username)
-				msgText += fmt.Sprintf("%s 第%d名 **%s** : `%d` 积分\n", medal, i+1, safeName, u.Points)
-			}
-			msgText += "\n💡 *提示：每天点击【📆 每日签到】或参与群内抢红包可快速积攒财富！*"
-			replyText(bot, chatID, msgText)
+		if isWealthLeaderboardCommand(text) {
+			handleWealthLeaderboardCommand(bot, msg)
 			return
 		}
 
@@ -5908,6 +6063,26 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 				return
 			}
 
+			inviteHash := hashSensitiveToken(code)
+			useMode, modeErr := determineExchangeInviteUseMode(userID)
+			if modeErr != nil {
+				log.Printf("⚠️ 兑换邀请码后读取直接使用资格失败: user=%d err=%s", userID, formatPlainError(modeErr))
+			}
+			if inviteHash != "" && modeErr == nil && useMode != exchangeInviteUseNone {
+				session.SetTemp("exchange_invite_hash", inviteHash)
+				session.SetTemp("exchange_invite_preview", maskSecret(code))
+				session.SetTemp("exchange_invite_mode", string(useMode))
+				session.SetStep("WAITING_EXCHANGE_INVITE_USE_CONFIRM")
+				UserSessions.Store(userID, session)
+
+				if useMode == exchangeInviteUseTrial {
+					replyText(bot, chatID, fmt.Sprintf("🎉 **兑换成功！扣除 %d 积分**\n🎁 你的专属邀请码为：`%s`\n\n检测到你当前是新人体验账号，可直接使用该邀请码转为正式账号。\n\n确认使用请回复：`确认使用邀请码`\n暂不使用请回复：`取消`。", invPrice, code))
+				} else {
+					replyText(bot, chatID, fmt.Sprintf("🎉 **兑换成功！扣除 %d 积分**\n🎁 你的专属邀请码为：`%s`\n\n检测到你尚未注册 ABS 账号，可直接使用该邀请码进入开户注册流程，并跳过再次输入邀请码。\n\n确认开户注册请回复：`确认使用邀请码`\n暂不使用请回复：`取消`。", invPrice, code))
+				}
+				return
+			}
+
 			replyText(bot, chatID, fmt.Sprintf("🎉 **兑换成功！扣除 %d 积分**\n🎁 你的专属邀请码为：`%s`", invPrice, code))
 			clearSession(userID)
 			return
@@ -5947,7 +6122,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 				for i := 0; i < 5; i++ {
 					candidateCode := fmt.Sprintf("R%d-%s", renewDays, generateRandomCode(16))
 
-					if err := createRenewCodeRecord(tx, candidateCode, renewDays); err == nil {
+					if err := createRenewCodeRecordWithMeta(tx, candidateCode, renewDays, renewCodeSourcePointExchange, userID); err == nil {
 						txCode = candidateCode
 						break
 					} else {
@@ -5987,6 +6162,16 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 				return
 			}
 
+			renewHash := hashSensitiveToken(code)
+			if renewHash != "" {
+				session.SetTemp("exchange_renew_hash", renewHash)
+				session.SetTemp("exchange_renew_preview", maskSecret(code))
+				session.SetStep("WAITING_EXCHANGE_RENEW_USE_CONFIRM")
+				UserSessions.Store(userID, session)
+				replyText(bot, chatID, fmt.Sprintf("🎉 **兑换成功！扣除 %d 积分**\n🎁 30天续期卡密为：`%s`\n\n是否现在直接使用这张续期卡，为你的账号延长 `%d` 天？\n\n确认使用请回复：`确认使用续期卡`\n暂不使用请回复：`取消`。", renPrice, code, renewDays))
+				return
+			}
+
 			replyText(bot, chatID, fmt.Sprintf("🎉 **兑换成功！扣除 %d 积分**\n🎁 30天续期卡密为：`%s`", renPrice, code))
 			clearSession(userID)
 			return
@@ -5999,6 +6184,102 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		} else {
 			replyText(bot, chatID, "⚠️ 输入不识别。请输入数字 1 或 2，或发送 `取消`。")
 			return
+		}
+
+	case "WAITING_EXCHANGE_RENEW_USE_CONFIRM":
+		if text != "确认使用续期卡" {
+			replyText(bot, chatID, "请回复 `确认使用续期卡`，或发送 `取消` 暂不使用。")
+			return
+		}
+		if AppConfig.NoticeGroupID != 0 && !isUserInGroupFresh(bot, userID, AppConfig.NoticeGroupID) {
+			replyText(bot, chatID, "🚫 检测到您当前不在指定群组内，无法使用续期卡。卡密仍未消费，可稍后再试。")
+			clearSession(userID)
+			return
+		}
+
+		renewHash := strings.TrimSpace(session.GetTemp("exchange_renew_hash"))
+		if renewHash == "" {
+			replyText(bot, chatID, "❌ 续期卡确认会话已失效。卡密未被消费，请使用刚才收到的卡密手动续期。")
+			clearSession(userID)
+			return
+		}
+
+		result, err := redeemRenewCodeByHash(userID, renewHash)
+		if err != nil {
+			switch renewRedeemErrorCode(err) {
+			case "INVALID_RENEW_CODE":
+				replyText(bot, chatID, "❌ 卡密无效或已被消费。")
+			case "USER_NOT_FOUND":
+				replyText(bot, chatID, "⚠️ 未检测到有效账户。卡密仍未消费，请先注册或绑定账号。")
+			case "TRIAL_CANNOT_USE_RENEW_CODE":
+				replyText(bot, chatID, "⚠️ 当前为新人体验账号，普通续期卡需使用正式邀请码转正后才能使用。卡密仍未消费。")
+			case "RENEW_CODE_OWNER_MISMATCH":
+				replyText(bot, chatID, "⚠️ 这张续期卡归属异常，未执行核销。")
+			case "SECURITY_PEPPER_NOT_CONFIGURED":
+				replyText(bot, chatID, "❌ 系统安全密钥未配置，请联系管理员。")
+			default:
+				log.Printf("⚠️ 兑换续期卡立即使用失败: user=%d err=%s", userID, formatPlainError(err))
+				replyText(bot, chatID, "❌ 续期失败，卡密未被消费，请稍后手动使用。")
+			}
+			clearSession(userID)
+			return
+		}
+
+		sendRenewRedeemResult(bot, chatID, userID, result)
+		clearSession(userID)
+
+	case "WAITING_EXCHANGE_INVITE_USE_CONFIRM":
+		if text != "确认使用邀请码" {
+			replyText(bot, chatID, "请回复 `确认使用邀请码`，或发送 `取消` 暂不使用。")
+			return
+		}
+
+		inviteHash := strings.TrimSpace(session.GetTemp("exchange_invite_hash"))
+		if inviteHash == "" {
+			replyText(bot, chatID, "❌ 邀请码确认会话已失效。邀请码未被消费，请使用刚才收到的邀请码手动注册或转正。")
+			clearSession(userID)
+			return
+		}
+
+		useMode, err := determineExchangeInviteUseMode(userID)
+		if err != nil {
+			log.Printf("⚠️ 兑换邀请码确认读取账号状态失败: user=%d err=%s", userID, formatPlainError(err))
+			replyText(bot, chatID, "❌ 账号状态暂时读取失败，邀请码未被消费，请稍后手动使用。")
+			clearSession(userID)
+			return
+		}
+
+		switch useMode {
+		case exchangeInviteUseTrial:
+			nextExpireAt, err := convertTrialToFormalWithInviteCode(userID, inviteHash)
+			if err != nil {
+				if errors.Is(err, errInvalidInviteCode) {
+					replyText(bot, chatID, "❌ 邀请码无效或已被使用，请使用刚才收到的邀请码重新确认。")
+				} else if errors.Is(err, errTrialFormalInviteOnly) {
+					replyText(bot, chatID, "⚠️ 当前账号已不再是新人体验账号，邀请码未被消费。")
+				} else {
+					log.Printf("兑换邀请码立即转正失败: user=%d err=%s", userID, formatPlainError(err))
+					replyText(bot, chatID, "❌ 转正失败，邀请码未被消费，请稍后手动使用。")
+				}
+				clearSession(userID)
+				return
+			}
+			replyText(bot, chatID, fmt.Sprintf("✅ 转正成功。\n\n账号已转为正式用户，普通续期卡现已可用。\n当前到期时间：`%s`", nextExpireAt.Format("2006-01-02")))
+			clearSession(userID)
+
+		case exchangeInviteUseRegister:
+			session.SetTemp("invite_hash", inviteHash)
+			session.SetTemp("invite_preview", session.GetTemp("exchange_invite_preview"))
+			session.SetTemp("exchange_invite_hash", "")
+			session.SetTemp("exchange_invite_preview", "")
+			session.SetTemp("exchange_invite_mode", "")
+			session.SetStep("WAITING_REG_USER")
+			UserSessions.Store(userID, session)
+			replyText(bot, chatID, "🎫 已为本次开户注册预填刚兑换的邀请码。\n\n📝 **第一步：请输入您想要的用户名**\n(⚠️ 仅限 3-20 位字母、数字、下划线)")
+
+		default:
+			replyText(bot, chatID, "⚠️ 当前账号已经拥有正式 ABS 账号，无需直接使用邀请码。邀请码未被消费。")
+			clearSession(userID)
 		}
 
 	case "WAITING_RED_POINTS":
@@ -6020,13 +6301,13 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		}
 		session.SetTemp("red_points", text)
 		session.SetStep("WAITING_RED_COUNT")
-		replyText(bot, chatID, "🔢 请输入裂变分发的 **红包总个数** (2-30)：")
+		replyText(bot, chatID, "🔢 请输入裂变分发的 **红包总个数** (3-100)：")
 		UserSessions.Store(userID, session)
 
 	case "WAITING_RED_COUNT":
 		count, err := strconv.Atoi(text)
-		if err != nil || count <= 2 || count > 30 {
-			replyText(bot, chatID, "❌ 个数限制在 2 ~ 30 个之间：")
+		if err != nil || !validRedPacketCount(count) {
+			replyText(bot, chatID, "❌ 个数限制在 3 ~ 100 个之间：")
 			return
 		}
 
@@ -6745,9 +7026,28 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
+		// 已由兑换流程预填邀请码时，不再要求重复输入。
+		if session.GetTemp("invite_hash") != "" {
+			session.SetStep("WAITING_REG_SEC_CODE")
+			replyText(bot, chatID, "🛡️ **第二步：请设置安全码(PIN)**")
+			UserSessions.Store(userID, session)
+			return
+		}
+
 		if AppConfig.InviteRequired {
-			session.SetStep("WAITING_REG_INVITE")
-			replyText(bot, chatID, "🎫 **第二步：请输入您的邀请码**")
+			campaign, available, openErr := activeOpenRegistrationAt(DB, time.Now())
+			if openErr != nil {
+				log.Printf("⚠️ 注册时读取开放注册状态失败，保守回退邀请码流程: user=%d err=%s", userID, formatPlainError(openErr))
+			}
+			if openErr == nil && available {
+				session.SetTemp("open_registration_campaign_id", campaign.CampaignID)
+				session.SetStep("WAITING_REG_SEC_CODE")
+				replyText(bot, chatID, "🚪 当前处于开放注册期，无需邀请码。\n\n🛡️ **第二步：请设置安全码(PIN)**")
+			} else {
+				session.SetTemp("open_registration_campaign_id", "")
+				session.SetStep("WAITING_REG_INVITE")
+				replyText(bot, chatID, "🎫 **第二步：请输入您的邀请码**")
+			}
 		} else {
 			session.SetStep("WAITING_REG_SEC_CODE")
 			replyText(bot, chatID, "🛡️ **第二步：请设置安全码(PIN)**")
@@ -6841,6 +7141,26 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
+		var openReservation OpenRegistrationReservation
+		openCampaignID := session.GetTemp("open_registration_campaign_id")
+		if inviteHash == "" && referralCode == "" && openCampaignID != "" {
+			var reserveErr error
+			openReservation, reserveErr = reserveOpenRegistrationSlot(userID, openCampaignID, time.Now())
+			if reserveErr != nil {
+				switch {
+				case errors.Is(reserveErr, errOpenRegistrationFull):
+					replyText(bot, chatID, "❌ 本轮开放注册名额刚刚已满，请使用邀请码注册。")
+				case errors.Is(reserveErr, errOpenRegistrationExpired), errors.Is(reserveErr, errOpenRegistrationUnavailable):
+					replyText(bot, chatID, "❌ 本轮开放注册已结束，请使用邀请码注册。")
+				default:
+					log.Printf("⚠️ 开放注册名额预占失败: user=%d campaign=%s err=%s", userID, formatPlainValue(openCampaignID), formatPlainError(reserveErr))
+					replyText(bot, chatID, "❌ 开放注册名额暂时无法锁定，请稍后重试或使用邀请码。")
+				}
+				clearSession(userID)
+				return
+			}
+		}
+
 		var reservedInvite InviteCode
 		if inviteHash != "" {
 			var reserveErr error
@@ -6856,6 +7176,14 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		id, err := absClient.RegisterUser(username, password)
 		if err != nil {
 			var releaseErr error
+			if openReservation.ID != 0 {
+				if openErr := releaseOpenRegistrationReservation(openReservation.ID, userID, "abs_register_failed"); openErr != nil {
+					log.Printf("⚠️ ABS 开户失败后开放注册名额释放失败: user=%d reservation=%d err=%s", userID, openReservation.ID, formatPlainError(openErr))
+					replyText(bot, chatID, "❌ 开户失败，且开放注册名额释放异常。系统已记录，请联系管理员核查。")
+					clearSession(userID)
+					return
+				}
+			}
 			if inviteHash != "" {
 				releaseErr = releaseInviteCodeReservationWithAudit(userID, inviteHash, "abs_register_failed")
 				if releaseErr != nil {
@@ -6935,6 +7263,16 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 				return err
 			}
 
+			if openReservation.ID != 0 {
+				if err := completeOpenRegistrationReservationInTx(tx, openReservation.ID, userID, time.Now()); err != nil {
+					return err
+				}
+				if err := writeAuditLogInTx(tx, userID, "OPEN_REGISTRATION_COMPLETE", openCampaignID, 0,
+					fmt.Sprintf("user %s(%d) completed open registration abs_user_id=%s", formatPlainValue(username), userID, formatPlainValue(id))); err != nil {
+					return err
+				}
+			}
+
 			if reservedInvite.ID != 0 {
 				return writeAuditLogInTx(
 					tx,
@@ -6959,6 +7297,15 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 					formatMarkdownError(rollbackErr),
 				))
 				return
+			}
+
+			if openReservation.ID != 0 {
+				if releaseErr := releaseOpenRegistrationReservation(openReservation.ID, userID, "local_registration_failed"); releaseErr != nil {
+					log.Printf("⚠️ 本地注册失败后开放注册名额释放失败: user=%d reservation=%d err=%s", userID, openReservation.ID, formatPlainError(releaseErr))
+					replyText(bot, chatID, "❌ 本地开户注册失败，ABS 已回滚，但开放注册名额释放异常，请联系管理员核查。")
+					clearSession(userID)
+					return
+				}
 			}
 
 			if referralCode != "" {
@@ -7334,86 +7681,14 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		var days int
-		var newExpireAt time.Time
-		var absUserID string
-		var needReactivate bool
+		renewHash := hashSensitiveToken(text)
+		if renewHash == "" {
+			replyText(bot, chatID, "❌ 系统安全密钥未配置，请联系管理员。")
+			clearSession(userID)
+			return
+		}
 
-		err := DB.Transaction(func(tx *gorm.DB) error {
-			renewHash := hashSensitiveToken(text)
-			if renewHash == "" {
-				return errSecurityPepperNotConfigured
-			}
-
-			var rCode RenewCode
-			if err := tx.Where("code_hash = ? AND is_used = ?", renewHash, false).First(&rCode).Error; err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return errInvalidRenewCode
-				}
-				return err
-			}
-
-			var u User
-			if err := tx.Where("telegram_id = ?", userID).First(&u).Error; err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return errUserNotFound
-				}
-				return err
-			}
-			if isTrialAccount(u) {
-				return errTrialCannotUseRenewCode
-			}
-
-			res := tx.Model(&RenewCode{}).
-				Where("id = ? AND is_used = ?", rCode.ID, false).
-				Updates(map[string]interface{}{
-					"is_used":    true,
-					"used_by_id": userID,
-				})
-
-			if res.Error != nil {
-				return res.Error
-			}
-
-			if res.RowsAffected == 0 {
-				return errInvalidRenewCode
-			}
-
-			now := time.Now()
-			if u.ExpireAt == nil || u.ExpireAt.Before(now) {
-				newExpireAt = now.AddDate(0, 0, rCode.Days)
-			} else {
-				newExpireAt = u.ExpireAt.AddDate(0, 0, rCode.Days)
-			}
-
-			userRes := tx.Model(&User{}).
-				Where("id = ? AND telegram_id = ? AND account_type <> ?", u.ID, userID, accountTypeTrial).
-				Update("expire_at", newExpireAt)
-			if userRes.Error != nil {
-				return userRes.Error
-			}
-			if userRes.RowsAffected == 0 {
-				return fmt.Errorf("RENEW_USER_STATE_CHANGED")
-			}
-
-			if err := writeAuditLogInTx(
-				tx,
-				userID,
-				"USE_RENEW_CODE",
-				fmt.Sprintf("renew_code_id=%d", rCode.ID),
-				0,
-				fmt.Sprintf("user %s(%d) used renew code %s for %d days; expire_at=%s; need_reactivate=%t",
-					formatPlainValue(u.Username), userID, formatPlainValue(rCode.CodePreview), rCode.Days, newExpireAt.Format(time.RFC3339), u.IsSuspended && u.AbsUserID != ""),
-			); err != nil {
-				return err
-			}
-
-			days = rCode.Days
-			absUserID = u.AbsUserID
-			needReactivate = u.IsSuspended && u.AbsUserID != ""
-
-			return nil
-		})
+		result, err := redeemRenewCodeByHash(userID, renewHash)
 
 		if err != nil {
 			switch renewRedeemErrorCode(err) {
@@ -7423,6 +7698,8 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 				replyText(bot, chatID, "⚠️ 未检测到有效账户。")
 			case "TRIAL_CANNOT_USE_RENEW_CODE":
 				replyText(bot, chatID, "⚠️ 当前为新人体验账号，仅支持新人体验延期。普通续期卡需使用正式邀请码转正后才能使用。")
+			case "RENEW_CODE_OWNER_MISMATCH":
+				replyText(bot, chatID, "⚠️ 这张续期卡来自积分兑换，仅限当前持有人本人使用；若需转让，请通过交易行出售后完成归属转移。")
 			case "SECURITY_PEPPER_NOT_CONFIGURED":
 				replyText(bot, chatID, "❌ 系统安全密钥未配置，请联系管理员。")
 			default:
@@ -7431,53 +7708,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		if needReactivate {
-			if err := absClient.SetUserActiveStatus(absUserID, true); err != nil {
-				log.Printf("⚠️ 续期后 ABS 解封失败: user=%d abs=%s err=%s", userID, formatPlainValue(absUserID), formatPlainError(err))
-				auditErr := writeAuditLogInTx(DB, userID, "RENEW_REACTIVATE_USER_FAILED", fmt.Sprintf("%d", userID), 0,
-					fmt.Sprintf("renew card extended account but ABS reactivation failed: tg=%d abs_user_id=%s expire_at=%s days=%d error=%s",
-						userID, formatPlainValue(absUserID), newExpireAt.Format(time.RFC3339), days, formatPlainError(err)))
-				if auditErr != nil {
-					log.Printf("⚠️ 续期 ABS 解封失败审计写入失败: user=%d abs=%s err=%s", userID, formatPlainValue(absUserID), formatPlainError(auditErr))
-					notifySuperAdminsPlain(bot, fmt.Sprintf("⚠️ 用户续期已到账，但 ABS 恢复失败，且失败审计写入失败。\n用户：%d\nABS：%s\n到期：%s\n天数：%d\nABS错误：%s\n审计错误：%s", userID, formatPlainValue(absUserID), newExpireAt.Format(time.RFC3339), days, formatPlainError(err), formatPlainError(auditErr)))
-				}
-
-				replyText(bot, chatID, fmt.Sprintf(
-					"⚠️ 续期已到账，新的到期时间为 `%s`。\n\nABS 解封暂时失败，系统已记录异常，请联系管理员处理。",
-					newExpireAt.Format("2006-01-02"),
-				))
-				clearSession(userID)
-				return
-			}
-
-			if err := applyRenewReactivateLocalStatusWithAudit(userID, absUserID, newExpireAt, days); err != nil {
-				log.Printf("⚠️ ABS 已解封，但本地解除封禁状态或审计写入失败: user=%d abs=%s err=%s", userID, formatPlainValue(absUserID), formatPlainError(err))
-				auditErr := writeAuditLogInTx(DB, userID, "RENEW_REACTIVATE_USER_LOCAL_FAILED", fmt.Sprintf("%d", userID), 0,
-					fmt.Sprintf("renew card reactivated ABS but local state/audit failed: tg=%d abs_user_id=%s expire_at=%s days=%d error=%s",
-						userID, formatPlainValue(absUserID), newExpireAt.Format(time.RFC3339), days, formatPlainError(err)))
-				if auditErr != nil {
-					log.Printf("⚠️ 续期 ABS 已解封，但本地失败审计写入失败: user=%d abs=%s err=%s", userID, formatPlainValue(absUserID), formatPlainError(auditErr))
-					notifySuperAdminsPlain(bot, fmt.Sprintf("⚠️ 用户续期已到账且 ABS 已恢复，但本地权限状态或成功审计失败，且本地失败审计写入失败。\n用户：%d\nABS：%s\n到期：%s\n天数：%d\n本地错误：%s\n审计错误：%s\n请立即人工核查。", userID, formatPlainValue(absUserID), newExpireAt.Format(time.RFC3339), days, formatPlainError(err), formatPlainError(auditErr)))
-					replyText(bot, chatID, fmt.Sprintf(
-						"⚠️ 续期已到账，新的到期时间为 `%s`。\n\nABS 已恢复，但本地权限状态和失败审计写入均异常，已通知管理员人工核查。",
-						newExpireAt.Format("2006-01-02"),
-					))
-				} else {
-					replyText(bot, chatID, fmt.Sprintf(
-						"⚠️ 续期已到账，新的到期时间为 `%s`。\n\nABS 已恢复，但本地权限状态或审计写入失败，请联系管理员处理。",
-						newExpireAt.Format("2006-01-02"),
-					))
-				}
-				clearSession(userID)
-				return
-			}
-		}
-
-		replyText(bot, chatID, fmt.Sprintf(
-			"🎉 续费成功！延长 `%d` 天。\n📅 新到期时间：`%s`",
-			days,
-			newExpireAt.Format("2006-01-02"),
-		))
+		sendRenewRedeemResult(bot, chatID, userID, result)
 		clearSession(userID)
 
 	case "WAITING_CONFIRM_DELETE":
@@ -8454,6 +8685,9 @@ type redPacketGrabResult struct {
 	Points int
 }
 
+func validRedPacketCount(count int) bool {
+	return count >= 3 && count <= 100
+}
 func applyRedPacketClaimScopeFilter(query *gorm.DB, userID int64) *gorm.DB {
 	if query == nil {
 		return query

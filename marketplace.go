@@ -41,7 +41,9 @@ const (
 	marketplaceMaxPrice                   = 100000
 	marketplaceMaxInventoryUnits          = 1000
 	marketplaceMaxBuyQuantity             = 50
-	marketplaceFeePercent                 = 3
+	marketplaceFeePercent                 = 5
+	marketplaceMinOriginalValuePercent    = 85
+	marketplaceMaxOriginalValuePercent    = 115
 	marketplaceConfirmPrice               = 1000
 	marketplaceMinUnitPrice               = 1
 	marketplaceMinDisputeReasonLen        = 3
@@ -108,6 +110,7 @@ func isMarketplaceCommand(text string) bool {
 		text == "上架商品" ||
 		hasMarketplaceCommandPrefix(text, "交易行订单") ||
 		hasMarketplaceCommandPrefix(text, "查交易订单") ||
+		hasMarketplaceCommandPrefix(text, "强制下架商品") ||
 		hasMarketplaceCommandPrefix(text, "举报订单") ||
 		hasMarketplaceCommandPrefix(text, "购买商品") ||
 		hasMarketplaceCommandPrefix(text, "下架商品") ||
@@ -158,6 +161,8 @@ func handleMarketplacePrivateCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message
 		handleMarketplaceListingOrders(bot, msg, text)
 	case hasMarketplaceCommandPrefix(text, "查交易订单"):
 		handleMarketplaceAdminOrderQuery(bot, msg, text)
+	case hasMarketplaceCommandPrefix(text, "强制下架商品"):
+		handleMarketplaceForceCloseStart(bot, msg, text, session)
 	case hasMarketplaceCommandPrefix(text, "举报订单"):
 		handleMarketplaceDispute(bot, msg, text)
 	case hasMarketplaceCommandPrefix(text, "交易行详情"):
@@ -188,6 +193,9 @@ func marketplaceHelpText(role string) string {
 	if role == "admin" || role == "super_admin" {
 		b.WriteString("\n\n管理员：\n")
 		b.WriteString("- 查交易订单 订单ID：只读查看订单和争议记录，例如“查交易订单 12”。")
+		if role == "super_admin" {
+			b.WriteString("\n- 强制下架商品 商品ID：超级管理员强制下架在售商品，需要原因和二次确认，例如“强制下架商品 8”。")
+		}
 	}
 	return b.String()
 }
@@ -276,7 +284,7 @@ func handleMarketplaceStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text str
 		}
 		session.SetTemp("market_name", name)
 		session.SetStep("WAITING_MARKET_PRICE")
-		sendPlainText(bot, chatID, "第二步：请发送商品价格，范围 1-100000 积分。")
+		sendPlainText(bot, chatID, "第二步：请发送商品价格，范围 1-100000 积分；系统可识别原价值的商品必须在原价值 85%-115% 内。")
 
 	case "WAITING_MARKET_INVENTORY_ITEM":
 		itemName := strings.TrimSpace(text)
@@ -318,7 +326,7 @@ func handleMarketplaceStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text str
 		session.SetTemp("market_inventory_quantity", strconv.Itoa(qty))
 		session.SetTemp("market_name", itemName)
 		session.SetStep("WAITING_MARKET_PRICE")
-		sendPlainText(bot, chatID, fmt.Sprintf("将从乾坤袋锁定【%s】x%d。\n\n请发送每个商品单位的价格，范围 1-100000 积分。", marketplaceVisibleItemName(itemName), qty))
+		sendPlainText(bot, chatID, fmt.Sprintf("将从乾坤袋锁定【%s】x%d。\n\n请发送每个商品单位的价格，范围 1-100000 积分；系统可识别原价值的商品必须在原价值 85%%-115%% 内。", marketplaceVisibleItemName(itemName), qty))
 
 	case "WAITING_MARKET_PRICE":
 		price, err := strconv.Atoi(text)
@@ -397,6 +405,10 @@ func handleMarketplaceStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text str
 			listingID,
 		))
 		notifyMarketplaceListingCreated(bot, listingID, marketplaceTypeSecret, name, price, len(secrets), getTelegramDisplayName(msg.From))
+	case "WAITING_MARKET_FORCE_CLOSE_REASON":
+		handleMarketplaceForceCloseReason(bot, msg, text, session)
+	case "WAITING_MARKET_FORCE_CLOSE_CONFIRM":
+		handleMarketplaceForceCloseConfirm(bot, msg, text, session)
 	}
 }
 
@@ -450,11 +462,25 @@ func createMarketplaceSecretListing(sellerID int64, sellerName string, name stri
 			if codeHash == "" {
 				return errSecurityPepperNotConfigured
 			}
-			classified, err := classifyMarketplaceSecretTx(tx, codeHash)
+			classified, err := classifyMarketplaceSecretTx(tx, codeHash, sellerID)
 			if err != nil {
 				return err
 			}
 			classifiedSecrets = append(classifiedSecrets, classified)
+		}
+		minPrice, err := marketplaceSecretListingMinPriceTx(tx, classifiedSecrets)
+		if err != nil {
+			return err
+		}
+		if price < minPrice {
+			return errMarketplacePriceBelowFloor
+		}
+		maxPrice, err := marketplaceSecretListingMaxPriceTx(tx, classifiedSecrets)
+		if err != nil {
+			return err
+		}
+		if maxPrice > 0 && price > maxPrice {
+			return errMarketplacePriceAboveCeiling
 		}
 		secretSource, err := marketplaceSecretListingSource(classifiedSecrets)
 		if err != nil {
@@ -544,12 +570,15 @@ func normalizeMarketplaceSecrets(secrets []string) ([]string, bool) {
 }
 
 type marketplaceSecretClassification struct {
-	CodeHash string
-	Source   string
-	RefID    uint
+	CodeHash    string
+	Source      string
+	RefID       uint
+	RenewDays   int
+	RenewSource string
+	OwnerUserID int64
 }
 
-func classifyMarketplaceSecretTx(tx *gorm.DB, codeHash string) (marketplaceSecretClassification, error) {
+func classifyMarketplaceSecretTx(tx *gorm.DB, codeHash string, sellerID int64) (marketplaceSecretClassification, error) {
 	if codeHash == "" {
 		return marketplaceSecretClassification{}, errSecurityPepperNotConfigured
 	}
@@ -567,18 +596,93 @@ func classifyMarketplaceSecretTx(tx *gorm.DB, codeHash string) (marketplaceSecre
 	}
 
 	var renew RenewCode
-	if err := tx.Select("id", "is_used").
+	if err := tx.Select("id", "is_used", "days", "source", "owner_user_id").
 		Where("code_hash = ?", codeHash).
 		First(&renew).Error; err == nil {
 		if renew.IsUsed {
 			return marketplaceSecretClassification{}, errMarketplaceVerifiedInvalid
 		}
-		return marketplaceSecretClassification{CodeHash: codeHash, Source: marketplaceSecretSourceBotRenew, RefID: renew.ID}, nil
+		if renew.Source == renewCodeSourcePointExchange && renew.OwnerUserID != 0 && renew.OwnerUserID != sellerID {
+			return marketplaceSecretClassification{}, errMarketplaceSecretOwnerMismatch
+		}
+		return marketplaceSecretClassification{
+			CodeHash:    codeHash,
+			Source:      marketplaceSecretSourceBotRenew,
+			RefID:       renew.ID,
+			RenewDays:   renew.Days,
+			RenewSource: renew.Source,
+			OwnerUserID: renew.OwnerUserID,
+		}, nil
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return marketplaceSecretClassification{}, err
 	}
 
 	return marketplaceSecretClassification{}, errMarketplaceUnverifiedSecret
+}
+
+func marketplaceSecretListingMinPriceTx(tx *gorm.DB, secrets []marketplaceSecretClassification) (int, error) {
+	minPrice := 0
+	for _, secret := range secrets {
+		originalValue, err := marketplaceSecretOriginalValueTx(tx, secret)
+		if err != nil {
+			return 0, err
+		}
+		if required := marketplaceMinOriginalValuePrice(originalValue); required > minPrice {
+			minPrice = required
+		}
+	}
+	return minPrice, nil
+}
+
+func marketplaceSecretListingMaxPriceTx(tx *gorm.DB, secrets []marketplaceSecretClassification) (int, error) {
+	maxPrice := 0
+	for _, secret := range secrets {
+		originalValue, err := marketplaceSecretOriginalValueTx(tx, secret)
+		if err != nil {
+			return 0, err
+		}
+		required := marketplaceMaxOriginalValuePrice(originalValue)
+		if required <= 0 {
+			continue
+		}
+		if maxPrice == 0 || required < maxPrice {
+			maxPrice = required
+		}
+	}
+	return maxPrice, nil
+}
+
+func marketplaceSecretOriginalValueTx(tx *gorm.DB, secret marketplaceSecretClassification) (int, error) {
+	switch secret.Source {
+	case marketplaceSecretSourceBotInvite:
+		return getConfigIntFromDBChecked(tx, "invite_price", 300)
+	case marketplaceSecretSourceBotRenew:
+		renewPrice, err := getConfigIntFromDBChecked(tx, "renew_price", 150)
+		if err != nil {
+			return 0, err
+		}
+		days := secret.RenewDays
+		if days <= 0 {
+			days = 30
+		}
+		return (renewPrice*days + 29) / 30, nil
+	default:
+		return 0, nil
+	}
+}
+
+func marketplaceMinOriginalValuePrice(originalValue int) int {
+	if originalValue <= 0 {
+		return 0
+	}
+	return (originalValue*marketplaceMinOriginalValuePercent + 99) / 100
+}
+
+func marketplaceMaxOriginalValuePrice(originalValue int) int {
+	if originalValue <= 0 {
+		return 0
+	}
+	return originalValue * marketplaceMaxOriginalValuePercent / 100
 }
 
 func marketplaceSecretListingSource(secrets []marketplaceSecretClassification) (string, error) {
@@ -753,6 +857,48 @@ func validMarketplaceInventoryItemName(name string) bool {
 	return !containsDisallowedControl(name, false)
 }
 
+func marketplaceInventoryOriginalValue(itemName string) (int, bool) {
+	itemName = strings.TrimSpace(itemName)
+	if itemName == "" {
+		return 0, false
+	}
+	for _, item := range treasureShopItems {
+		if item.Name == itemName && item.Price > 0 {
+			return item.Price, true
+		}
+	}
+	for _, cfg := range gardenSeeds {
+		if cfg.SeedName == itemName && cfg.Price > 0 {
+			return cfg.Price, true
+		}
+		if cfg.HerbName == itemName {
+			if price := gardenHerbBaseSellPrice(cfg); price > 0 {
+				return price, true
+			}
+		}
+	}
+	for _, recipe := range gardenRecipes {
+		if recipe.ProductName == itemName {
+			if price, ok := marketplaceRecipeOriginalValue(recipe); ok && price > 0 {
+				return price, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func marketplaceRecipeOriginalValue(recipe gardenRecipeConfig) (int, bool) {
+	total := recipe.AlchemyCost
+	for _, material := range recipe.Materials {
+		unitPrice, ok := marketplaceInventoryOriginalValue(material.ItemName)
+		if !ok || unitPrice <= 0 || material.Quantity <= 0 {
+			return 0, false
+		}
+		total += unitPrice * material.Quantity
+	}
+	return total, true
+}
+
 func createMarketplaceInventoryListing(sellerID int64, sellerName string, itemName string, price int, quantity int) (uint, error) {
 	itemName = strings.TrimSpace(itemName)
 	if sellerID == 0 || !validMarketplaceInventoryItemName(itemName) || price < marketplaceMinUnitPrice || price > marketplaceMaxPrice || quantity <= 0 || quantity > marketplaceMaxInventoryUnits {
@@ -770,6 +916,15 @@ func createMarketplaceInventoryListing(sellerID int64, sellerName string, itemNa
 		}
 		if strings.TrimSpace(sellerName) == "" {
 			sellerName = seller.Username
+		}
+
+		if originalValue, ok := marketplaceInventoryOriginalValue(itemName); ok {
+			if price < marketplaceMinOriginalValuePrice(originalValue) {
+				return errMarketplacePriceBelowFloor
+			}
+			if maxPrice := marketplaceMaxOriginalValuePrice(originalValue); maxPrice > 0 && price > maxPrice {
+				return errMarketplacePriceAboveCeiling
+			}
 		}
 
 		res := tx.Model(&Inventory{}).
@@ -870,6 +1025,12 @@ func marketplaceErrorCode(err error) string {
 		return "MARKETPLACE_VERIFIED_SECRET_INVALID"
 	case errors.Is(err, errMarketplaceUnverifiedSecret):
 		return "MARKETPLACE_UNVERIFIED_SECRET"
+	case errors.Is(err, errMarketplaceSecretOwnerMismatch):
+		return "MARKETPLACE_SECRET_OWNER_MISMATCH"
+	case errors.Is(err, errMarketplacePriceBelowFloor):
+		return "MARKETPLACE_PRICE_BELOW_FLOOR"
+	case errors.Is(err, errMarketplacePriceAboveCeiling):
+		return "MARKETPLACE_PRICE_ABOVE_CEILING"
 	case errors.Is(err, errPointsNotEnough):
 		return "POINTS_NOT_ENOUGH"
 	case errors.Is(err, errSecurityPepperNotConfigured):
@@ -899,6 +1060,9 @@ func knownMarketplaceErrorCode(code string) string {
 		"MARKETPLACE_MIXED_SECRET_SOURCE",
 		"MARKETPLACE_VERIFIED_SECRET_INVALID",
 		"MARKETPLACE_UNVERIFIED_SECRET",
+		"MARKETPLACE_SECRET_OWNER_MISMATCH",
+		"MARKETPLACE_PRICE_BELOW_FLOOR",
+		"MARKETPLACE_PRICE_ABOVE_CEILING",
 		"POINTS_NOT_ENOUGH",
 		"SECURITY_PEPPER_NOT_CONFIGURED":
 		return code
@@ -913,6 +1077,15 @@ func marketplaceCreateErrorText(err error) string {
 	}
 	if errors.Is(err, errMarketplaceUnverifiedSecret) {
 		return "❌ 交易行仅允许上架 Bot 生成的邀请码或续期卡，未识别卡密不可上架。"
+	}
+	if errors.Is(err, errMarketplaceSecretOwnerMismatch) {
+		return "❌ 积分兑换续期卡只能由当前持有人本人上架交易行。"
+	}
+	if errors.Is(err, errMarketplacePriceBelowFloor) {
+		return "❌ 上架价格过低。交易行商品价格需保持在系统原价值的 85% 及以上。"
+	}
+	if errors.Is(err, errMarketplacePriceAboveCeiling) {
+		return "❌ 上架价格过高。交易行商品价格不得超过系统原价值的 115%。"
 	}
 	if err == nil {
 		return "❌ 上架失败，请稍后再试。"
@@ -933,6 +1106,12 @@ func marketplaceCreateErrorText(err error) string {
 		return "❌ 同一件自由卡密商品不能混放 Bot 产出卡密和三方卡密，请拆分后分别上架。"
 	case "MARKETPLACE_VERIFIED_SECRET_INVALID":
 		return "❌ Bot 产出卡密已被使用或当前不可用，请更换后再上架。"
+	case "MARKETPLACE_SECRET_OWNER_MISMATCH":
+		return "❌ 积分兑换续期卡只能由当前持有人本人上架交易行。"
+	case "MARKETPLACE_PRICE_BELOW_FLOOR":
+		return "❌ 上架价格过低。交易行商品价格需保持在系统原价值的 85% 及以上。"
+	case "MARKETPLACE_PRICE_ABOVE_CEILING":
+		return "❌ 上架价格过高。交易行商品价格不得超过系统原价值的 115%。"
 	default:
 		return "❌ 上架失败，请稍后再试。"
 	}
@@ -1630,6 +1809,9 @@ func purchaseMarketplaceListing(buyerID int64, listingID uint, buyQty int) (mark
 					invalidSecretID = secret.ID
 					return errMarketplaceVerifiedInvalid
 				}
+				if err := transferMarketplaceRenewCodeOwnerInTx(tx, secret, buyerID); err != nil {
+					return err
+				}
 			}
 
 			now := time.Now()
@@ -1785,6 +1967,23 @@ func purchaseMarketplaceListing(buyerID int64, listingID uint, buyQty int) (mark
 		FeeAmount:    feeAmount,
 		SellerAmount: sellerAmount,
 	}, nil
+}
+
+func transferMarketplaceRenewCodeOwnerInTx(tx *gorm.DB, secret MarketplaceSecret, buyerID int64) error {
+	if marketplaceSecretSource(secret.TokenSource) != marketplaceSecretSourceBotRenew {
+		return nil
+	}
+	if secret.TokenRefID == 0 || secret.CodeHash == "" || buyerID == 0 {
+		return errMarketplaceVerifiedInvalid
+	}
+
+	res := tx.Model(&RenewCode{}).
+		Where("id = ? AND code_hash = ? AND is_used = ? AND source = ?", secret.TokenRefID, secret.CodeHash, false, renewCodeSourcePointExchange).
+		Update("owner_user_id", buyerID)
+	if res.Error != nil {
+		return res.Error
+	}
+	return nil
 }
 
 func quarantineMarketplaceInvalidSecret(db *gorm.DB, listingID uint, secretID uint) error {
@@ -1980,6 +2179,163 @@ func handleMarketplaceAdminOrderQuery(bot *tgbotapi.BotAPI, msg *tgbotapi.Messag
 		}
 	}
 	sendPlainTextNoMarkdown(bot, msg.Chat.ID, strings.TrimSpace(b.String()))
+}
+
+func handleMarketplaceForceCloseStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string, session *SessionState) {
+	if !msg.Chat.IsPrivate() {
+		sendPlainText(bot, msg.Chat.ID, "强制下架商品请在私聊中执行。")
+		return
+	}
+	if !isSuperAdmin(msg.From.ID) {
+		sendPlainText(bot, msg.Chat.ID, "❌ 权限不足：强制下架商品仅限超级管理员。")
+		return
+	}
+	if session == nil {
+		sendPlainText(bot, msg.Chat.ID, "❌ 会话状态异常，请稍后重试。")
+		return
+	}
+	listingID, ok := parseMarketplaceID(text, "强制下架商品")
+	if !ok {
+		sendPlainText(bot, msg.Chat.ID, "用法：强制下架商品 商品ID")
+		return
+	}
+
+	listing, stock, err := loadMarketplaceActiveListingForAdmin(listingID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			sendPlainText(bot, msg.Chat.ID, "❌ 未找到该在售商品，可能已下架或不存在。")
+		} else {
+			log.Printf("⚠️ 强制下架交易行商品读取失败: admin=%d listing=%d err=%s", msg.From.ID, listingID, formatPlainError(err))
+			sendPlainText(bot, msg.Chat.ID, "❌ 商品状态读取失败，请稍后重试。")
+		}
+		return
+	}
+
+	session.SetTemp("market_force_close_listing_id", strconv.FormatUint(uint64(listingID), 10))
+	session.SetStep("WAITING_MARKET_FORCE_CLOSE_REASON")
+	sendPlainTextNoMarkdown(bot, msg.Chat.ID, fmt.Sprintf(
+		"⚠️ 强制下架交易行商品\n\n%s\n\n请输入操作原因，%s：",
+		marketplaceForceCloseListingSummary(listing, stock),
+		adminReasonRequirementText,
+	))
+}
+
+func handleMarketplaceForceCloseReason(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string, session *SessionState) {
+	if !isSuperAdmin(msg.From.ID) {
+		clearSession(msg.From.ID)
+		sendPlainText(bot, msg.Chat.ID, "❌ 权限不足：强制下架商品仅限超级管理员。")
+		return
+	}
+	reason, ok := validateAdminReason(text)
+	if !ok {
+		sendPlainText(bot, msg.Chat.ID, "❌ 操作原因格式不符合要求，"+adminReasonRequirementText+"。请重新发送：")
+		return
+	}
+	listingID, err := strconv.ParseUint(session.GetTemp("market_force_close_listing_id"), 10, 64)
+	if err != nil || listingID == 0 {
+		clearSession(msg.From.ID)
+		sendPlainText(bot, msg.Chat.ID, "❌ 会话状态异常，请重新发起强制下架。")
+		return
+	}
+
+	listing, stock, err := loadMarketplaceActiveListingForAdmin(uint(listingID))
+	if err != nil {
+		clearSession(msg.From.ID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			sendPlainText(bot, msg.Chat.ID, "❌ 该商品已不在售，无需强制下架。")
+		} else {
+			log.Printf("⚠️ 强制下架确认前商品读取失败: admin=%d listing=%d err=%s", msg.From.ID, listingID, formatPlainError(err))
+			sendPlainText(bot, msg.Chat.ID, "❌ 商品状态读取失败，请稍后重试。")
+		}
+		return
+	}
+
+	session.SetTemp("market_force_close_reason", reason)
+	session.SetStep("WAITING_MARKET_FORCE_CLOSE_CONFIRM")
+	sendPlainTextNoMarkdown(bot, msg.Chat.ID, fmt.Sprintf(
+		"⚠️ 强制下架二次确认\n\n%s\n原因：%s\n\n确认执行请回复：确认强制下架\n取消请回复：取消",
+		marketplaceForceCloseListingSummary(listing, stock),
+		formatPlainValue(reason),
+	))
+}
+
+func handleMarketplaceForceCloseConfirm(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string, session *SessionState) {
+	if !isSuperAdmin(msg.From.ID) {
+		clearSession(msg.From.ID)
+		sendPlainText(bot, msg.Chat.ID, "❌ 权限不足：强制下架商品仅限超级管理员。")
+		return
+	}
+	if text != "确认强制下架" {
+		clearSession(msg.From.ID)
+		sendPlainText(bot, msg.Chat.ID, "🛑 已取消强制下架。")
+		return
+	}
+	listingID64, err := strconv.ParseUint(session.GetTemp("market_force_close_listing_id"), 10, 64)
+	if err != nil || listingID64 == 0 {
+		clearSession(msg.From.ID)
+		sendPlainText(bot, msg.Chat.ID, "❌ 会话状态异常，请重新发起强制下架。")
+		return
+	}
+	reason, ok := validateAdminReason(session.GetTemp("market_force_close_reason"))
+	if !ok {
+		clearSession(msg.From.ID)
+		sendPlainText(bot, msg.Chat.ID, "❌ 操作原因异常，请重新发起强制下架。")
+		return
+	}
+
+	result, err := forceCloseMarketplaceListingInTx(DB, msg.From.ID, uint(listingID64), reason)
+	clearSession(msg.From.ID)
+	if err != nil {
+		if errors.Is(err, errMarketplaceCloseNotFound) {
+			sendPlainText(bot, msg.Chat.ID, "❌ 该商品已不在售，无需强制下架。")
+			return
+		}
+		if errors.Is(err, errMarketplaceSellerMismatch) {
+			handleMarketplaceSellerMismatch(bot, uint(listingID64), "force_close")
+			sendPlainText(bot, msg.Chat.ID, "❌ 商品卖家数据异常，已暂停交易并通知管理员核查。")
+			return
+		}
+		if errors.Is(err, errMarketplaceInvalidType) {
+			sendPlainText(bot, msg.Chat.ID, "❌ 商品类型异常，强制下架已中止，请人工核查。")
+			return
+		}
+		log.Printf("⚠️ 强制下架交易行商品失败: admin=%d listing=%d err=%s", msg.From.ID, listingID64, formatPlainError(err))
+		sendPlainText(bot, msg.Chat.ID, "❌ 强制下架失败，请稍后重试。")
+		return
+	}
+
+	sendPlainTextNoMarkdown(bot, msg.Chat.ID, fmt.Sprintf(
+		"✅ 已强制下架交易行商品 #%d\n\n商品：%s\n卖家：%d\n退回未售背包数量：%d",
+		result.Listing.ID,
+		marketplaceVisibleItemName(result.Listing.Name),
+		result.Listing.SellerID,
+		result.RefundQuantity,
+	))
+	notifyMarketplaceForceClosedSeller(bot, result, reason, msg.From.ID)
+}
+
+func loadMarketplaceActiveListingForAdmin(listingID uint) (MarketplaceListing, int64, error) {
+	var listing MarketplaceListing
+	if err := marketplaceActiveListingQuery(DB, time.Now()).Where("id = ?", listingID).First(&listing).Error; err != nil {
+		return MarketplaceListing{}, 0, err
+	}
+	stock, err := countMarketplaceListingStock(listingID)
+	if err != nil {
+		return MarketplaceListing{}, 0, err
+	}
+	return listing, stock, nil
+}
+
+func marketplaceForceCloseListingSummary(listing MarketplaceListing, stock int64) string {
+	return fmt.Sprintf(
+		"商品：#%d %s\n类型：%s\n单价：%d 积分\n库存：%d\n卖家：%d",
+		listing.ID,
+		marketplaceVisibleItemName(listing.Name),
+		marketplaceTypeText(listing.ListingType),
+		listing.Price,
+		stock,
+		listing.SellerID,
+	)
 }
 
 func handleMarketplaceDispute(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string) {
@@ -2226,12 +2582,45 @@ func handleMarketplaceClose(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text st
 	sendPlainText(bot, msg.Chat.ID, fmt.Sprintf("✅ 已下架交易行商品 #%d，未售出的卡密不会继续出售。", listingID))
 }
 
+type marketplaceForceCloseResult struct {
+	Listing        MarketplaceListing
+	RefundQuantity int
+}
+
 func closeMarketplaceListingInTx(db *gorm.DB, sellerID int64, listingID uint) (int, error) {
 	return closeMarketplaceListingScoped(db, sellerID, listingID, true)
 }
 
 func closeMarketplaceListingByID(db *gorm.DB, listingID uint) (int, error) {
 	return closeMarketplaceListingScoped(db, 0, listingID, false)
+}
+
+func forceCloseMarketplaceListingInTx(db *gorm.DB, actorID int64, listingID uint, reason string) (marketplaceForceCloseResult, error) {
+	refundQty, listing, err := closeMarketplaceListingScopedWithAudit(db, 0, listingID, false, actorID, reason)
+	if err != nil {
+		return marketplaceForceCloseResult{}, err
+	}
+	return marketplaceForceCloseResult{
+		Listing:        listing,
+		RefundQuantity: refundQty,
+	}, nil
+}
+
+func notifyMarketplaceForceClosedSeller(bot *tgbotapi.BotAPI, result marketplaceForceCloseResult, reason string, actorID int64) {
+	if bot == nil || result.Listing.SellerID == 0 || result.Listing.SellerID == actorID {
+		return
+	}
+	extra := "未售卡密已停止出售。"
+	if result.Listing.ListingType == marketplaceTypeInventory {
+		extra = fmt.Sprintf("未售背包物品已退回乾坤袋，数量：%d。", result.RefundQuantity)
+	}
+	sendPlainTextNoMarkdown(bot, result.Listing.SellerID, fmt.Sprintf(
+		"⚠️ 交易行商品 #%d 已由超级管理员强制下架。\n\n商品：%s\n%s\n原因：%s",
+		result.Listing.ID,
+		marketplaceVisibleItemName(result.Listing.Name),
+		extra,
+		formatPlainValue(reason),
+	))
 }
 
 type marketplaceSellerGroup struct {
@@ -2311,11 +2700,20 @@ func quarantineMarketplaceListingForReview(db *gorm.DB, listingID uint) error {
 }
 
 func closeMarketplaceListingScoped(db *gorm.DB, sellerID int64, listingID uint, requireSeller bool) (int, error) {
+	refundQty, _, err := closeMarketplaceListingScopedWithAudit(db, sellerID, listingID, requireSeller, 0, "")
+	if err != nil {
+		return 0, err
+	}
+	return refundQty, nil
+}
+
+func closeMarketplaceListingScopedWithAudit(db *gorm.DB, sellerID int64, listingID uint, requireSeller bool, auditActorID int64, auditReason string) (int, MarketplaceListing, error) {
 	if db == nil {
-		return 0, fmt.Errorf("DB_NOT_READY")
+		return 0, MarketplaceListing{}, fmt.Errorf("DB_NOT_READY")
 	}
 
 	refundQty := 0
+	var closedListing MarketplaceListing
 	err := db.Transaction(func(tx *gorm.DB) error {
 		txRefundQty := 0
 		var listing MarketplaceListing
@@ -2382,13 +2780,26 @@ func closeMarketplaceListingScoped(db *gorm.DB, sellerID int64, listingID uint, 
 		if secretRes.RowsAffected != availableCount {
 			return fmt.Errorf("marketplace close available units changed: listing=%d expected=%d actual=%d", listing.ID, availableCount, secretRes.RowsAffected)
 		}
+		if auditActorID != 0 {
+			if err := writeAuditLogInTx(
+				tx,
+				auditActorID,
+				"FORCE_CLOSE_MARKETPLACE_LISTING",
+				fmt.Sprintf("%d", listing.ID),
+				0,
+				fmt.Sprintf("超级管理员强制下架交易行商品，seller=%d price=%d refund_qty=%d reason=%s", listing.SellerID, listing.Price, txRefundQty, formatPlainValue(auditReason)),
+			); err != nil {
+				return err
+			}
+		}
 		refundQty = txRefundQty
+		closedListing = listing
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return 0, MarketplaceListing{}, err
 	}
-	return refundQty, nil
+	return refundQty, closedListing, nil
 }
 
 func StartMarketplaceExpiryScheduler(bot *tgbotapi.BotAPI) {

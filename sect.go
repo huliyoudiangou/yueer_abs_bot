@@ -3374,109 +3374,11 @@ func recordDailyListeningStatsFromABSDays(userID int64, absUserID string, days m
 	if DB == nil || userID == 0 {
 		return nil
 	}
-
 	if fetchedAt.IsZero() {
 		fetchedAt = time.Now()
 	}
 
-	officialByDay := make(map[string]float64, len(days))
-	daySet := make(map[string]bool, len(days))
-	for dayKey, rawSeconds := range days {
-		dayKey = strings.TrimSpace(dayKey)
-		if dayKey == "" {
-			continue
-		}
-		if rawSeconds <= 0 {
-			continue
-		}
-		officialByDay[dayKey] = rawSeconds
-		daySet[dayKey] = true
-	}
-
-	liveDeltas := estimateDailyListeningLiveDeltas(userID, absUserID, fetchedAt)
-	for dayKey, rawSeconds := range liveDeltas {
-		dayKey = strings.TrimSpace(dayKey)
-		if dayKey == "" || rawSeconds <= 0 {
-			continue
-		}
-		daySet[dayKey] = true
-	}
-
-	if len(daySet) == 0 {
-		return nil
-	}
-
-	dayKeys := make([]string, 0, len(daySet))
-	for dayKey := range daySet {
-		dayKeys = append(dayKeys, dayKey)
-	}
-
-	existingByDay := make(map[string]DailyListeningStat, len(dayKeys))
-	var existing []DailyListeningStat
-	if err := DB.Where("user_id = ? AND day_key IN ?", userID, dayKeys).Find(&existing).Error; err != nil {
-		log.Printf("每日听书统计旧记录读取失败: user=%d err=%s", userID, formatPlainError(err))
-		return err
-	}
-	for _, stat := range existing {
-		existingByDay[stat.DayKey] = stat
-	}
-
-	records := make([]DailyListeningStat, 0, len(dayKeys))
-	for _, dayKey := range dayKeys {
-		existingStat := existingByDay[dayKey]
-		officialRawSeconds, hasOfficial := officialByDay[dayKey]
-		if !hasOfficial {
-			officialRawSeconds = existingStat.OfficialRawSeconds
-			if officialRawSeconds <= 0 && existingStat.Source == "abs_days" {
-				officialRawSeconds = existingStat.RawSeconds
-			}
-		}
-		liveDeltaSeconds := liveDeltas[dayKey]
-		liveRawSeconds := existingStat.LiveRawSeconds + liveDeltaSeconds
-		rawSeconds := officialRawSeconds
-		source := "abs_days"
-		fetchStatus := "ok"
-		refreshReason := "abs_refresh"
-		if liveRawSeconds > rawSeconds {
-			rawSeconds = liveRawSeconds
-			source = dailyListeningLiveCheckpointSource
-			fetchStatus = dailyListeningLiveProvisionalStatus
-			refreshReason = "abs_refresh_live_session_fallback"
-			if officialRawSeconds > 0 {
-				source = "mixed"
-				fetchStatus = "mixed"
-			}
-		}
-		if rawSeconds <= 0 {
-			continue
-		}
-
-		cappedSeconds := cappedListeningSeconds(rawSeconds)
-		records = append(records, DailyListeningStat{
-			UserID:                userID,
-			AbsUserID:             strings.TrimSpace(absUserID),
-			DayKey:                dayKey,
-			RawSeconds:            rawSeconds,
-			CappedSeconds:         cappedSeconds,
-			EffectiveHours:        calculateSectEffectiveHoursFromSeconds(rawSeconds),
-			LastFetchedAt:         fetchedAt,
-			OfficialRawSeconds:    officialRawSeconds,
-			LiveRawSeconds:        liveRawSeconds,
-			LastOfficialFetchedAt: existingStat.LastOfficialFetchedAt,
-			LastLiveFetchedAt:     existingStat.LastLiveFetchedAt,
-			Source:                source,
-			FetchStatus:           fetchStatus,
-			FetchError:            "",
-			RefreshReason:         refreshReason,
-		})
-		if hasOfficial {
-			records[len(records)-1].LastOfficialFetchedAt = fetchedAt
-		}
-		if liveDeltaSeconds > 0 {
-			records[len(records)-1].LastLiveFetchedAt = fetchedAt
-		}
-	}
-
+	records := buildOfficialDailyListeningRecords(userID, absUserID, days, fetchedAt)
 	if len(records) == 0 {
 		return nil
 	}
@@ -3493,6 +3395,64 @@ func recordDailyListeningStatsFromABSDays(userID int64, absUserID string, days m
 		return err
 	}
 	return nil
+}
+
+func buildOfficialDailyListeningRecords(userID int64, absUserID string, days map[string]float64, fetchedAt time.Time) []DailyListeningStat {
+	if userID == 0 {
+		return nil
+	}
+	if fetchedAt.IsZero() {
+		fetchedAt = time.Now()
+	}
+
+	// Daily cultivation must use the exact Beijing calendar-day value reported by
+	// listening-stats.days. The user listening-sessions endpoint is a historical
+	// session list, not a trustworthy live-play feed; using it as a live fallback
+	// can multiply one refresh interval by every historical session returned.
+	rawOfficialByDay := make(map[string]float64, len(days)+1)
+	daySet := make(map[string]bool, len(days)+1)
+	for dayKey, rawSeconds := range days {
+		dayKey = strings.TrimSpace(dayKey)
+		if dayKey == "" {
+			continue
+		}
+		rawOfficialByDay[dayKey] = positiveListeningSeconds(rawSeconds)
+		daySet[dayKey] = true
+	}
+
+	// A successful payload with a present days object is authoritative for today
+	// even when today's key is absent. Persisting zero here repairs any previously
+	// inflated provisional/live value instead of leaving stale 24-hour data cached.
+	if days != nil {
+		todayKey := sectDayKey(fetchedAt)
+		if _, ok := rawOfficialByDay[todayKey]; !ok {
+			rawOfficialByDay[todayKey] = 0
+		}
+		daySet[todayKey] = true
+	}
+
+	records := make([]DailyListeningStat, 0, len(daySet))
+	for dayKey := range daySet {
+		rawSeconds := rawOfficialByDay[dayKey]
+		cappedSeconds := cappedListeningSeconds(rawSeconds)
+		records = append(records, DailyListeningStat{
+			UserID:                userID,
+			AbsUserID:             strings.TrimSpace(absUserID),
+			DayKey:                dayKey,
+			RawSeconds:            rawSeconds,
+			CappedSeconds:         cappedSeconds,
+			EffectiveHours:        calculateSectEffectiveHoursFromSeconds(rawSeconds),
+			LastFetchedAt:         fetchedAt,
+			OfficialRawSeconds:    rawSeconds,
+			LiveRawSeconds:        0,
+			LastOfficialFetchedAt: fetchedAt,
+			Source:                "abs_days",
+			FetchStatus:           "ok",
+			FetchError:            "",
+			RefreshReason:         "abs_refresh",
+		})
+	}
+	return records
 }
 
 func dailyListeningStatOnConflict(now time.Time) clause.OnConflict {
