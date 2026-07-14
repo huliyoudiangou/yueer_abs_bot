@@ -29,7 +29,7 @@ Thumbs.db
 *.swp
 *.swo
 
-# Build artifacts
+# Build / binaries (including local test builds)
 abs_bot
 abs-bot
 abs-bot.exe
@@ -41,8 +41,16 @@ bot.exe
 coverage.out
 coverage.html
 
-# Go workspace / vendor (if local only)
-# vendor/
+# Tests
+*_test.go
+**/*_test.go
 
-# Local notes / scratch
+# Agent / maintenance tooling (not application code)
+scripts/
+docs/
+docs/agent/
+AGENTS.md
+abs_bot_README_user_manual.md
+
+# Local notes
 *.local.md
