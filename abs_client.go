@@ -59,8 +59,14 @@ func absUserListeningStatsPath(absUserID string) string {
 	return absUserPath(absUserID) + "/listening-stats"
 }
 
-func absUserListeningSessionsPath(absUserID string) string {
-	return absUserPath(absUserID) + "/listening-sessions?itemsPerPage=100&page=0"
+func absUserListeningSessionsPath(absUserID string, page int, itemsPerPage int) string {
+	if page < 0 {
+		page = 0
+	}
+	if itemsPerPage <= 0 {
+		itemsPerPage = 100
+	}
+	return absUserPath(absUserID) + "/listening-sessions?itemsPerPage=" + strconv.Itoa(itemsPerPage) + "&page=" + strconv.Itoa(page)
 }
 
 func (c *AbsClient) sendRequest(method, path string, body []byte) ([]byte, int, error) {

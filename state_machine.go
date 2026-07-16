@@ -4418,6 +4418,10 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 
+	if HandleBookAnnouncementRecoveryCommand(bot, msg, text) {
+		return
+	}
+
 	if HandleCultivationAdminReadOnlyCommand(bot, msg, text) {
 		return
 	}
@@ -7430,6 +7434,10 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
+		if err := ensureABSCrossDaySessionScanCursor(userID, id); err != nil {
+			log.Printf("ABS cross-day history cursor enrollment failed after registration: user=%d abs=%s err=%s", userID, formatPlainValue(id), formatPlainError(err))
+		}
+
 		if referralCode != "" {
 			replyText(bot, chatID, "🎉 新人体验注册成功。\n\n已获得 `7` 天听书体验权限。体验期内累计听书满 `10` 小时后，发送 `新人任务` 可领取 `7` 天体验延期。")
 			clearSession(userID)
@@ -7506,6 +7514,10 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		}
 
 		replyText(bot, chatID, "🎉 **数据安全迁移成功！换绑完成。**\n\n原有效期、积分和资产已原样恢复。")
+		if err := ensureABSCrossDaySessionScanCursor(userID, absID); err != nil {
+			log.Printf("ABS cross-day history cursor enrollment failed after rebind: user=%d abs=%s err=%s", userID, formatPlainValue(absID), formatPlainError(err))
+		}
+
 		clearSession(userID)
 
 	case "WAITING_BIND_CREATE_SEC":
@@ -7539,6 +7551,10 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		}
 
 		replyText(bot, chatID, "🎉 **挂载且安全档案构建成功！资产已同步合并。**")
+		if err := ensureABSCrossDaySessionScanCursor(userID, absID); err != nil {
+			log.Printf("ABS cross-day history cursor enrollment failed after bind: user=%d abs=%s err=%s", userID, formatPlainValue(absID), formatPlainError(err))
+		}
+
 		clearSession(userID)
 
 	case "WAITING_SAFETY_AUTH":

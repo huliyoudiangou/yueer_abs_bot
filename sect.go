@@ -3371,6 +3371,28 @@ func cappedListeningSeconds(seconds float64) float64 {
 }
 
 func recordDailyListeningStatsFromABSDays(userID int64, absUserID string, days map[string]float64, fetchedAt time.Time) error {
+	adjustedDays, correctedDays := prepareDailyListeningDaysForRecord(userID, absUserID, days)
+	return recordPreparedDailyListeningStats(userID, absUserID, adjustedDays, correctedDays, fetchedAt)
+}
+
+func prepareDailyListeningDaysForRecord(userID int64, absUserID string, days map[string]float64) (map[string]float64, map[string]bool) {
+	if days == nil || absClient == nil || strings.TrimSpace(absUserID) == "" {
+		return days, nil
+	}
+	sessions, err := fetchABSCrossDayListeningSessions(absUserID)
+	if err != nil {
+		log.Printf("每日听书 ABS 跨日会话读取失败，保留官方 days: user=%d abs=%s err=%s", userID, formatPlainValue(absUserID), formatPlainError(err))
+		return days, nil
+	}
+	persistedSessions, err := persistAndLoadABSCrossDaySessions(userID, absUserID, days, sessions, time.Now())
+	if err != nil {
+		log.Printf("ABS cross-day session persistence failed; keeping official days: user=%d abs=%s err=%s", userID, formatPlainValue(absUserID), formatPlainError(err))
+		return days, nil
+	}
+	return rebalanceABSDaysForCrossDaySessions(days, persistedSessions)
+}
+
+func recordPreparedDailyListeningStats(userID int64, absUserID string, days map[string]float64, correctedDays map[string]bool, fetchedAt time.Time) error {
 	if DB == nil || userID == 0 {
 		return nil
 	}
@@ -3379,6 +3401,13 @@ func recordDailyListeningStatsFromABSDays(userID int64, absUserID string, days m
 	}
 
 	records := buildOfficialDailyListeningRecords(userID, absUserID, days, fetchedAt)
+	for index := range records {
+		if correctedDays[records[index].DayKey] {
+			records[index].Source = dailyListeningCrossDaySource
+			records[index].FetchStatus = dailyListeningCrossDayStatus
+			records[index].RefreshReason = "abs_cross_day_rebalance"
+		}
+	}
 	if len(records) == 0 {
 		return nil
 	}
@@ -3571,10 +3600,12 @@ func refreshDailyListeningStatsFromABS(userID int64, absUserID string) (map[stri
 		return nil, false
 	}
 
-	if err := recordDailyListeningStatsFromABSDays(userID, absUserID, stats.Days, time.Now()); err != nil {
+	fetchedAt := time.Now()
+	adjustedDays, correctedDays := prepareDailyListeningDaysForRecord(userID, absUserID, stats.Days)
+	if err := recordPreparedDailyListeningStats(userID, absUserID, adjustedDays, correctedDays, fetchedAt); err != nil {
 		return nil, false
 	}
-	return stats.Days, true
+	return adjustedDays, true
 }
 
 func refreshSectMembersDailyListeningStats(sectID int64, limit int) int {

@@ -146,6 +146,9 @@ func main() {
 
 	LoadConfig()
 	InitDB()
+	if err := recoverBookRequestAnnouncementDeliveriesOnStartup(); err != nil {
+		log.Fatalf("book announcement delivery recovery failed; refusing startup: %s", formatPlainError(err))
+	}
 
 	// 启动兜底：如果上次机器人在赛马结算前崩溃或重启，自动退还未结算下注。
 	recoverActiveRaceBetsOnStartup()
@@ -153,6 +156,7 @@ func main() {
 	recoverActivePaiGowBetsOnStartup()
 
 	absClient = NewAbsClient()
+	StartABSCrossDaySessionBackfill()
 
 	bot, err := tgbotapi.NewBotAPIWithClient(
 		AppConfig.TgToken,
