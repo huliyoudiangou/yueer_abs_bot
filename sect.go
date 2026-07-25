@@ -550,6 +550,8 @@ func HandleSectCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string)
 		run = func() { handleSectContributionRank(bot, msg, true) }
 	case text == "宗门任务":
 		run = func() { handleSectTasks(bot, msg) }
+	case text == "我的宗门任务":
+		run = func() { handleMySectTasks(bot, msg) }
 	case text == "领取宗门任务奖励":
 		run = func() { handleClaimSectTaskReward(bot, msg) }
 	case text == "结算宗门周目标":
@@ -3997,6 +3999,11 @@ func handleSectTasks(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 
+	if !canUpgradeSectAsset(member.Role) {
+		replyText(bot, chatID, "❌ 宗门任务仅宗主与长老可用。\n若需查询个人任务完成情况，请发送：`我的宗门任务`")
+		return
+	}
+
 	var sect Sect
 	if err := DB.Where("id = ?", member.SectID).First(&sect).Error; err != nil {
 		replyText(bot, chatID, "宗门档案读取失败，请稍后再试。")
@@ -4005,17 +4012,11 @@ func handleSectTasks(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 	now := time.Now()
 	dayKey := sectDayKey(now)
-	canRefreshListeningStats := canViewSectListeningStats(member)
 
-	if canRefreshListeningStats {
+	if canViewSectListeningStats(member) {
 		refreshSectMembersDailyListeningStats(member.SectID, 100)
 	}
 
-	tasks, tasksErr := getSectDailyTaskStatuses(userID, member.SectID, now)
-	if tasksErr != nil {
-		log.Printf("查询宗门每日任务状态失败: user=%d sect=%d err=%s", userID, member.SectID, formatPlainError(tasksErr))
-	}
-	completedTaskCount := countCompletedSectDailyTasks(tasks)
 	sectDailyTaskRewardContributionText := "读取失败"
 	sectDailyTaskRewardPrestigeText := "读取失败"
 	sectDailyTaskRewardContribution, sectDailyTaskRewardPrestige, rewardReadErr := getSectDailyTaskRewardsTxChecked(DB, member.SectID)
@@ -4025,7 +4026,21 @@ func handleSectTasks(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		sectDailyTaskRewardContributionText = strconv.Itoa(sectDailyTaskRewardContribution)
 		sectDailyTaskRewardPrestigeText = strconv.Itoa(sectDailyTaskRewardPrestige)
 	}
-	claimedToday, claimErr := sectClaimExistsForDay(dayKey, userID)
+
+	todayClaimCountText := "读取失败"
+	todayClaimCount, claimCountErr := countSectDailyTaskClaimsForDay(member.SectID, dayKey)
+	if claimCountErr != nil {
+		log.Printf("宗门每日任务领取统计读取失败: sect=%d day=%s err=%s", member.SectID, formatPlainValue(dayKey), formatPlainError(claimCountErr))
+	} else {
+		todayClaimCountText = strconv.FormatInt(todayClaimCount, 10)
+	}
+
+	memberCountText := "读取失败"
+	if sect.MemberCount < 0 {
+		log.Printf("宗门成员数异常: sect=%d member_count=%d", member.SectID, sect.MemberCount)
+	} else {
+		memberCountText = strconv.Itoa(sect.MemberCount)
+	}
 
 	weeklyStats, statsErr := querySectWeeklyTaskStats(member.SectID, now)
 	if statsErr != nil {
@@ -4040,15 +4055,87 @@ func handleSectTasks(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	if statsErr == nil {
 		weeklySettled, settlementErr = sectWeeklySettlementExists(member.SectID, weeklyStats.WeekKey)
 	}
-	if claimErr != nil {
-		log.Printf("宗门每日任务领取状态读取失败: user=%d day=%s err=%s", userID, formatPlainValue(dayKey), formatPlainError(claimErr))
-	}
 	if settlementErr != nil {
 		log.Printf("宗门周目标结算状态读取失败: sect=%d week=%s err=%s", member.SectID, formatPlainValue(weeklyStats.WeekKey), formatPlainError(settlementErr))
 	}
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("**%s 宗门任务**\n\n", escapeMarkdown(sect.Name)))
+	b.WriteString(fmt.Sprintf("**%s 宗门任务（整体）**\n\n", escapeMarkdown(sect.Name)))
+	b.WriteString("本页仅展示宗门整体完成情况，不展示个人任务明细。\n")
+	b.WriteString("道友个人任务请发送：`我的宗门任务`\n\n")
+
+	b.WriteString(fmt.Sprintf(
+		"今日个人任务领取：`%s/%s`\n每日奖励：个人贡献 +%s，本周贡献 +%s，宗门声望 +%s。\n\n",
+		todayClaimCountText,
+		memberCountText,
+		sectDailyTaskRewardContributionText,
+		sectDailyTaskRewardContributionText,
+		sectDailyTaskRewardPrestigeText,
+	))
+
+	b.WriteString("周目标：\n")
+	if statsErr != nil {
+		b.WriteString("宗门周目标统计状态暂不可用，请稍后重试。\n")
+	} else {
+		b.WriteString(fmt.Sprintf("1. 签到：`%d/%d`%s\n", weeklyStats.SignCount, sectWeeklySignTarget, formatSectWeeklyTaskExcessText(float64(weeklyStats.SignCount), float64(sectWeeklySignTarget))))
+		b.WriteString(fmt.Sprintf("2. 听书：`%.1f/%d` 小时%s\n", weeklyStats.ListenHours, sectWeeklyListenHourTarget, formatSectWeeklyTaskExcessText(weeklyStats.ListenHours, float64(sectWeeklyListenHourTarget))))
+		b.WriteString(fmt.Sprintf("3. 个人任务：`%d/%d`%s\n\n", weeklyStats.TaskClaimCount, sectWeeklyTaskTarget, formatSectWeeklyTaskExcessText(float64(weeklyStats.TaskClaimCount), float64(sectWeeklyTaskTarget))))
+		if weeklySettled {
+			b.WriteString(fmt.Sprintf("周目标已结算：`%d/3`。\n", weeklyReward.AchievedCount))
+		} else if settlementErr != nil {
+			b.WriteString(fmt.Sprintf("本周结算状态暂不可用，当前达成：`%d/3`。\n", weeklyReward.AchievedCount))
+		} else if weeklyReward.AchievedCount > 0 {
+			b.WriteString(fmt.Sprintf("当前可结算：达成 `%d/3`，资金 +%d，声望 +%d，超额 %d%%。\n", weeklyReward.AchievedCount, weeklyReward.Funds, weeklyReward.Prestige, weeklyReward.ExcessPercentTotal))
+			b.WriteString("可发送 `结算宗门周目标` 手动补结算。\n")
+		} else {
+			b.WriteString(fmt.Sprintf("当前达成：`%d/3`，暂不可结算。\n", weeklyReward.AchievedCount))
+		}
+	}
+	b.WriteString("\n统计口径按北京时间计算。")
+
+	replyText(bot, chatID, b.String())
+}
+
+func handleMySectTasks(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	userID := msg.From.ID
+	chatID := msg.Chat.ID
+
+	var member SectMember
+	if err := loadSectMemberByUserInTx(DB, userID, &member, false); err != nil {
+		replySectMemberReadError(bot, chatID, userID, err, "你尚未加入宗门，无法查看个人宗门任务。", "我的宗门任务")
+		return
+	}
+
+	var sect Sect
+	if err := DB.Where("id = ?", member.SectID).First(&sect).Error; err != nil {
+		replyText(bot, chatID, "宗门档案读取失败，请稍后再试。")
+		return
+	}
+
+	now := time.Now()
+	dayKey := sectDayKey(now)
+
+	tasks, tasksErr := getSectDailyTaskStatuses(userID, member.SectID, now)
+	if tasksErr != nil {
+		log.Printf("查询宗门每日任务状态失败: user=%d sect=%d err=%s", userID, member.SectID, formatPlainError(tasksErr))
+	}
+	completedTaskCount := countCompletedSectDailyTasks(tasks)
+	sectDailyTaskRewardContributionText := "读取失败"
+	sectDailyTaskRewardPrestigeText := "读取失败"
+	sectDailyTaskRewardContribution, sectDailyTaskRewardPrestige, rewardReadErr := getSectDailyTaskRewardsTxChecked(DB, member.SectID)
+	if rewardReadErr != nil {
+		log.Printf("个人宗门任务页每日奖励读取失败: user=%d sect=%d err=%s", userID, member.SectID, formatPlainError(rewardReadErr))
+	} else {
+		sectDailyTaskRewardContributionText = strconv.Itoa(sectDailyTaskRewardContribution)
+		sectDailyTaskRewardPrestigeText = strconv.Itoa(sectDailyTaskRewardPrestige)
+	}
+	claimedToday, claimErr := sectClaimExistsForDay(dayKey, userID)
+	if claimErr != nil {
+		log.Printf("宗门每日任务领取状态读取失败: user=%d day=%s err=%s", userID, formatPlainValue(dayKey), formatPlainError(claimErr))
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("**%s 我的宗门任务**\n\n", escapeMarkdown(sect.Name)))
 
 	rewardStatus := "状态暂不可用"
 	if tasksErr == nil {
@@ -4076,32 +4163,24 @@ func handleSectTasks(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		sectDailyTaskRewardPrestigeText,
 		rewardStatus,
 	))
-
-	b.WriteString("周目标：\n")
-	if statsErr != nil {
-		b.WriteString("宗门周目标统计状态暂不可用，请稍后重试。\n")
-	} else {
-		b.WriteString(fmt.Sprintf("1. 签到：`%d/%d`%s\n", weeklyStats.SignCount, sectWeeklySignTarget, formatSectWeeklyTaskExcessText(float64(weeklyStats.SignCount), float64(sectWeeklySignTarget))))
-		b.WriteString(fmt.Sprintf("2. 听书：`%.1f/%d` 小时%s\n", weeklyStats.ListenHours, sectWeeklyListenHourTarget, formatSectWeeklyTaskExcessText(weeklyStats.ListenHours, float64(sectWeeklyListenHourTarget))))
-		b.WriteString(fmt.Sprintf("3. 个人任务：`%d/%d`%s\n\n", weeklyStats.TaskClaimCount, sectWeeklyTaskTarget, formatSectWeeklyTaskExcessText(float64(weeklyStats.TaskClaimCount), float64(sectWeeklyTaskTarget))))
-		if weeklySettled {
-			b.WriteString(fmt.Sprintf("周目标已结算：`%d/3`。\n", weeklyReward.AchievedCount))
-		} else if settlementErr != nil {
-			b.WriteString(fmt.Sprintf("本周结算状态暂不可用，当前达成：`%d/3`。\n", weeklyReward.AchievedCount))
-		} else if weeklyReward.AchievedCount > 0 {
-			b.WriteString(fmt.Sprintf("当前可结算：达成 `%d/3`，资金 +%d，声望 +%d，超额 %d%%。\n", weeklyReward.AchievedCount, weeklyReward.Funds, weeklyReward.Prestige, weeklyReward.ExcessPercentTotal))
-			if canUpgradeSectAsset(member.Role) {
-				b.WriteString("可发送 `结算宗门周目标` 手动补结算。\n")
-			}
-		} else {
-			b.WriteString(fmt.Sprintf("当前达成：`%d/3`，暂不可结算。\n", weeklyReward.AchievedCount))
-		}
-	}
-	b.WriteString("\n统计口径按北京时间计算。")
+	b.WriteString("完成全部个人任务后，可发送 `领取宗门任务奖励`。\n")
+	b.WriteString("统计口径按北京时间计算。")
 
 	replyText(bot, chatID, b.String())
 }
 
+func countSectDailyTaskClaimsForDay(sectID int64, dayKey string) (int64, error) {
+	if DB == nil || sectID == 0 || strings.TrimSpace(dayKey) == "" {
+		return 0, nil
+	}
+	var count int64
+	if err := DB.Model(&SectDailyTaskClaim{}).
+		Where("sect_id = ? AND day_key = ?", sectID, dayKey).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
+}
 func formatSectWeeklyTaskExcessText(actual float64, target float64) string {
 	excess := sectWeeklyTaskExcessPercent(actual, target)
 	if excess <= 0 {

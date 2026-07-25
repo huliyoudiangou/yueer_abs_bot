@@ -455,23 +455,37 @@ func sectSecretRealmDropRuleForMajor(major int) (sectSecretRealmDropRule, bool) 
 	return sectSecretRealmDropRuleForProfile(major, profile)
 }
 
-func sectSecretRealmDropRuleForProfile(major int, profile SectSecretRealmProfileConfig) (sectSecretRealmDropRule, bool) {
-	var selected sectSecretRealmDropRule
-	ok := false
+func sectSecretRealmEligibleDropRules(major int, profile SectSecretRealmProfileConfig) []SectSecretRealmDropCfg {
+	eligible := make([]SectSecretRealmDropCfg, 0, len(profile.DropRules))
 	for _, rule := range profile.DropRules {
-		if major >= rule.MinMajorRealm {
-			selected = sectSecretRealmDropRule{
-				ItemName:      rule.ItemName,
-				Quantity:      rule.Quantity,
-				ChancePercent: rule.ChancePercent,
-			}
-			ok = true
+		itemName := strings.TrimSpace(rule.ItemName)
+		if major < rule.MinMajorRealm || itemName == "" || rule.Quantity <= 0 || rule.ChancePercent <= 0 {
+			continue
 		}
+		rule.ItemName = itemName
+		eligible = append(eligible, rule)
 	}
-	if !ok || selected.ItemName == "" || selected.Quantity <= 0 || selected.ChancePercent <= 0 {
+	return eligible
+}
+
+// sectSecretRealmDropRuleForProfile 返回“门槛最高的可用掉落规则”，
+// 仅用于兼容旧只读展示；实际掉落发放走加权多档池。
+func sectSecretRealmDropRuleForProfile(major int, profile SectSecretRealmProfileConfig) (sectSecretRealmDropRule, bool) {
+	eligible := sectSecretRealmEligibleDropRules(major, profile)
+	if len(eligible) == 0 {
 		return sectSecretRealmDropRule{}, false
 	}
-	return selected, true
+	selected := eligible[len(eligible)-1]
+	for _, rule := range eligible {
+		if rule.MinMajorRealm >= selected.MinMajorRealm {
+			selected = rule
+		}
+	}
+	return sectSecretRealmDropRule{
+		ItemName:      selected.ItemName,
+		Quantity:      selected.Quantity,
+		ChancePercent: selected.ChancePercent,
+	}, true
 }
 
 func sectSecretRealmStableDropScore(realmID string, userID int64, major int) int {
@@ -480,27 +494,70 @@ func sectSecretRealmStableDropScore(realmID string, userID int64, major int) int
 	return int(h.Sum32() % 100)
 }
 
-func sectSecretRealmDropForScore(major int, deltaHours float64, score int) (string, int) {
-	profile, _ := defaultSectSecretRealmConfig().profile(sectSecretRealmProfileNormal)
-	return sectSecretRealmDropForScoreWithProfile(major, deltaHours, score, profile)
+func sectSecretRealmStableDropItemScore(realmID string, userID int64, major int) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(fmt.Sprintf("item:%s:%d:%d", strings.TrimSpace(realmID), userID, major)))
+	return int(h.Sum32() % 1000003)
 }
 
-func sectSecretRealmDropForScoreWithProfile(major int, deltaHours float64, score int, profile SectSecretRealmProfileConfig) (string, int) {
+// 高阶修士可掉全部已解锁档位；同档位中更高门槛物品权重略高，但低阶种子仍保留机会。
+// 低阶修士只解锁低阶档位，因此不会掉出更高门槛物品。
+func sectSecretRealmDropWeight(rule SectSecretRealmDropCfg) int {
+	// 基础权重使用配置概率，再按门槛做轻微上浮。
+	weight := rule.ChancePercent * (10 + rule.MinMajorRealm*3)
+	if weight <= 0 {
+		return 0
+	}
+	return weight
+}
+
+func sectSecretRealmDropForScore(major int, deltaHours float64, score int) (string, int) {
+	profile, _ := defaultSectSecretRealmConfig().profile(sectSecretRealmProfileNormal)
+	return sectSecretRealmDropForScoreWithProfile(major, deltaHours, score, 0, profile)
+}
+
+func sectSecretRealmDropForScoreWithProfile(major int, deltaHours float64, score int, itemScore int, profile SectSecretRealmProfileConfig) (string, int) {
 	if deltaHours+0.000001 < profile.MinDeltaHours {
 		return "", 0
 	}
-	rule, ok := sectSecretRealmDropRuleForProfile(major, profile)
-	if !ok || rule.ItemName == "" || rule.Quantity <= 0 || rule.ChancePercent <= 0 {
+	eligible := sectSecretRealmEligibleDropRules(major, profile)
+	if len(eligible) == 0 {
 		return "", 0
 	}
+
+	hitChance := 0
+	totalWeight := 0
+	for _, rule := range eligible {
+		if rule.ChancePercent > hitChance {
+			hitChance = rule.ChancePercent
+		}
+		totalWeight += sectSecretRealmDropWeight(rule)
+	}
+	if hitChance <= 0 || totalWeight <= 0 {
+		return "", 0
+	}
+
 	if score < 0 {
 		score = 0
 	}
 	score = score % 100
-	if score >= rule.ChancePercent {
+	if score >= hitChance {
 		return "", 0
 	}
-	return rule.ItemName, rule.Quantity
+
+	if itemScore < 0 {
+		itemScore = 0
+	}
+	cursor := itemScore % totalWeight
+	for _, rule := range eligible {
+		weight := sectSecretRealmDropWeight(rule)
+		if cursor < weight {
+			return rule.ItemName, rule.Quantity
+		}
+		cursor -= weight
+	}
+	last := eligible[len(eligible)-1]
+	return last.ItemName, last.Quantity
 }
 
 func sectSecretRealmDropForParticipant(realmID string, userID int64, major int, deltaHours float64) (string, int) {
@@ -510,9 +567,9 @@ func sectSecretRealmDropForParticipant(realmID string, userID int64, major int, 
 
 func sectSecretRealmDropForParticipantWithProfile(realmID string, userID int64, major int, deltaHours float64, profile SectSecretRealmProfileConfig) (string, int) {
 	score := sectSecretRealmStableDropScore(realmID, userID, major)
-	return sectSecretRealmDropForScoreWithProfile(major, deltaHours, score, profile)
+	itemScore := sectSecretRealmStableDropItemScore(realmID, userID, major)
+	return sectSecretRealmDropForScoreWithProfile(major, deltaHours, score, itemScore, profile)
 }
-
 func sectSecretRealmRealmMarkdown(major int, minor int) string {
 	return escapeMarkdown(GetRealmName(&Cultivation{MajorRealm: major, MinorRealm: minor}))
 }
