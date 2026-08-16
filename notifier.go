@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -864,25 +865,49 @@ func sendEncryptedBackupToTelegram(bot *tgbotapi.BotAPI, source string) (int, er
 		sourceText = "启动补跑"
 	}
 
-	now := dailyOperationsLocalTime(time.Now())
-	doc := tgbotapi.NewDocument(AppConfig.BackupGroupID, tgbotapi.FilePath(backupPath))
-	doc.Caption = fmt.Sprintf(
-		"📦 **%s加密数据库备份**\n⏰ 时间: `%s`\n🔐 文件已使用 AES-GCM 加密。\n⚠️ 请妥善保管 BACKUP_ENCRYPT_KEY，丢失后无法解密。",
-		sourceText,
-		now.Format("2006-01-02 15:04:05"),
-	)
-	doc.ParseMode = "Markdown"
-
-	sentMsg, err := sendNoAutoDelete(bot, doc)
+	info, err := os.Stat(backupPath)
 	if err != nil {
-		return 0, fmt.Errorf("发送 Telegram 备份文件失败: %w", err)
+		return 0, fmt.Errorf("读取加密备份文件信息失败: %w", err)
 	}
 
-	pinLatestBackupMessage(bot, sentMsg.MessageID)
+	partPaths, cleanupParts, err := splitBackupFileParts(backupPath, telegramBotUploadMaxBytes)
+	if err != nil {
+		return 0, fmt.Errorf("准备备份分片失败: %w", err)
+	}
+	defer cleanupParts()
 
-	return sentMsg.MessageID, nil
+	now := dailyOperationsLocalTime(time.Now())
+	sizeMB := float64(info.Size()) / (1024 * 1024)
+	var lastMessageID int
+	totalParts := len(partPaths)
+	for i, partPath := range partPaths {
+		caption := fmt.Sprintf(
+			"📦 **%s加密数据库备份**\n⏰ 时间: `%s`\n📏 体积: `%.2f` MB\n🔐 文件已使用 AES-GCM 加密（v3 压缩格式）。\n⚠️ 请妥善保管 BACKUP_ENCRYPT_KEY，丢失后无法解密。",
+			sourceText,
+			now.Format("2006-01-02 15:04:05"),
+			sizeMB,
+		)
+		if totalParts > 1 {
+			caption += fmt.Sprintf("\n📎 分片：`%d/%d`（请按顺序保存后合并再解密）", i+1, totalParts)
+		}
+
+		doc := tgbotapi.NewDocument(AppConfig.BackupGroupID, tgbotapi.FilePath(partPath))
+		doc.Caption = caption
+		doc.ParseMode = "Markdown"
+
+		sentMsg, sendErr := sendNoAutoDelete(bot, doc)
+		if sendErr != nil {
+			return 0, fmt.Errorf("发送 Telegram 备份文件失败: part=%d/%d err=%w", i+1, totalParts, sendErr)
+		}
+		lastMessageID = sentMsg.MessageID
+	}
+
+	if lastMessageID > 0 {
+		pinLatestBackupMessage(bot, lastMessageID)
+	}
+
+	return lastMessageID, nil
 }
-
 func pinLatestBackupMessage(bot *tgbotapi.BotAPI, messageID int) {
 	if bot == nil || AppConfig == nil || AppConfig.BackupGroupID == 0 || messageID == 0 {
 		return

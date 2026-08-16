@@ -839,6 +839,11 @@ func InitDB() {
 	runOneTimeMigration("20260105_cultivation_configs", func() error {
 		return seedDefaultCultivationConfigs()
 	})
+	// 化神（元婴→化神）突破保底口径：连续失败 5 次后下次必定成功。
+	// 一次性迁移把已存在的生产配置行更新为 5，避免只改默认值对老库无效。
+	runOneTimeMigration("20260816_huashen_breakthrough_guarantee_five", func() error {
+		return migrateHuashenBreakthroughGuaranteeFive(DB)
+	})
 	// 第二阶段：数据一致性迁移。
 	// 先清理历史重复数据，再创建唯一索引。
 	runConsistencyMigrations()
@@ -1806,6 +1811,21 @@ func runOneTimeMigration(version string, fn func() error) {
 
 	markMigrationAppliedIfMissing(version)
 	log.Printf("schema migration completed: version=%s", formatPlainValue(version))
+}
+
+// migrateHuashenBreakthroughGuaranteeFive 把元婴→化神突破保底更新为连续失败 5 次。
+// 独立成函数便于用临时数据库做单元验证，生产入口走一次性迁移 20260816_huashen_breakthrough_guarantee_five。
+func migrateHuashenBreakthroughGuaranteeFive(db *gorm.DB) error {
+	if db == nil {
+		return fmt.Errorf("MIGRATION_NIL_DB")
+	}
+	res := db.Model(&BreakthroughConfig{}).
+		Where("from_major_realm = 4 AND to_major_realm = 5").
+		Updates(map[string]interface{}{"guarantee_fail_count": 5})
+	if res.Error != nil {
+		return res.Error
+	}
+	return nil
 }
 
 func assertNoDuplicateGroups(title string, sql string) {

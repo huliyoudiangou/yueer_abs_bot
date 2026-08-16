@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -16,7 +18,14 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-const backupMagicHeader = "ABSBACKUPv2"
+const (
+	// ABSBACKUPv2: AES-GCM(raw SQLite bytes)
+	backupMagicHeaderV2 = "ABSBACKUPv2"
+	// ABSBACKUPv3: AES-GCM(gzip(SQLite bytes))，压缩后再加密，便于控制 Telegram 50MB 上限。
+	backupMagicHeaderV3 = "ABSBACKUPv3"
+	// Telegram Bot 上传文件上限约 50MB，留余量避免边界失败。
+	telegramBotUploadMaxBytes = 48 * 1024 * 1024
+)
 
 func cleanupStalePlainBackups() {
 	backupDir := "data/backups"
@@ -97,7 +106,14 @@ func createEncryptedDBBackup() (string, func(), error) {
 	}
 	defer zeroBytes(plainData)
 
-	encryptedData, err := encryptBackupData(plainData, backupKey)
+	// 先 gzip 再加密，显著降低超大库触达 Telegram 50MB 上限的概率。
+	compressedData, err := gzipCompressBytes(plainData)
+	if err != nil {
+		return "", nil, fmt.Errorf("压缩备份失败: %w", err)
+	}
+	defer zeroBytes(compressedData)
+
+	encryptedData, err := encryptBackupDataWithHeader(compressedData, backupKey, backupMagicHeaderV3)
 	if err != nil {
 		return "", nil, err
 	}
@@ -108,7 +124,7 @@ func createEncryptedDBBackup() (string, func(), error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("加密备份自校验失败: %w", err)
 	}
-	if len(verifyPlainData) != len(plainData) || string(verifyPlainData[:16]) != string(plainData[:16]) {
+	if len(verifyPlainData) != len(plainData) || string(verifyPlainData[:minInt(16, len(verifyPlainData))]) != string(plainData[:minInt(16, len(plainData))]) {
 		zeroBytes(verifyPlainData)
 		return "", nil, fmt.Errorf("加密备份自校验失败: 解密内容与原始备份不一致")
 	}
@@ -124,7 +140,42 @@ func createEncryptedDBBackup() (string, func(), error) {
 	return encPath, cleanupAll, nil
 }
 
+func gzipCompressBytes(plainData []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	writer, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := writer.Write(plainData); err != nil {
+		_ = writer.Close()
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func gzipDecompressBytes(compressed []byte) ([]byte, error) {
+	reader, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
+}
+
 func encryptBackupData(plainData []byte, backupKey string) ([]byte, error) {
+	// 历史兼容入口：默认按 v2 明文库加密。新备份请走 encryptBackupDataWithHeader + v3。
+	return encryptBackupDataWithHeader(plainData, backupKey, backupMagicHeaderV2)
+}
+
+func encryptBackupDataWithHeader(payload []byte, backupKey string, magicHeader string) ([]byte, error) {
+	magicHeader = strings.TrimSpace(magicHeader)
+	if magicHeader == "" {
+		magicHeader = backupMagicHeaderV3
+	}
+
 	salt := make([]byte, 16)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 		return nil, fmt.Errorf("生成随机 salt 失败: %w", err)
@@ -148,10 +199,10 @@ func encryptBackupData(plainData []byte, backupKey string) ([]byte, error) {
 		return nil, fmt.Errorf("生成随机 nonce 失败: %w", err)
 	}
 
-	cipherText := gcm.Seal(nil, nonce, plainData, nil)
+	cipherText := gcm.Seal(nil, nonce, payload, nil)
 
-	output := make([]byte, 0, len(backupMagicHeader)+len(salt)+len(nonce)+len(cipherText))
-	output = append(output, []byte(backupMagicHeader)...)
+	output := make([]byte, 0, len(magicHeader)+len(salt)+len(nonce)+len(cipherText))
+	output = append(output, []byte(magicHeader)...)
 	output = append(output, salt...)
 	output = append(output, nonce...)
 	output = append(output, cipherText...)
@@ -160,15 +211,16 @@ func encryptBackupData(plainData []byte, backupKey string) ([]byte, error) {
 }
 
 func decryptBackupData(encryptedData []byte, backupKey string) ([]byte, error) {
-	if len(encryptedData) < len(backupMagicHeader)+16 {
+	header, payloadOffset, err := parseBackupMagicHeader(encryptedData)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(encryptedData) < payloadOffset+16 {
 		return nil, fmt.Errorf("备份文件过短或格式错误")
 	}
 
-	if string(encryptedData[:len(backupMagicHeader)]) != backupMagicHeader {
-		return nil, fmt.Errorf("备份文件头不匹配")
-	}
-
-	offset := len(backupMagicHeader)
+	offset := payloadOffset
 
 	salt := encryptedData[offset : offset+16]
 	offset += 16
@@ -196,12 +248,100 @@ func decryptBackupData(encryptedData []byte, backupKey string) ([]byte, error) {
 
 	cipherText := encryptedData[offset:]
 
-	plainData, err := gcm.Open(nil, nonce, cipherText, nil)
+	plainOrCompressed, err := gcm.Open(nil, nonce, cipherText, nil)
 	if err != nil {
 		return nil, fmt.Errorf("备份解密失败: %w", err)
 	}
 
-	return plainData, nil
+	switch header {
+	case backupMagicHeaderV2:
+		return plainOrCompressed, nil
+	case backupMagicHeaderV3:
+		plainData, err := gzipDecompressBytes(plainOrCompressed)
+		if err != nil {
+			zeroBytes(plainOrCompressed)
+			return nil, fmt.Errorf("备份解压失败: %w", err)
+		}
+		zeroBytes(plainOrCompressed)
+		return plainData, nil
+	default:
+		zeroBytes(plainOrCompressed)
+		return nil, fmt.Errorf("不支持的备份文件头")
+	}
+}
+
+func parseBackupMagicHeader(encryptedData []byte) (string, int, error) {
+	candidates := []string{backupMagicHeaderV3, backupMagicHeaderV2}
+	for _, header := range candidates {
+		if len(encryptedData) < len(header) {
+			continue
+		}
+		if string(encryptedData[:len(header)]) == header {
+			return header, len(header), nil
+		}
+	}
+	if len(encryptedData) < len(backupMagicHeaderV2) {
+		return "", 0, fmt.Errorf("备份文件过短或格式错误")
+	}
+	return "", 0, fmt.Errorf("备份文件头不匹配")
+}
+
+func splitBackupFileParts(filePath string, maxPartBytes int) ([]string, func(), error) {
+	if maxPartBytes <= 0 {
+		maxPartBytes = telegramBotUploadMaxBytes
+	}
+
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("读取备份文件信息失败: %w", err)
+	}
+	if info.Size() <= int64(maxPartBytes) {
+		return []string{filePath}, func() {}, nil
+	}
+
+	src, err := os.Open(filePath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("打开备份文件失败: %w", err)
+	}
+	defer src.Close()
+
+	totalParts := int((info.Size() + int64(maxPartBytes) - 1) / int64(maxPartBytes))
+	partPaths := make([]string, 0, totalParts)
+	cleanup := func() {
+		for _, p := range partPaths {
+			_ = os.Remove(p)
+		}
+	}
+
+	buf := make([]byte, maxPartBytes)
+	for part := 1; part <= totalParts; part++ {
+		n, readErr := io.ReadFull(src, buf)
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil && readErr != io.ErrUnexpectedEOF {
+			cleanup()
+			return nil, nil, fmt.Errorf("读取备份分片失败: %w", readErr)
+		}
+		if n <= 0 {
+			break
+		}
+		partPath := fmt.Sprintf("%s.part%02dof%02d", filePath, part, totalParts)
+		if err := os.WriteFile(partPath, buf[:n], 0600); err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("写入备份分片失败: %w", err)
+		}
+		partPaths = append(partPaths, partPath)
+		if readErr == io.ErrUnexpectedEOF {
+			break
+		}
+	}
+
+	if len(partPaths) == 0 {
+		cleanup()
+		return nil, nil, fmt.Errorf("备份分片结果为空")
+	}
+	return partPaths, cleanup, nil
 }
 
 func generateBackupRandomSuffix(byteLen int) (string, error) {
@@ -222,3 +362,6 @@ func zeroBytes(data []byte) {
 		data[i] = 0
 	}
 }
+
+// 兼容旧测试与外部引用。
+const backupMagicHeader = backupMagicHeaderV2

@@ -659,7 +659,7 @@ func defaultBreakthroughConfigs() []BreakthroughConfig {
 			MinTotalHours:       750,
 			SuccessRate:         0.20,
 			CooldownHours:       168,
-			GuaranteeFailCount:  3,
+			GuaranteeFailCount:  5,
 			RefundRate:          0.2,
 			FailPenaltyPoints:   50,
 			SplashMinMajorRealm: 2,

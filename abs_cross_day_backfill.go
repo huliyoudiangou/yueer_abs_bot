@@ -14,7 +14,7 @@ import (
 
 const (
 	absCrossDayBackfillPagesPerBatch = 5
-	absCrossDayBackfillTickInterval  = 5 * time.Second
+	absCrossDayBackfillTickInterval  = 30 * time.Second
 	absCrossDayBackfillPageDelay     = 100 * time.Millisecond
 	absCrossDayBackfillRetryDelay    = 5 * time.Minute
 	absCrossDayBackfillSeedInterval  = 10 * time.Minute

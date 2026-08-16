@@ -80,7 +80,7 @@ func isPaiGowOpenTime(now time.Time) bool {
 	loc := time.FixedZone("CST", 8*3600)
 	local := now.In(loc)
 	minutes := local.Hour()*60 + local.Minute()
-	return minutes >= 18*60 && minutes < 19*60+55
+	return minutes >= 20*60 && minutes < 22*60
 }
 
 func createPaiGowBetInTx(tx *gorm.DB, bet *PaiGowBet) error {
@@ -244,7 +244,7 @@ func handlePaiGowGame(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 func handlePaiGowStart(bot *tgbotapi.BotAPI, chatID int64, state *PaiGowState) {
 	if !isPaiGowOpenTime(time.Now()) {
-		sendGroupAutoDeleteMessage(bot, chatID, "⏳ **推牌九尚未开放！**\n\n开放时间为每日 **18:00 - 19:55**，赛马黄金档前预留 5 分钟缓冲。")
+		sendGroupAutoDeleteMessage(bot, chatID, "⏳ **推牌九尚未开放！**\n\n开放时间为每晚 **20:00 - 22:00**，请在黄金档再来哦！")
 		return
 	}
 
@@ -273,7 +273,7 @@ func handlePaiGowStart(bot *tgbotapi.BotAPI, chatID int64, state *PaiGowState) {
 		"庄家：天机阁坐庄\n" +
 		"下注期：60 秒，买定离手\n" +
 		"下注范围：`1` - `5` 积分\n" +
-		"开放时段：18:00 - 19:55\n" +
+		"开放时段：20:00 - 22:00\n" +
 		"下注格式：`押 3`\n\n" +
 		"牌规：52 张扑克牌，无大小王；A=1，2-9 按牌面，10/J/Q/K=0。\n" +
 		"计点：每人两张牌相加取个位，9 点最大，不存在 9 点半。\n" +
@@ -288,7 +288,7 @@ func handlePaiGowStatus(bot *tgbotapi.BotAPI, chatID int64, state *PaiGowState) 
 	state.Mu.Lock()
 	defer state.Mu.Unlock()
 	if !state.IsActive {
-		sendGroupAutoDeleteMessage(bot, chatID, "🃏 当前没有进行中的推牌九。开放时间：每日 **18:00 - 19:55**。")
+		sendGroupAutoDeleteMessage(bot, chatID, "🃏 当前没有进行中的推牌九。开放时间：每晚 **20:00 - 22:00**。")
 		return
 	}
 	status := "下注中"
@@ -355,7 +355,7 @@ func handlePaiGowBet(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, chatID int64, 
 	state.Mu.Lock()
 	if !state.IsActive {
 		state.Mu.Unlock()
-		sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("✋ @%s 当前没有开放中的推牌九，请在 18:00-19:55 发送 `发起牌九` 开启新一局！", safeName))
+		sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("✋ @%s 当前没有开放中的推牌九，请在 20:00-22:00 发送 `发起牌九` 开启新一局！", safeName))
 		return
 	}
 	if state.IsDealing {
@@ -651,11 +651,13 @@ func runPaiGowRoutine(bot *tgbotapi.BotAPI, chatID int64) {
 			return fmt.Errorf("PAI_GOW_SETTLEMENT_MISSED")
 		}
 		if botWinTotal > 0 {
-			var err error
-			poolInjected = botWinTotal
-			poolAfter, poolBurst, err = addPointsToFusionPoolInTx(tx, botWinTotal)
-			if err != nil {
-				return err
+			poolInjected = botWinTotal * 20 / 100
+			if poolInjected > 0 {
+				var err error
+				poolAfter, poolBurst, err = addPointsToFusionPoolInTx(tx, poolInjected)
+				if err != nil {
+					return err
+				}
 			}
 		}
 		return nil
@@ -667,7 +669,7 @@ func runPaiGowRoutine(bot *tgbotapi.BotAPI, chatID int64) {
 	settled = true
 
 	if poolBurst {
-		notifyFusionPoolBurst(bot, chatID, "推牌九庄家通吃筹码注入天道")
+		notifyFusionPoolBurst(bot, chatID, "推牌九庄家筹码按20%注入天道")
 	}
 	sendPaiGowFinalAnnouncement(bot, chatID, dealerHand, dealerPoint, players, poolInjected, poolAfter, poolBurst)
 }
@@ -740,7 +742,7 @@ func sendPaiGowFinalAnnouncement(bot *tgbotapi.BotAPI, chatID int64, dealerHand 
 		}
 	}
 	if poolInjected > 0 {
-		b.WriteString(fmt.Sprintf("🌊 庄家赢下 `%d` 积分，已注入天道奖池，当前水位 `%d/300`。\n", poolInjected, poolAfter))
+		b.WriteString(fmt.Sprintf("🌊 庄家赢下筹码按 20%% 注入天道奖池：`+%d` 积分，当前水位 `%d/300`。\n", poolInjected, poolAfter))
 		if poolBurst {
 			b.WriteString("🎁 天道奖池已满，系统自动生成灵气红包。\n")
 		}

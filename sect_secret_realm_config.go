@@ -127,6 +127,7 @@ func defaultSectSecretRealmConfig() SectSecretRealmConfig {
 				{MinMajorRealm: 4, BonusPercent: 12},
 			},
 			DropRules: []SectSecretRealmDropCfg{
+				{MinMajorRealm: 1, ItemName: "凝露草种子", Quantity: 1, ChancePercent: 30},
 				{MinMajorRealm: 2, ItemName: "龙血果种子", Quantity: 1, ChancePercent: 35},
 				{MinMajorRealm: 3, ItemName: "天心莲种子", Quantity: 1, ChancePercent: 35},
 				{MinMajorRealm: 4, ItemName: sectSecretRealmTokenItemName, Quantity: 1, ChancePercent: 45},

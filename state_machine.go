@@ -746,13 +746,17 @@ func executeBlindBoxOpen(tgUser *tgbotapi.User) (string, string, error) {
 
 		switch {
 		case roll <= 739:
-			txReplyMsg = resultPrefix + "💨 噗~ 里面空空如也。\n**【谢谢惠顾】**\n\n别灰心，垫子已经铺好，下发必出金！"
+			code := fmt.Sprintf("R%d-%s", 1, generateRandomCode(16))
+			if err := createRenewCodeRecord(tx, code, 1); err != nil {
+				return err
+			}
+			txReplyMsg = resultPrefix + fmt.Sprintf("🎉 恭喜获得保底奖励：**【1天续期卡】**！\n💳 专属卡密：`%s`\n(卡密已升级为16位安全密钥，请在此发送充值)", code)
 		case roll <= 939:
 			code := fmt.Sprintf("R%d-%s", 3, generateRandomCode(16))
 			if err := createRenewCodeRecord(tx, code, 3); err != nil {
 				return err
 			}
-			txReplyMsg = resultPrefix + fmt.Sprintf("🎉 恭喜获得保底小奖：**【3天续期卡】**！\n💳 专属卡密：`%s`\n(卡密已升级为16位安全密钥，请在此发送充值)", code)
+			txReplyMsg = resultPrefix + fmt.Sprintf("🎉 恭喜获得小奖：**【3天续期卡】**！\n💳 专属卡密：`%s`\n(卡密已升级为16位安全密钥，请在此发送充值)", code)
 		case roll <= 959:
 			code := generateRandomCode(16)
 			if err := createInviteCodeRecord(tx, code); err != nil {
@@ -4663,7 +4667,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		"交易行", "交易行帮助", "上架商品", "购买商品", "下架商品", "强制下架商品", "我的交易行", "我的购买", "我的订单", "交易行订单", "查交易订单", "举报订单",
 		"创建宗门", "加入宗门", "退出宗门", "我的宗门", "宗门排行", "宗门成员", "捐献宗门",
 		"升级宗门", "宗门改名", "确认宗门改名", "修改宗门名称", "确认修改宗门名称", "任命长老", "任命成员", "踢出宗门", "转让宗主", "宗门贡献榜", "宗门周榜",
-		"宗门任务", "领取宗门任务奖励", "结算宗门周目标", "宗门商店", "贡献换声望", "宗门七日续期", "确认宗门七日续期", "洞府", "解锁洞府", "闭关", "宗门闭关",
+		"宗门任务", "我的宗门任务", "领取宗门任务奖励", "结算宗门周目标", "宗门商店", "贡献换声望", "宗门七日续期", "确认宗门七日续期", "洞府", "解锁洞府", "闭关", "宗门闭关",
 		"创建宗门抽奖", "宗门抽奖", "参加宗门抽奖", "查看宗门抽奖", "重发宗门抽奖", "提醒宗门抽奖", "补发宗门抽奖提醒", "取消宗门抽奖",
 		"宗门秘境", "开启宗门秘境", "确认开启宗门秘境", "开启普通宗门秘境", "确认开启普通宗门秘境", "开启高阶宗门秘境", "确认开启高阶宗门秘境", "开启限时宗门秘境", "确认开启限时宗门秘境", "进入宗门秘境", "结算宗门秘境", "宗门秘境排行", "宗门秘境明细",
 		"宗门喇叭", "世界喇叭", "确认宗门喇叭", "确认世界喇叭",
@@ -9529,6 +9533,13 @@ func isDiceOpenTime(now time.Time) bool {
 	return minutes < 17*60+55 || (minutes >= 22*60+5 && minutes < 24*60)
 }
 
+func isRaceOpenTime(now time.Time) bool {
+	loc := time.FixedZone("CST", 8*3600)
+	local := now.In(loc)
+	minutes := local.Hour()*60 + local.Minute()
+	return minutes >= 18*60 && minutes < 19*60+55
+}
+
 func diceDayKey(t time.Time) string {
 	loc := time.FixedZone("CST", 8*3600)
 	return t.In(loc).Format("2006-01-02")
@@ -9708,7 +9719,7 @@ func handleDiceGame(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 	if text == "发起骰子" {
 		if !isDiceOpenTime(time.Now()) {
-			sendGroupAutoDeleteMessage(bot, chatID, "⏳ **三界骰局尚未开放！**\n\n开放时间为 **22:05 - 次日 17:55**，18:00-19:55 为推牌九时段，20:00-22:00 为赛马时段。")
+			sendGroupAutoDeleteMessage(bot, chatID, "⏳ **三界骰局尚未开放！**\n\n开放时间为 **22:05 - 次日 17:55**，18:00-19:55 为赛马时段，20:00-22:00 为推牌九时段。")
 			return
 		}
 
@@ -10294,10 +10305,8 @@ func handleHorseRace(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 	// 发起赛马
 	if text == "发起赛马" {
-		loc := time.FixedZone("CST", 8*3600)
-		nowHour := time.Now().In(loc).Hour()
-		if nowHour < 20 || nowHour >= 22 {
-			sendGroupAutoDeleteMessage(bot, chatID, "⏳ **赛马场关门啦！**\n\n营业时间为每晚 **20:00 - 22:00**，请在黄金档再来哦！")
+		if !isRaceOpenTime(time.Now()) {
+			sendGroupAutoDeleteMessage(bot, chatID, "⏳ **赛马场关门啦！**\n\n营业时间为每日 **18:00 - 19:55**，推牌九黄金档前预留 5 分钟缓冲。")
 			return
 		}
 

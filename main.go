@@ -14,10 +14,10 @@ import (
 )
 
 const (
-	telegramHTTPClientTimeout     = 75 * time.Second
+	telegramHTTPClientTimeout     = 90 * time.Second
 	telegramSendHTTPTimeout       = 12 * time.Second
 	telegramCallbackHTTPTimeout   = 4 * time.Second
-	telegramLongPollTimeout       = 60
+	telegramLongPollTimeout       = 30
 	telegramPollRetryDelay        = 3 * time.Second
 	telegramPollConflictError     = 409
 	telegramWebhookDropOnStartup  = true
