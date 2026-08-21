@@ -33,6 +33,7 @@ const (
 	spCbCatch         = "sp:catch"
 	spCbTeam          = "sp:team"
 	spCbPush          = "sp:push"
+	spCbMirror        = "sp:mirror"
 	spCbBeast         = "sp:beast"
 	spCbHelp          = "sp:help"
 	spCbExPrefix      = "sp:ex:"      // sp:ex:100 / sp:ex:300 / sp:ex:500 / sp:ex:1000
@@ -82,9 +83,10 @@ func spiritPanelHome(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboard
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🗺 灵墟推图", spCbPush),
-			tgbotapi.NewInlineKeyboardButtonData("🔮 护宗神兽", spCbBeast),
+			tgbotapi.NewInlineKeyboardButtonData("🪞 镜场", spCbMirror),
 		),
 		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔮 护宗神兽", spCbBeast),
 			tgbotapi.NewInlineKeyboardButtonData("ℹ️ 玩法说明", spCbHelp),
 		),
 	)
@@ -364,7 +366,8 @@ func spiritPanelHelp() (string, tgbotapi.InlineKeyboardMarkup) {
 		"· 捕捉：灵墟按境界开放六大区域，需消耗缚灵索\n" +
 		"· 升星：吞噬同阶灵侍提升星级，战力大涨\n" +
 		"· 推图：六大章节各 10 关 + Boss，神行符 10/日，三星可扫荡\n" +
-		"· 镜场斗法 / 护宗神兽：建设中\n" +
+		"· 镜场：上架镜像供道友挑战，胜 30 / 负 10 灵晶，10 次/日，24h 内可复仇\n" +
+		"· 护宗神兽：建设中\n" +
 		"━━━━━━━━━━━━━━\n" +
 		"所有灵侍操作仅在私聊进行，请道友移步私聊。"
 	kb := tgbotapi.NewInlineKeyboardMarkup(
@@ -545,6 +548,133 @@ func spiritPanelStageDetail(userID int64, chapterID, stageID int) (string, tgbot
 }
 
 // ------------------------------------------
+// 镜场（异步 PVP）
+// ------------------------------------------
+
+// spiritPanelMirror 镜场主界面
+func spiritPanelMirror(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
+	remaining := GetPvpDailyRemaining(userID)
+	mirror := GetMyMirror(userID)
+	revTargets := GetPvpRevengeTargets(userID)
+
+	var b strings.Builder
+	b.WriteString("🪞 镜场\n")
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	if mirror != nil {
+		b.WriteString(fmt.Sprintf("我方镜像：已上架（战力 %d，%d 名灵侍），%s 前有效\n",
+			mirror.TeamPower, mirror.MemberCount, mirror.ExpiresAt.Format("01-02 15:04")))
+	} else {
+		b.WriteString("我方镜像：未上架（上架后可被道友挑战）\n")
+	}
+	b.WriteString(fmt.Sprintf("⚔️ 今日攻击：%d/%d 剩余\n", remaining, pvpDailyLimit))
+	b.WriteString(fmt.Sprintf("奖励：胜 %d 灵晶 / 负 %d 灵晶\n", pvpWinReward, pvpLoseReward))
+	b.WriteString("镜像被破后 24 小时内可复仇对方\n")
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🪞 上架/刷新镜像", "sp:mirror:set"),
+		tgbotapi.NewInlineKeyboardButtonData("⚔️ 攻击镜像", "sp:mirror:atk")))
+	if len(revTargets) > 0 {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("😤 复仇（%d 人可复仇）", len(revTargets)), "sp:mirror:rev")))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("📜 战绩", "sp:mirror:hist"),
+		tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// spiritPanelMirrorRevenge 复仇目标列表
+func spiritPanelMirrorRevenge(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
+	targets := GetPvpRevengeTargets(userID)
+	var b strings.Builder
+	b.WriteString("😤 复仇目标\n━━━━━━━━━━━━━━\n")
+	if len(targets) == 0 {
+		b.WriteString("暂无可复仇的道友（窗口 24 小时，且对方镜像需仍有效）。")
+	} else {
+		b.WriteString("24 小时内这些道友破过你的镜像，攻击其镜像即可复仇：\n")
+	}
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i := range targets {
+		t := &targets[i]
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("😤 复仇：%s（战力 %d）", spiritPvpUserName(t.AttackerID), t.AttackerPower),
+				fmt.Sprintf("sp:mirror:rev:%d", t.AttackerID))))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔙 镜场", spCbMirror)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// spiritPanelMirrorHistory 镜场战绩
+func spiritPanelMirrorHistory(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
+	battles := GetPvpHistory(userID)
+	var b strings.Builder
+	b.WriteString("📜 镜场战绩\n━━━━━━━━━━━━━━\n")
+	if len(battles) == 0 {
+		b.WriteString("暂无战斗记录。")
+	} else {
+		for i := range battles {
+			bt := &battles[i]
+			ts := bt.CreatedAt.Format("01-02 15:04")
+			if bt.AttackerID == userID {
+				opp := spiritPvpUserName(bt.DefenderID)
+				if bt.AttackerWin {
+					b.WriteString(fmt.Sprintf("· %s ⚔️ 攻 %s：胜 + %d 灵晶\n", ts, opp, bt.Reward))
+				} else {
+					b.WriteString(fmt.Sprintf("· %s ⚔️ 攻 %s：负 + %d 灵晶\n", ts, opp, bt.Reward))
+				}
+			} else {
+				opp := spiritPvpUserName(bt.AttackerID)
+				if bt.AttackerWin {
+					b.WriteString(fmt.Sprintf("· %s 🛡 守 %s：镜像被破（对方 %d vs 我方 %d）\n",
+						ts, opp, bt.AttackerPower, bt.DefenderPower))
+				} else {
+					b.WriteString(fmt.Sprintf("· %s 🛡 守 %s：防守成功\n", ts, opp))
+				}
+			}
+		}
+	}
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 镜场", spCbMirror),
+			tgbotapi.NewInlineKeyboardButtonData("🐉 万灵阁", spCbHome)))
+	return b.String(), kb
+}
+
+// pvpAttackResultPanel 攻击结果面板
+func pvpAttackResultPanel(res *PvpAttackResult) (string, tgbotapi.InlineKeyboardMarkup) {
+	verdict := "💀 败"
+	if res.Win {
+		verdict = "⚔️ 胜"
+	}
+	var b strings.Builder
+	b.WriteString("🪞 镜场斗法\n")
+	b.WriteString(fmt.Sprintf("%s — %s\n", verdict, res.DefenderName))
+	b.WriteString(fmt.Sprintf("对方镜像战力：%d\n", res.DefenderPower))
+	if res.HPTotal > 0 {
+		b.WriteString(fmt.Sprintf("我方队伍剩余血量：%.0f%%\n", float64(res.HPLeft)/float64(res.HPTotal)*100))
+	}
+	b.WriteString(fmt.Sprintf("战斗奖励：+ %d 灵晶\n", res.Reward))
+	b.WriteString(fmt.Sprintf("今日剩余攻击：%d 次\n", res.Remaining))
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("⚔️ 再攻一次", "sp:mirror:atk")))
+	if !res.Win {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("😤 向 %s 复仇", res.DefenderName),
+				fmt.Sprintf("sp:mirror:rev:%d", res.DefenderID))))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔙 镜场", spCbMirror)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// ------------------------------------------
 // 对外入口
 // ------------------------------------------
 
@@ -701,6 +831,52 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 			ackText = fmt.Sprintf("🔄 扫荡完成，+%d 灵晶", reward)
 		}
 		text, kb = spiritPanelStageDetail(userID, ch, st)
+	case cb.Data == spCbMirror:
+		text, kb = spiritPanelMirror(userID)
+	case cb.Data == "sp:mirror:set":
+		power, err := SetupMirror(userID)
+		if err != nil {
+			ackText = fmt.Sprintf("上架失败：%v", err)
+		} else {
+			ackText = fmt.Sprintf("🪞 镜像已上架（战力 %d，24 小时有效）", power)
+		}
+		text, kb = spiritPanelMirror(userID)
+	case cb.Data == "sp:mirror:atk":
+		res, err := PvpAttack(userID, 0)
+		if err != nil {
+			ackText = fmt.Sprintf("攻击失败：%v", err)
+			text, kb = spiritPanelMirror(userID)
+			break
+		}
+		if res.Win {
+			ackText = fmt.Sprintf("⚔️ 胜！+ %d 灵晶", res.Reward)
+		} else {
+			ackText = fmt.Sprintf("💀 败。+ %d 灵晶安慰", res.Reward)
+		}
+		text, kb = pvpAttackResultPanel(res)
+	case cb.Data == "sp:mirror:rev":
+		text, kb = spiritPanelMirrorRevenge(userID)
+	case cb.Data == "sp:mirror:hist":
+		text, kb = spiritPanelMirrorHistory(userID)
+	case strings.HasPrefix(cb.Data, "sp:mirror:rev:"):
+		targetID, err := strconv.ParseInt(strings.TrimPrefix(cb.Data, "sp:mirror:rev:"), 10, 64)
+		if err != nil || targetID <= 0 {
+			ackText = "无效的复仇目标"
+			text, kb = spiritPanelMirror(userID)
+			break
+		}
+		res, err2 := PvpAttack(userID, targetID)
+		if err2 != nil {
+			ackText = fmt.Sprintf("复仇失败：%v", err2)
+			text, kb = spiritPanelMirror(userID)
+			break
+		}
+		if res.Win {
+			ackText = fmt.Sprintf("😤 复仇成功！+ %d 灵晶", res.Reward)
+		} else {
+			ackText = fmt.Sprintf("😤 复仇未果… + %d 灵晶", res.Reward)
+		}
+		text, kb = pvpAttackResultPanel(res)
 	default:
 		ackText = "未知操作"
 		text, kb = spiritPanelHome(db, userID)

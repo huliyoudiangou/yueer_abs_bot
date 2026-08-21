@@ -629,6 +629,37 @@ func (SpiritStageProgress) TableName() string {
 	return "spirit_stage_progress"
 }
 
+// 镜场镜像：出阵队伍快照，供他人异步挑战（24 小时有效）
+type SpiritMirror struct {
+	gorm.Model
+	UserID      int64     `gorm:"uniqueIndex;not null"`
+	TeamJSON    string    // 出阵队伍快照（BattleFighter 列表 JSON）
+	TeamPower   int       // 快照时的队伍战力
+	Realm       int       // 上架时的大境界（展示用）
+	MemberCount int       // 快照队伍人数
+	ExpiresAt   time.Time // 镜像有效期
+}
+
+func (SpiritMirror) TableName() string {
+	return "spirit_mirrors"
+}
+
+// 镜场战斗记录：异步 PVP 攻防流水（复仇列表/战绩/每日次数依据）
+type SpiritPvpBattle struct {
+	gorm.Model
+	AttackerID    int64 `gorm:"index;not null"`
+	DefenderID    int64 `gorm:"index;not null"`
+	AttackerWin   bool
+	AttackerPower int
+	DefenderPower int
+	Reward        int    // 攻方获得的灵晶（胜30/负10）
+	DayKey        string `gorm:"index"` // 北京时间 YYYYMMDD（每日上限用）
+}
+
+func (SpiritPvpBattle) TableName() string {
+	return "spirit_pvp_battles"
+}
+
 // 任务表：AGENTS.md、README.md、手册、docs
 
 var db *gorm.DB
@@ -1006,6 +1037,8 @@ func InitDB() {
 		&SpiritZonePity{},
 		&SpiritBattleStamina{},
 		&SpiritStageProgress{},
+		&SpiritMirror{},
+		&SpiritPvpBattle{},
 	); err != nil {
 		log.Fatalf("数据库迁移失败: %s", formatPlainError(err))
 	}
