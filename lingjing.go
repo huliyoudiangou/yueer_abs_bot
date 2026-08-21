@@ -1,160 +1,218 @@
 package main
 
 import (
-	"errors"
 	"fmt"
-	"math"
+	"log"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ==========================================
-// 灵晶钱包 - Phase 1 经济核心
-// 积分→灵晶单向桥，绝对不回退
-// 所有灵晶消耗必须经过 SpendLingjing或 EarnLingjing
+// 灵晶钱包系统（Phase 1）
+// 所有灵侍消耗必须经过 SpendLingjing/EarnLingjing
 // ==========================================
 
-var DailyMaxExchangePoints = 1000 // 每日最多兑换1000积分（10000灵晶）
+// DailyMaxExchangePoints 每日兑换积分上限
+const DailyMaxExchangePoints = 1000
 
-// 兑换积分换灵晶（单向、仅限特定、仅写流水）
+// ExchangePointsToLingjing 积分兑换灵晶（单向，永不逆反）
+// 1积分 = 10灵晶，每日上限 1000积分 = 10000灵晶
 func ExchangePointsToLingjing(tx *gorm.DB, userID int64, pointsAmount int) (int, error) {
 	if pointsAmount <= 0 {
-		return 0, errors.New("兑换积分必须大于0")
+		return 0, fmt.Errorf("兑换积分必须大于0")
 	}
-	if pointsAmount%100 != 0 || pointsAmount > 1000 {
-		return 0, errors.New("兑换积分必须是100的整数倍，且最多1000")
+	if pointsAmount%100 != 0 || pointsAmount > DailyMaxExchangePoints {
+		return 0, fmt.Errorf("兑换积分必须是100的整数倍，且不超过每日上限%d积分", DailyMaxExchangePoints)
 	}
-
 	today := time.Now().Format("20060102")
-	var totalExchanged int
+	var lingjing int
 	err := tx.Transaction(func(ttx *gorm.DB) error {
-		// 1. 确保用户有足够积分
-		res := ttx.Model(&User{}).
-			Where("id = ? AND points >= ?", userID, pointsAmount).
+		// 扣积分（安全条件更新）
+		result := ttx.Model(&User{}).Where("telegram_id = ? AND points >= ?", userID, pointsAmount).
 			Update("points", gorm.Expr("points - ?", pointsAmount))
-		if res.Error != nil || res.RowsAffected == 0 {
-			return errors.New("积分扣除失败或积分不足")
+		if result.Error != nil {
+			return fmt.Errorf("积分扣除失败")
+		}
+		if result.RowsAffected == 0 {
+			return fmt.Errorf("积分不足")
 		}
 
-		// 2. 查询今日已兑换额度（兜底判断）
+		// 检查并记录每日配额
 		var quota DailyLingjingQuota
 		findErr := ttx.Where("user_id = ? AND day_key = ?", userID, today).First(&quota).Error
-		if errors.Is(findErr, gorm.ErrRecordNotFound) {
-			quota = DailyLingjingQuota{UserID: userID, DayKey: today, Spent: pointsAmount, Exchanged: pointsAmount * 10}
+		if findErr == gorm.ErrRecordNotFound {
+			quota = DailyLingjingQuota{UserID: userID, DayKey: today, Spent: pointsAmount}
 			if err := ttx.Create(&quota).Error; err != nil {
 				return fmt.Errorf("无法创建当日配额: %w", err)
 			}
-		} else if findErr != nil {
-			return fmt.Errorf("查询当日配额失败: %w", findErr)
+		} else if findErr == nil {
+			newSpent := quota.Spent + pointsAmount
+			if newSpent > DailyMaxExchangePoints {
+				remain := DailyMaxExchangePoints - quota.Spent
+				return fmt.Errorf("今日兑换已超上限%d积分，剩余可兑换:%d", DailyMaxExchangePoints, remain)
+			}
+			quota.Spent = newSpent
+			if err := ttx.Save(&quota).Error; err != nil {
+				return fmt.Errorf("更新当日配额失败: %w", err)
+			}
 		} else {
-			if quota.Spent+pointsAmount > DailyMaxExchangePoints {
-				return fmt.Errorf("今日兑换已超限%d积分，剩余:%d", DailyMaxExchangePoints, DailyMaxExchangePoints-quota.Spent)
-			}
-			// 更新额度记录
-			newQuota := DailyLingjingQuota{UserID: userID, DayKey: today, Spent: quota.Spent + pointsAmount, Exchanged: quota.Exchanged + pointsAmount*10}
-			if err := ttx.Save(&newQuota).Error; err != nil {
-				return err
-			}
+			return fmt.Errorf("查询当日配额失败: %w", findErr)
 		}
 
-		// 3. 创建灵晶到余额（写流水）
-		lingjing := pointsAmount * 10
-		if err := ttx.Model(&UserLingjingBalance{}).
-			Where("user_id = ?", userID).
-			Update("lingjing", gorm.Expr("lingjing + ?", lingjing)).Error; err != nil {
-			return fmt.Errorf("无法更新灵晶余额: %w", err)
+		// 更新钱包余额（不存在则创建）
+		lingjing = pointsAmount * LingjingExchangeRate()
+		var balance UserLingjingBalance
+		balErr := ttx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("user_id = ?", userID).First(&balance).Error
+		if balErr == gorm.ErrRecordNotFound {
+			newBalance := UserLingjingBalance{
+				UserID:      userID,
+				Lingjing:    lingjing,
+				Lingchen:    0,
+				TotalEarned: lingjing,
+				TotalSpent:  0,
+			}
+			if err := ttx.Create(&newBalance).Error; err != nil {
+				return fmt.Errorf("无法创建灵晶钱包: %w", err)
+			}
+		} else if balErr == nil {
+			before := balance.Lingjing
+			balance.Lingjing += lingjing
+			balance.TotalEarned += lingjing
+			if err := ttx.Save(&balance).Error; err != nil {
+				return fmt.Errorf("无法更新灵晶余额: %w", err)
+			}
+			_ = before
+		} else {
+			return fmt.Errorf("查询灵晶余额失败: %w", balErr)
 		}
 
-		lt := LingjingTransaction{
-			UserID:    userID,
-			Delta:     lingjing,
-			Type:      "exchange_to_lingjing",
+		// 记录灵晶交易流水
+		transaction := LingjingTransaction{
+			UserID:      userID,
+			Delta:       lingjing,
+			Type:        "exchange_from_points",
 			Description: fmt.Sprintf("积分%d转换为灵晶%d", pointsAmount, lingjing),
+			RefType:     "exchange",
+			RefID:       fmt.Sprintf("%d:%d", userID, pointsAmount),
 		}
-		if err := ttx.Create(&lt).Error; err != nil {
-			return fmt.Errorf("写积分交易失败: %w", err)
+		if err := ttx.Create(&transaction).Error; err != nil {
+			return fmt.Errorf("写灵晶交易失败: %w", err)
 		}
 		return nil
 	})
-	if err != nil {
-		return 0, err
-	}
-	totalExchanged = pointsAmount * 10
-	return totalExchanged, nil
+	return lingjing, err
 }
 
-// 消耗灵晶（喂养/强化/升星）
+// SpendLingjing 灵侍消耗灵晶
 func SpendLingjing(tx *gorm.DB, userID int64, amount int, expenseType, description string) error {
 	if amount <= 0 {
-		return errors.New("invalid spend amount")
+		return fmt.Errorf("invalid spend amount")
 	}
-	var bal UserLingjingBalance
 	err := tx.Transaction(func(ttx *gorm.DB) error {
-		if err := ttx.Where("user_id = ?", userID).First(&bal).Error; err != nil || bal.Lingjing < amount {
-			return errors.New("灵晶不足")
+		result := ttx.Model(&UserLingjingBalance{}).Where("user_id = ? AND lingjing >= ?", userID, amount).
+			Update("lingjing", gorm.Expr("lingjing - ?", amount))
+		if result.Error != nil {
+			return fmt.Errorf("灵晶扣除失败: %w", result.Error)
 		}
-		// 直接扣减余额
-		if err := ttx.Model(&UserLingjingBalance{}).
-			Where("user_id = ?", userID).
-			Update("lingjing", gorm.Expr("lingjing - ?", amount)).Error; err != nil {
-			return fmt.Errorf("扣减灵晶失败: %w", err)
+		if result.RowsAffected == 0 {
+			return fmt.Errorf("灵晶不足")
 		}
-		// 写流水（无论正负都有审计）
-		lt := LingjingTransaction{
-			UserID:    userID,
-			Delta:     -amount,
-			Type:      expenseType,
+		// 累加消耗统计
+		ttx.Model(&UserLingjingBalance{}).Where("user_id = ?", userID).
+			Update("total_spent", gorm.Expr("total_spent + ?", amount))
+
+		transaction := LingjingTransaction{
+			UserID:      userID,
+			Delta:       -amount,
+			Type:        expenseType, // "consume_capture", "consume_feed" 等
 			Description: description,
+			RefType:     "consume",
+			RefID:       fmt.Sprintf("%d", userID),
 		}
-		if err := ttx.Create(&lt).Error; err != nil {
-			return fmt.Errorf("写积分交易失败: %w", err)
+		if err := ttx.Create(&transaction).Error; err != nil {
+			return fmt.Errorf("写灵晶交易失败: %w", err)
 		}
 		return nil
 	})
 	return err
 }
 
-// 掉落/获得灵晶（为非求神通增加）
+// EarnLingjing 灵侍奖励灵晶
 func EarnLingjing(tx *gorm.DB, userID int64, amount int, rewardType, description string) error {
 	if amount <= 0 {
-		return errors.New("invalid earn amount")
+		return fmt.Errorf("invalid earn amount")
 	}
-	// 制成后置入
-	if err := tx.Model(&UserLingjingBalance{}).
-		Where("user_id = ?", userID).
-		Update("lingjing", gorm.Expr("lingjing + ?", amount)).Error; err != nil {
-		return fmt.Errorf("加灵晶失败: %w", err)
-	}
-	// 流水
-	lt := LingjingTransaction{
-		UserID:    userID,
-		Delta:     amount,
-		Type:      rewardType,
-		Description: description,
-	}
-	if err := tx.Create(&lt).Error; err != nil {
-		return fmt.Errorf("写积分事务失败: %w", err)
-	}
-	return nil
+	err := tx.Transaction(func(ttx *gorm.DB) error {
+		var balance UserLingjingBalance
+		findErr := ttx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("user_id = ?", userID).First(&balance).Error
+		if findErr == gorm.ErrRecordNotFound {
+			newBalance := UserLingjingBalance{UserID: userID, Lingjing: amount, TotalEarned: amount}
+			if err := ttx.Create(&newBalance).Error; err != nil {
+				return fmt.Errorf("无法创建灵晶钱包: %w", err)
+			}
+		} else if findErr == nil {
+			if err := ttx.Model(&UserLingjingBalance{}).Where("user_id = ?", userID).
+				Updates(map[string]interface{}{
+					"lingjing":     gorm.Expr("lingjing + ?", amount),
+					"total_earned": gorm.Expr("total_earned + ?", amount),
+				}).Error; err != nil {
+				return fmt.Errorf("加灵晶失败: %w", err)
+			}
+		} else {
+			return fmt.Errorf("查询灵晶余额失败: %w", findErr)
+		}
+
+		transaction := LingjingTransaction{
+			UserID:      userID,
+			Delta:       amount,
+			Type:        rewardType, // "battle_win", "battle_lose", "boss_drop" 等
+			Description: description,
+			RefType:     "reward",
+			RefID:       fmt.Sprintf("%d", userID),
+		}
+		if err := ttx.Create(&transaction).Error; err != nil {
+			return fmt.Errorf("写灵晶交易失败: %w", err)
+		}
+		return nil
+	})
+	return err
 }
 
-// 查询灵晶余额
-func GetUserWalletBalance(userID int64) (int, error) {
-	var bal UserLingjingBalance
-	err := db.Where("user_id = ?", userID).First(&bal).Error
+// GetUserWalletBalance 获取用户灵晶余额
+func GetUserWalletBalance(tx *gorm.DB, userID int64) (int, error) {
+	var balance UserLingjingBalance
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("user_id = ?", userID).First(&balance).Error
+	if err == gorm.ErrRecordNotFound {
+		return 0, nil
+	}
 	if err != nil {
 		return 0, err
 	}
-	return bal.Lingjing, nil
+	return balance.Lingjing, nil
 }
 
-// 交易后的同步功能
-func SyncUserBalance(userID int64) (int, error) {
-	var latestTx LingjingTransaction
-	err := db.Where("user_id = ?", userID).Order("created_at DESC").First(&latestTx).Error
+// SyncUserBalance 余额对称核查（由交易流水重新汇总，仅记录日志）
+func SyncUserBalance(tx *gorm.DB, userID int64) error {
+	var txCount int64
+	var totalAmount int64
+	err := tx.Model(&LingjingTransaction{}).
+		Where("user_id = ?", userID).
+		Count(&txCount).Error
 	if err != nil {
-		return 0, nil // 交易可能不存在，返回0不影响
+		return err
 	}
-	return int(latestTx.BalanceAfter), nil
+	if txCount == 0 {
+		return nil
+	}
+	err = tx.Model(&LingjingTransaction{}).
+		Where("user_id = ?", userID).
+		Select("COALESCE(SUM(delta), 0)").Scan(&totalAmount).Error
+	if err != nil {
+		return err
+	}
+	log.Printf("[灵晶] 余额对账核查 user=%d tx_count=%d total_delta=%d", userID, txCount, totalAmount)
+	return nil
 }

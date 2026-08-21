@@ -1,136 +1,191 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"log"
 	"math/rand"
-	"time"
+
+	"gorm.io/gorm"
 )
 
 // ==========================================
-// 灵兽养成骨架 - 基础属性计算和成长
-// 代码路径清晰：出生 -> 升级 -> 升星 -> 融合
+// 灵侍养成骨架：创建、喂养、升星、编队
+// Phase 1 骨架，战斗与推图在后续模块实现
 // ==========================================
 
+// CreateSpiritServant 按区域品阶概率创建一只灵侍
+// zone.SpawnRates 为万分率，与 SpiritQualityNames 顺序对齐（凡/灵/玄/地/天/圣）
 func CreateSpiritServant(userID int64, zone SpiritZone) (*UserSpiritServant, error) {
-	// 使用配置区域概率随机选品阶
-	index := rand.Intn(100)
+	roll := rand.Intn(10000)
 	sum := 0
 	chosenQuality := "凡"
 	for i, rate := range zone.SpawnRates {
-		if rate == 0 {
+		if rate <= 0 || i >= len(SpiritQualityNames) {
 			continue
 		}
-		if index < sum+rate {
+		sum += rate
+		if roll < sum {
 			chosenQuality = SpiritQualityNames[i]
 			break
 		}
-		sum += rate
 	}
-	// 同名重复时强制改名
-	name := ""
-	baseTier := GetRealmForQuality(chosenQuality)
+
+	// 同名重抽（默认最多 30 次）
+	name := "灵侍"
 	for retry := 0; retry < 30; retry++ {
 		pool := ServantNamePool[chosenQuality]
+		if len(pool) == 0 {
+			break
+		}
 		name = pool[rand.Intn(len(pool))].Name
 		if !CheckDuplicateName(userID, name) {
 			break
 		}
 	}
-	if name == "" {
-		name = "待命名灵侍"
+
+	ser := &UserSpiritServant{
+		UserID:    userID,
+		Name:      name,
+		Quality:   chosenQuality,
+		Attribute: pickServantAttribute(chosenQuality),
+		Level:     1,
+		Star:      1,
+		HP:        applyBaseStat(chosenQuality, QualityBasePower[chosenQuality]),
+		ATK:       applyBaseStat(chosenQuality, 20),
+		DEF:       applyBaseStat(chosenQuality, 15),
+		SPD:       applyBaseStat(chosenQuality, 10),
+		MAG:       applyBaseStat(chosenQuality, 12),
 	}
-	ser := UserSpiritServant{
-		UserID:  userID,
-		Name:    name,
-		Quality: chosenQuality,
-		Attribute: SpiritAttributes[rand.Intn(len(SpiritAttributes))],
-		Level:   1,
-		Star:    1,
-		HP:      applyBaseStat(chosenQuality, 8),
-		ATK:     applyBaseStat(chosenQuality, 8),
-		DEF:     applyBaseStat(chosenQuality, 8),
-		SPD:     applyBaseStat(chosenQuality, 8),
-		MAG:     applyBaseStat(chosenQuality, 8),
-	}
-	if err := db.Create(&ser).Error; err != nil {
+	if err := db.Create(ser).Error; err != nil {
 		return nil, err
 	}
-	log.Printf("[灵侍] 捕捉成功 user=%d zone=%s qu=%s name=%s", userID, zone.Key, chosenQuality, name)
-	return &ser, nil
+	log.Printf("[灵侍] 生成 user=%d zone=%s quality=%s name=%s", userID, zone.Key, chosenQuality, name)
+	return ser, nil
+}
+
+// pickServantAttribute 随机属性；阴/阳仅地阶及以上可能出现
+func pickServantAttribute(quality string) string {
+	idx := QualityIndex(quality)
+	pool := SpiritAttributes[:5] // 凡/灵/玄阶仅五行
+	if idx >= QualityIndex("地") {
+		pool = SpiritAttributes // 地阶及以上含阴阳
+	}
+	return pool[rand.Intn(len(pool))]
 }
 
 func applyBaseStat(quality string, base int) int {
-	growth := QualityGrowth[quality]
-	return base * int(growth)
+	return base * int(QualityGrowth[quality])
 }
 
-// 升级经验表（类似小精灵）
 func GetBattlePower(s *UserSpiritServant) int {
 	return int(float64(s.HP+s.ATK+s.DEF+s.SPD+s.MAG) * QualityGrowth[s.Quality])
 }
 
-func GetLevelUpRequirement(s *UserSpiritServant) (nextLevelRequirement int) {
-	return 10 + s.Level*15 // 提成模拟
+func GetLevelUpRequirement(s *UserSpiritServant) int {
+	return 10 + s.Level*15
 }
 
-// 经验突破函数
-func FeedSpirit(tx *gorm.DB, userID int64, servantID uint, action string, amount int) error {
+// FeedSpirit 喂养升级骨架：按次数提升等级，受等级上限约束
+func FeedSpirit(tx *gorm.DB, userID int64, servantID uint, amount int) error {
 	var s UserSpiritServant
 	if err := tx.Where("id = ? AND user_id = ?", servantID, userID).First(&s).Error; err != nil {
 		return err
 	}
-	requiredExp := GetLevelUpRequirement(&s)
-	actualExp := (s.Level - 1) * requiredExp
-	feedExp := amount * 10 // 喂养10灵晶喂1经验
-	if actualExp+feedExp < requiredExp {
-		s.Level++
-		return tx.Save(&s).Error
+	maxLevel := MaxLevelByStar(s.Star)
+	if s.Level >= maxLevel {
+		return fmt.Errorf("已达当前星级等级上限：%d级", maxLevel)
 	}
-	return fmt.Errorf("喂食不足，不够升级")
+	if amount <= 0 {
+		return fmt.Errorf("喂养次数必须大于0")
+	}
+	s.Level += amount
+	if s.Level > maxLevel {
+		s.Level = maxLevel
+	}
+	return tx.Save(&s).Error
 }
 
-// 升星（核心代码框架）—— 用同名材料融化吸收
-func StarUpgrade(tx *gorm.DB, userID, targetServantID uint, sacrificeIDs []uint) error {
+// StarUpgrade 升星：祭品需与目标同品阶同星级，且不能使用自己/锁定/出战中灵侍
+func StarUpgrade(tx *gorm.DB, userID int64, targetServantID uint, sacrificeIDs []uint) error {
 	var target UserSpiritServant
 	if err := tx.Where("id = ? AND user_id = ?", targetServantID, userID).First(&target).Error; err != nil {
 		return fmt.Errorf("灵侍不存在")
 	}
-	// 不能在战斗状态或出战
-	var lock SectBeastContribution
-	lock.UserID = userID
-	lock.SectID = 1
-	if result := tx.First(&lock, "user_id = ? AND point_type = ?", userID, "individual"); result.RowsAffected == 0 {
-		// 无现成贡献记录，提示玩家今晚请帮忙（非事务问题）
-		return fmt.Errorf("请先消耗个人声望投喂当前护宗神兽")
-	}
-	targetStar := target.Star
 	maxStar := QualityMaxStar[target.Quality]
-	if targetStar >= maxStar {
-		return fmt.Errorf("%s品阶已达星级上限（%d星）", target.Quality, maxStar)
+	if target.Star >= maxStar {
+		return fmt.Errorf("%s品阶已达星级上限：%d星", target.Quality, maxStar)
 	}
-	// 处理升星消耗的祭品（简化：都需要同品阶、同星级）
+	if target.IsDeployed {
+		return fmt.Errorf("出战中的灵侍不能升星")
+	}
+	if len(sacrificeIDs) < 1 {
+		return fmt.Errorf("至少需要1个祭品")
+	}
+
 	for _, sid := range sacrificeIDs {
+		if sid == targetServantID {
+			return fmt.Errorf("不能用自己作祭品")
+		}
 		var sacrifice UserSpiritServant
-		if err := tx.Where("id = ?, user_id = ?", sid, userID).First(&sacrifice).Error; err != nil || sacrifice.UserID != userID {
-			return fmt.Errorf("无效祭品")
+		if err := tx.Where("id = ? AND user_id = ?", sid, userID).First(&sacrifice).Error; err != nil {
+			return fmt.Errorf("祭品无效：%d", sid)
 		}
-		if sacrifice.Quality != target.Quality || sacrifice.Star < target.Star {
-			ApplySalary := 2 // 每次升星消耗一点香火
-			fmt.Printf("警告：祭品%s品阶(%s)<目标(%s)不符\n", sacrifice.Name, sacrifice.Quality, target.Quality)
-			// 放归处理：当场抹掉祭品（演示）
-			tx.Delete(&sacrifice)
-			continue
+		if sacrifice.Quality != target.Quality {
+			return fmt.Errorf("祭品品阶不匹配：需%s品阶", target.Quality)
 		}
-		tx.Delete(&sacrifice) // 祭品献祭后删除实耦
+		if sacrifice.Star != target.Star {
+			return fmt.Errorf("祭品星级不匹配：需%d星", target.Star)
+		}
+		if sacrifice.IsLocked {
+			return fmt.Errorf("祭品已锁定不能消耗")
+		}
+		if sacrifice.IsDeployed {
+			return fmt.Errorf("出战中的祭品不能消耗")
+		}
 	}
-	target.Star++
+
+	// 消耗祭品
+	for _, sid := range sacrificeIDs {
+		if err := tx.Where("id = ? AND user_id = ?", sid, userID).Delete(&UserSpiritServant{}).Error; err != nil {
+			return fmt.Errorf("删除祭品失败")
+		}
+	}
+
+	// 升星日志
+	newStar := target.Star + 1
+	var firstSacrificeID uint
+	if len(sacrificeIDs) > 0 {
+		firstSacrificeID = sacrificeIDs[0]
+	}
+	logRecord := ServantStarUpLog{
+		UserID:             userID,
+		ServantID:          targetServantID,
+		NewStar:            newStar,
+		SacrificeQuality:   target.Quality,
+		SacrificeAttribute: target.Attribute,
+		SacrificeID:        firstSacrificeID,
+		SpiritCost:         0,
+		Remark:             fmt.Sprintf("星级提升:%d->%d, 消耗祭品%d件", target.Star, newStar, len(sacrificeIDs)),
+	}
+	if err := tx.Create(&logRecord).Error; err != nil {
+		return fmt.Errorf("升星日志写入失败")
+	}
+
+	target.Star = newStar
 	target.Level = 1
-	target.UpdatedAt = time.Now()
-	// 删除手动版经验标记（Dependency on model）
-	if err := tx.Model(&UserSpiritServant{Name: target.Name}).Update("star", gorm.Expr("star + ?", 1)).Error; err != nil {
-		return fmt.Errorf("更新星级失败: %w", err)
+	if err := tx.Save(&target).Error; err != nil {
+		return fmt.Errorf("升星保存失败")
 	}
-	return tx.Save(&target).Error
+	log.Printf("[灵侍] 升星成功 user=%d name=%s new_star=%d sacrifices=%d", userID, target.Name, newStar, len(sacrificeIDs))
+	return nil
+}
+
+// TeamDeploy 上阵/下阵
+func TeamDeploy(tx *gorm.DB, userID int64, servantID uint, deployed bool) error {
+	var s UserSpiritServant
+	if err := tx.Where("id = ? AND user_id = ?", servantID, userID).First(&s).Error; err != nil {
+		return err
+	}
+	s.IsDeployed = deployed
+	return tx.Save(&s).Error
 }

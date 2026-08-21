@@ -3,15 +3,14 @@ package main
 import (
 	"fmt"
 	"math/rand"
-	"time"
 )
 
 // ==========================================
 // 灵侍体系配置中枢（Phase 1）
-// 所有命名、乖离、常量、概率口径统一定死在这里
+// 所有命名、品阶、概率、常量口径统一定义在这里
 // ==========================================
 
-// 灵侍属性体系：金木水火土阴阳（7属性闭环）
+// 灵侍属性体系：金木水火土阴阳（7属性闭环，阴阳仅地阶及以上产出）
 var SpiritAttributes = []string{"金", "木", "水", "火", "土", "阴", "阳"}
 var SpiritQualityNames = []string{"凡", "灵", "玄", "地", "天", "圣"}
 var SpiritSlotTypes = []string{"兵甲", "魂魄"}
@@ -21,24 +20,19 @@ var QualityBasePower = map[string]int{
 	"凡": 110, "灵": 200, "玄": 420, "地": 800, "天": 1600, "圣": 3200,
 }
 
-// 品阶成长系数（每级乘以）
+// 品阶成长系数
 var QualityGrowth = map[string]float64{
 	"凡": 1.05, "灵": 1.06, "玄": 1.08, "地": 1.10, "天": 1.13, "圣": 1.16,
 }
 
-// 品阶星级上限（Agreed：凡3/灵4/玄5/地6/天7/圣9）
+// 品阶星级上限（凡3/灵4/玄5/地6/天7/圣9）
 var QualityMaxStar = map[string]int{
 	"凡": 3, "灵": 4, "玄": 5, "地": 6, "天": 7, "圣": 9,
 }
 
-// 品阶压制率（被天然品阶虚弱的减伤率）
+// 品阶压制率
 var QualitySuppressRate = map[string]float64{
 	"凡": 0.00, "灵": 0.03, "玄": 0.06, "地": 0.09, "天": 0.12, "圣": 0.16,
-}
-
-// 品阶保底出现概率（天品保底30次为基准点）
-var QualityBaseSpawnRate = map[string]int{
-	"凡": 0, "灵": 0, "玄": 0, "地": 0, "天": 30, "圣": 0,
 }
 
 // 境界加权：修为境界对灵侍能力加成
@@ -46,24 +40,24 @@ var CultivationPowerWeight = map[int]float64{
 	0: 0.00, 1: 0.03, 2: 0.06, 3: 0.09, 4: 0.12, 5: 0.15,
 }
 
-// 灵墟区域设定（按境界解锁）
+// 灵墟区域设定（按修仙 MajorRealm 门槛 0-5 解锁；名称为展示名，运行时以修仙配置为准）
 type SpiritZone struct {
-	Key        string   // 区域ID
-	Name       string   // 名称
-	Tier       int      // MajorRealm 门槛（0-5）
-	SpawnRates []int    // 各品阶出现概率（凡/灵/玄/地/天/圣）
+	Key        string // 区域ID
+	Name       string // 名称
+	Tier       int    // MajorRealm 门槛（0-5）
+	SpawnRates []int  // 各品阶出现概率（万分率，与 SpiritQualityNames 对齐：凡/灵/玄/地/天/圣）
 }
 
 var SpiritZones = []SpiritZone{
-	{"qingzhu", "青竹林海", 0, []int{850, 135, 14, 1, 0, 0}},
-	{"wumu", "迷雾深谷", 3, []int{480, 450, 60, 9, 1, 0}},
-	{"duanyue", "断岳山脉", 2, []int{100, 530, 300, 64, 5, 1}},
-	{"youming", "幽冥绝岭", 3, []int{20, 290, 420, 220, 45, 5}},
-	{"guixu", "归墟海眼", 4, []int{0, 60, 410, 380, 140, 10}},
-	{"buzhou", "不周山巅", 5, []int{0, 10, 140, 455, 360, 35}},
+	{"qingzhu", "青竹林海", 0, []int{8500, 1350, 145, 5, 0, 0}},
+	{"wumu", "迷雾深谷", 1, []int{4800, 4500, 620, 80, 10, 0}},
+	{"duanyue", "断岳山脉", 2, []int{1000, 5300, 3050, 550, 50, 5}},
+	{"youming", "幽冥绝岭", 3, []int{200, 2900, 4200, 2000, 50, 10}},
+	{"guixu", "归墟海眼", 4, []int{0, 600, 4100, 3650, 1400, 100}},
+	{"buzhou", "不周山巅", 5, []int{0, 100, 1400, 4550, 3600, 350}},
 }
 
-// 灵侍名录管理（Phase 1实行3900只灵侍的花名册）
+// 灵侍名录
 type ServantName struct {
 	Name string // 名字
 }
@@ -78,10 +72,10 @@ var ServantNamePool = map[string][]ServantName{
 	},
 	"灵": {
 		{Name: "银铃燕"}, {Name: "金丝灵猴"}, {Name: "剑穗雀"}, {Name: "铜镜貉"},
-		{Name: "灵芝麋"}, {Name: "藤尾猫"}, {Name: "杏花貂"}, {Name: "碧眼虎"},
-		{Name: "月牙鲤"}, {Name: "潮音贝"}, {Name: "碧潭蛟崽"}, {Name: "雪沫狐"},
-		{Name: "流萤蝶"}, {Name: "赤尾狐"}, {Name: "焰心狸"}, {Name: "灯笼火鸦"},
-		{Name: "山罄兽"}, {Name: "陶纹猫"}, {Name: "坡上灵驹"}, {Name: "岩针蜂"},
+		{Name: "灵芝麋"}, {Name: "杏花貂"}, {Name: "碧眼虎"}, {Name: "月牙鲤"},
+		{Name: "潮音贝"}, {Name: "碧潭蛟崽"}, {Name: "雪沫狐"}, {Name: "流萤蝶"},
+		{Name: "赤尾狐"}, {Name: "焰心狸"}, {Name: "灯笼火鸦"}, {Name: "山罄兽"},
+		{Name: "陶纹猫"}, {Name: "坡上灵驹"}, {Name: "岩针蜂"}, {Name: "竹露狐"},
 	},
 	"玄": {
 		{Name: "玄铁狼"}, {Name: "银翼雕"}, {Name: "金瞳虎"}, {Name: "锁甲鳄"},
@@ -108,15 +102,15 @@ var ServantNamePool = map[string][]ServantName{
 		{Name: "五爪金龙"}, {Name: "金翅大鹏·圣"}, {Name: "帝江"}, {Name: "九爪苍龙"},
 		{Name: "句芒·真身"}, {Name: "英招"}, {Name: "九天鲲鹏"}, {Name: "应龙"},
 		{Name: "精卫"}, {Name: "元凤"}, {Name: "金乌大圣"}, {Name: "毕方"},
-		{Name: "麒麟圣皇"}, {Name: "陆吾"}, {Name: "混沌饕餮"}, {Name: "朱雀·幼"},
+		{Name: "麒麟圣皇"}, {Name: "陆吾"}, {Name: "混沌饕餮"}, {Name: "朱雀·圣"},
 		{Name: "太阴望舒"}, {Name: "烛九阴"}, {Name: "白泽"}, {Name: "夸父逐日猿"},
 	},
 }
 
-// 装备品阶（按灵侍阶）
+// 装备品阶（与灵侍品阶同名）
 var EquipmentQualityNames = SpiritQualityNames
 
-// 境界-品阶对应（用于Boss/秘境解锁）
+// 境界-品阶对应（用于 Boss/秘境解锁判断）
 func GetRealmForQuality(quality string) int {
 	for i, v := range SpiritQualityNames {
 		if v == quality {
@@ -126,7 +120,7 @@ func GetRealmForQuality(quality string) int {
 	return 1
 }
 
-// 阴阳不可交易（硬约束）
+// 阴阳品阶不可交易（硬约束骨架）
 var TradeLockedQuality = map[string]bool{
 	"凡": false, "灵": false, "玄": false, "地": false, "天": false, "圣": true,
 }
@@ -134,45 +128,30 @@ var TradeLockedQuality = map[string]bool{
 // 等级上限 = 星级 × 10
 func MaxLevelByStar(star int) int { return star * 10 }
 
-// 灵尘换算（1灵晶 = 100灵尘）
-func LingchenFromLingjing(points int) int { return points * 100 }
+// 灵尘换算（1 灵晶 = 100 灵尘）
+func LingchenFromLingjing(lingjing int) int { return lingjing * 100 }
 
-// 战斗资源统计（超载计数器）
-func MaxLayer(zone SpiritZone) int { return len(zone.SpawnRates) }
-
-// 等级提升的经验需求（线性）
+// 等级提升的经验需求（线性骨架）
 func ExperienceForLevel(level int) int { return level * 13 }
 
-// 灵晶获得积分转化比率
-func LingjingExchangeRate() int {
-	return 10 // 1积分 = 10灵晶
-}
+// 灵晶兑换比率：1 积分 = 10 灵晶
+func LingjingExchangeRate() int { return 10 }
 
-// 灵晶日限额
-func LingjingDailyCap() int {
-	return 10000 // 1灵晶=10积分 => 最多每日兑换10000灵晶
-}
+// 灵晶兑换日限额（1000 积分 = 10000 灵晶）
+func LingjingDailyCap() int { return 10000 }
 
-// 灵晶兑换最小单位
-func LingjingMinExchange() int {
-	return 100 // 最小兑换100灵晶
-}
+// 灵晶兑换最小单位（100 积分 = 1000 灵晶）
+func LingjingMinExchange() int { return 100 }
 
-// 灵晶捕捉等级门槛
+// 灵晶捕捉境界门槛
 var LingjingCaptureRequirement = map[string]int{
 	"凡": 0, "灵": 1, "玄": 1, "地": 3, "天": 4, "圣": 5,
 }
 
-// 灵晶比斗每日上限
-func LingjingBattleDailyCap() int {
-	return 200 // 每日最多通过比斗赢取200灵晶
-}
+// PVP 每日奖励场次
+func LingjingBattleDailyCap() int { return 10 }
 
-// 提示文字
-const WelcomeMessage = "灵晶 🐉，灵侍 · 魔力随行，紧锁掌控战力"
-const AdminHello = "灵侍管理台"
-
-// 打印灵侍现状语
+// 灵侍现状简述
 func GetServantSummary(s *UserSpiritServant) string {
 	return fmt.Sprintf("[%s·%s] 等级%d/%d（星%d/%d）",
 		s.Quality, s.Attribute, s.Level, MaxLevelByStar(s.Star), s.Star, QualityMaxStar[s.Quality])
@@ -185,16 +164,16 @@ func GetServantProfile(userID int64) ([]UserSpiritServant, error) {
 	return list, err
 }
 
-// 检查是否存在同名宠
+// 检查是否存在同名灵侍
 func CheckDuplicateName(userID int64, name string) bool {
 	var count int64
 	db.Model(&UserSpiritServant{}).Where("user_id = ? AND name = ?", userID, name).Count(&count)
 	return count > 0
 }
 
-// 养灵属性倍率加成（极限算法框架）
+// 队伍战力估算（骨架：个体战力和 + 品阶多样性加成）
 func CalculateTeamPower(team []UserSpiritServant, level int) int {
-	power := len(team) * 100
+	power := 0
 	uniqueQual := make(map[string]bool)
 	for _, s := range team {
 		uniqueQual[s.Quality] = true
@@ -203,35 +182,29 @@ func CalculateTeamPower(team []UserSpiritServant, level int) int {
 	return int(float64(power) * (1 + float64(len(uniqueQual))*0.05))
 }
 
-// 随机抽取灵侍
+// 随机生成一只灵侍模板（不落库，骨架用）
 func RandServant(quality string, attributeFilter string) UserSpiritServant {
 	pool := ServantNamePool[quality]
 	if len(pool) == 0 {
 		return UserSpiritServant{Quality: quality, Name: "未知灵侍"}
 	}
 	s := pool[rand.Intn(len(pool))]
+	attribute := attributeFilter
+	if attribute == "" {
+		attribute = "金"
+	}
 	return UserSpiritServant{
-		ID:       uint(rand.Uint64()),
-		Quality:  quality,
-		Name:     s.Name,
-		Level:    1,
-		Star:     1,
-		HP:       100,
+		Quality:   quality,
+		Name:      s.Name,
+		Attribute: attribute,
+		Level:     1,
+		Star:      1,
+		HP:        100,
 		ATK:       20,
 		DEF:       15,
 		SPD:       10,
 		MAG:       12,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
 	}
-}
-
-// 灵侍战斗结算加成
-func GetSurviceTier(surviveQuality string) float64 {
-	endBlasts := map[string]float64{
-		"凡": 1.8, "灵": 2.0, "玄": 2.2, "地": 2.4, "天": 2.6, "圣": 3.0,
-	}
-	return endBlasts[surviveQuality]
 }
 
 // 品阶索引
@@ -244,21 +217,7 @@ func QualityIndex(quality string) int {
 	return 0
 }
 
-// 灵场出场概率表（每日免费探索后追加）
+// 区域今日免费探索判断（骨架）
 func GetZoneTodayFreeExplore(zone SpiritZone, dailyUsed int, dailyFree int) bool {
-	if dailyUsed < dailyFree {
-		return true
-	}
-	// 之后需要另行判断品阶条件
-	return false
+	return dailyUsed < dailyFree
 }
-
-// 秘境Buff贬值系数
-var SecretDailyRate = map[string]float64{
-	"凡": 1.0, "灵": 1.0, "玄": 1.2, "地": 1.5, "天": 2.0, "圣": 2.5,
-}
-
-// 不复制经脉和化神五区道
-const TotalMapRegion = 6
-
-var rng = rand.New(rand.NewSource(time.Now().UnixNano()))
