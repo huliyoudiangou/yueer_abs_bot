@@ -289,6 +289,9 @@ func dispatchTelegramUpdate(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob
 			if handleGardenCallback(bot, cb) {
 				return
 			}
+			if handleSpiritCallback(bot, cb) {
+				return
+			}
 			if handleSectMemberPageCallback(bot, cb) {
 				return
 			}
