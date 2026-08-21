@@ -555,6 +555,7 @@ type ServantEquipment struct {
 	DEF       int    `gorm:"default:0"`
 	SPD       int    `gorm:"default:0"`
 	MAG       int    `gorm:"default:0"`
+	Enhance   int    `gorm:"default:0"`     // 精炼等级 0-10（每级装备属性 +2%）
 	Name      string `gorm:"default:''"`    // 装备名（品阶+属性+槽位）
 	IsLocked  bool   `gorm:"default:false"` // 灵侍装备刻名锁定（锁定后不可熔炼）
 }

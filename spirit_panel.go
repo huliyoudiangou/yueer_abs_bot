@@ -393,7 +393,7 @@ func spiritPanelHelp() (string, tgbotapi.InlineKeyboardMarkup) {
 		"· 升星：星级上限 凡3/灵4/玄5/地6/天7/圣9；≤3★ 需同品同属性祭品，4-6★ 另需同星级，7-9★ 需同名同星级灵侍；段1-2 可消耗灵魄替代祭品，段3 可消耗万能真身碎片替代同名要求；升星后等级重置\n" +
 		"· 推图：六大章节各 10 关 + Boss，神行符 10/日，三星可扫荡\n" +
 		"· 镜场：上架镜像供道友挑战，胜 30 / 负 10 灵晶，10 次/日，24h 内可复仇\n" +
-		"· 锻造：锻造炉产出兵甲/魂魄两类装备（目标品质50%/-1档30%/-2档20%），穿戴提升战力，熔炼返还 40%\n" +
+		"· 锻造：锻造炉产出兵甲/魂魄两类装备（目标品质50%/-1档30%/-2档20%），穿戴提升战力；精炼：每级该装备属性 +2%，上限 +10，成本随等级与品阶递增；熔炼返还 40%\n" +
 		"· 护宗神兽：宗门声望 2000 解锁，喂养耗 20-50 声望（随等级递增），三阶为全宗提供 +1%/+2%/+3.5% 世界Boss伤害\n" +
 		"· 灵侍蛋：击败章节 Boss 每次 30% 概率掉蛋（地阶及以下），在灵侍蛋面板孵化为对应品阶灵侍\n" +
 		"· 道具：灵魄随推图胜利掉落（普通关 25%/章节 Boss 50%）；万能真身碎片随第 5/6 章 Boss 掉落（10%）；扫荡不掉道具\n" +
@@ -744,6 +744,7 @@ func spiritPanelEquip(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 	var b strings.Builder
 	b.WriteString("🎒 装备\n")
 	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString("精炼：每级该装备属性 +2%，上限 +10，成本随等级与品阶递增。\n")
 	b.WriteString("【已装备】\n")
 	if len(equipped) == 0 {
 		b.WriteString("暂无已装备。\n")
@@ -766,19 +767,29 @@ func spiritPanelEquip(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 	for i := range bag {
 		e := &bag[i]
 		refund := equipmentForgeCost[e.Quality] * equipmentMeltRefundRatio / 100
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		row := []tgbotapi.InlineKeyboardButton{
 			tgbotapi.NewInlineKeyboardButtonData(
 				fmt.Sprintf("穿戴 %s", e.Name), fmt.Sprintf("sp:equip:put:%d", e.ID)),
 			tgbotapi.NewInlineKeyboardButtonData(
 				fmt.Sprintf("熔炼+%d", refund), fmt.Sprintf("sp:equip:melt:%d", e.ID)),
-		))
+		}
+		if e.Enhance < equipEnhanceMax {
+			row = append(row, tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("精炼-%d", EquipEnhanceCost(e)), fmt.Sprintf("sp:equip:enhance:%d", e.ID)))
+		}
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(row...))
 	}
 	for i := range equipped {
 		e := &equipped[i]
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		row := []tgbotapi.InlineKeyboardButton{
 			tgbotapi.NewInlineKeyboardButtonData(
 				fmt.Sprintf("卸下 %s", e.Name), fmt.Sprintf("sp:equip:off:%d", e.ID)),
-		))
+		}
+		if e.Enhance < equipEnhanceMax {
+			row = append(row, tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("精炼-%d", EquipEnhanceCost(e)), fmt.Sprintf("sp:equip:enhance:%d", e.ID)))
+		}
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(row...))
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("🔥 锻造炉", spCbForge),
@@ -1374,6 +1385,27 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 				}
 				text, kb = spiritPanelEquip(userID)
 			}
+		case "enhance":
+			id, err := strconv.ParseUint(fields[1], 10, 64)
+			if err != nil {
+				ackText = "无效的装备指令"
+				text, kb = spiritPanelEquip(userID)
+				break
+			}
+			var enhCost int
+			err = db.Transaction(func(tx *gorm.DB) error {
+				c, e := EnhanceEquipment(tx, userID, uint(id))
+				if e == nil {
+					enhCost = c
+				}
+				return e
+			})
+			if err != nil {
+				ackText = fmt.Sprintf("精炼失败：%v", err)
+			} else {
+				ackText = fmt.Sprintf("🔨 精炼成功：+1（-%d 灵晶），装备属性已提升", enhCost)
+			}
+			text, kb = spiritPanelEquip(userID)
 		default:
 			ackText = "未知装备指令"
 			text, kb = spiritPanelEquip(userID)

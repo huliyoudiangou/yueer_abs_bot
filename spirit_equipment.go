@@ -216,16 +216,55 @@ func UnequipEquipment(userID int64, equipmentID uint) error {
 // ==========================================
 
 // getServantEquipBonus 灵侍已穿戴装备的属性加总成
+const (
+	equipEnhanceMax      = 10   // 精炼上限
+	equipEnhancePerLevel = 0.02 // 每级精炼装备属性加成（+2%）
+)
+
+// EquipEnhanceCost 精炼到下一级（当前 Enhance → Enhance+1）的灵晶成本
+// 100 × (当前等级+1) × (品阶序号+1)：凡品 +1 = 100，圣品 +1 = 600，圣品 +10 = 6000
+func EquipEnhanceCost(e *ServantEquipment) int {
+	return 100 * (e.Enhance + 1) * (QualityIndex(e.Quality) + 1)
+}
+
+// EnhanceEquipment 精炼一次（事务：扣灵晶 → 条件更新 enhance+1，防并发超上限）
+// 返回实际消耗的灵晶
+func EnhanceEquipment(tx *gorm.DB, userID int64, equipmentID uint) (int, error) {
+	var e ServantEquipment
+	if err := tx.Where("id = ? AND user_id = ?", equipmentID, userID).First(&e).Error; err != nil {
+		return 0, fmt.Errorf("装备不存在或不属于你")
+	}
+	if e.Enhance >= equipEnhanceMax {
+		return 0, fmt.Errorf("装备已达满精炼：+%d", equipEnhanceMax)
+	}
+	cost := EquipEnhanceCost(&e)
+	if err := SpendLingjing(tx, userID, cost, "equip_enhance",
+		fmt.Sprintf("精炼%s +%d", e.Name, e.Enhance+1)); err != nil {
+		return 0, err
+	}
+	res := tx.Model(&ServantEquipment{}).
+		Where("id = ? AND user_id = ? AND enhance < ?", equipmentID, userID, equipEnhanceMax).
+		Update("enhance", gorm.Expr("enhance + 1"))
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return 0, fmt.Errorf("装备已达满精炼：+%d", equipEnhanceMax)
+	}
+	return cost, nil
+}
+
 func getServantEquipBonus(userID int64, servantID uint) (hp, atk, def, spd, mag int) {
 	var eqs []ServantEquipment
 	db.Where("user_id = ? AND servant_id = ?", userID, servantID).Find(&eqs)
 	for i := range eqs {
 		e := &eqs[i]
-		hp += e.HP
-		atk += e.ATK
-		def += e.DEF
-		spd += e.SPD
-		mag += e.MAG
+		m := 1 + equipEnhancePerLevel*float64(e.Enhance) // 精炼加成
+		hp += int(float64(e.HP) * m)
+		atk += int(float64(e.ATK) * m)
+		def += int(float64(e.DEF) * m)
+		spd += int(float64(e.SPD) * m)
+		mag += int(float64(e.MAG) * m)
 	}
 	return
 }
@@ -293,7 +332,11 @@ func equipmentStatLine(eq *ServantEquipment) string {
 	if eq.MAG > 0 {
 		parts = append(parts, fmt.Sprintf("法+%d", eq.MAG))
 	}
-	return fmt.Sprintf("%s（%s）", eq.Name, joinStatParts(parts))
+	enh := ""
+	if eq.Enhance > 0 {
+		enh = fmt.Sprintf(" 精炼+%d", eq.Enhance)
+	}
+	return fmt.Sprintf("%s%s（%s）", eq.Name, enh, joinStatParts(parts))
 }
 
 func joinStatParts(parts []string) string {
