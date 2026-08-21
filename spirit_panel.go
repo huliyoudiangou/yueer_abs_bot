@@ -48,7 +48,7 @@ var spiritExchangeTiers = []int{100, 300, 500, 1000}
 func spiritPanelHome(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 	lingjing, err := GetUserWalletBalance(db, userID)
 	if err != nil {
-		log.Printf("[灵侍] 查询钱包失败 user=%d err=%v", userID, err)
+		log.Printf("[灵侍] 查询钱包失败 user=%d err=%s", userID, formatTelegramSendError(err))
 		lingjing = 0
 	}
 	var total int64
@@ -88,7 +88,7 @@ func spiritPanelHome(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboard
 func spiritPanelList(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 	var servants []UserSpiritServant
 	if err := db.Where("user_id = ?", userID).Order("quality desc, star desc, level desc").Limit(10).Find(&servants).Error; err != nil {
-		log.Printf("[灵侍] 图鉴查询失败 user=%d err=%v", userID, err)
+		log.Printf("[灵侍] 图鉴查询失败 user=%d err=%s", userID, formatTelegramSendError(err))
 	}
 	var b strings.Builder
 	b.WriteString("🐾 灵侍图鉴\n━━━━━━━━━━━━━━\n")
@@ -226,7 +226,7 @@ func SendSpiritPanel(bot *tgbotapi.BotAPI, userID int64, chatID int64) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ReplyMarkup = kb
 	if _, err := bot.Send(msg); err != nil {
-		log.Printf("[灵侍] 发送面板失败 user=%d chat=%d err=%v", userID, chatID, err)
+		log.Printf("[灵侍] 发送面板失败 user=%d chat=%d err=%s", userID, chatID, formatTelegramSendError(err))
 	}
 }
 
@@ -245,7 +245,7 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		ack := tgbotapi.NewCallback(cb.ID, "万灵阁仅在私聊开放，请私聊我操作")
 		ack.ShowAlert = true
 		if _, err := bot.Request(ack); err != nil {
-			log.Printf("[灵侍] ack失败 user=%d err=%v", userID, err)
+			log.Printf("[灵侍] ack失败 user=%d err=%s", userID, formatTelegramSendError(err))
 		}
 		return true
 	}
@@ -282,7 +282,7 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		}
 		lingjing, err := ExchangePointsToLingjing(db, userID, points)
 		if err != nil {
-			log.Printf("[灵侍] 兑换失败 user=%d points=%d err=%v", userID, points, err)
+			log.Printf("[灵侍] 兑换失败 user=%d points=%d err=%s", userID, points, formatTelegramSendError(err))
 			ackText = fmt.Sprintf("兑换失败：%v", err)
 		} else {
 			ackText = fmt.Sprintf("兑换成功：%d 积分 → %d 灵晶", points, lingjing)
@@ -297,7 +297,7 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 	edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
 	edit.ReplyMarkup = &kb
 	if _, err := bot.Send(edit); err != nil {
-		log.Printf("[灵侍] 面板刷新失败 user=%d cb=%s err=%v", userID, cb.Data, err)
+		log.Printf("[灵侍] 面板刷新失败 user=%d cb=%s err=%s", userID, cb.Data, formatTelegramSendError(err))
 	}
 
 	// ACK
@@ -306,7 +306,7 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		ack.ShowAlert = true
 	}
 	if _, err := bot.Request(ack); err != nil {
-		log.Printf("[灵侍] ack失败 user=%d err=%v", userID, err)
+		log.Printf("[灵侍] ack失败 user=%d err=%s", userID, formatTelegramSendError(err))
 	}
 	return true
 }

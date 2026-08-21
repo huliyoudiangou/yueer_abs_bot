@@ -4791,7 +4791,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		"宗门喇叭", "世界喇叭", "确认宗门喇叭", "确认世界喇叭",
 		"世界Boss", "Boss状态", "参加Boss", "Boss排行", "宗门科技", "升级科技", "确认升级科技",
 		"流水", "我的流水", "查流水",
-		"刷新我的今日净修为", "刷新宗门今日净修为", "刷新全服今日净修为", "查看每日净修为",
+		"刷新我的今日净修为", "刷新宗门今日净修为", "刷新全服今日净修为", "查看每日净修为", "万灵阁",
 	}
 
 	isMenuCommand := false
@@ -4809,6 +4809,15 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	if isMenuCommand && session.GetStep() == "IDLE" {
 		clearSession(userID)
 		session = getSession(userID)
+
+		if text == "🐉 万灵阁" {
+			if msg.Chat.IsPrivate() {
+				SendSpiritPanel(bot, userID, chatID)
+			} else {
+				sendPlainText(bot, chatID, "🐉 万灵阁仅在私聊开放，请私聊我使用")
+			}
+			return
+		}
 
 		if strings.Contains(text, "药园") {
 			handleGardenEntry(bot, msg)

@@ -33,6 +33,9 @@ var UserMainMenu = tgbotapi.NewReplyKeyboard(
 		tgbotapi.NewKeyboardButton("🧾 资产交易"),
 		tgbotapi.NewKeyboardButton("⚙️ 账号服务"),
 	),
+	tgbotapi.NewKeyboardButtonRow(
+		tgbotapi.NewKeyboardButton("🐉 万灵阁"),
+	),
 )
 
 func userMainMenuReplyMarkup() interface{} {
