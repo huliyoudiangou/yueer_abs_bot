@@ -37,13 +37,15 @@ const (
 	spCbForge         = "sp:forge"
 	spCbBeast         = "sp:beast"
 	spCbHelp          = "sp:help"
-	spCbExPrefix      = "sp:ex:"      // sp:ex:100 / sp:ex:300 / sp:ex:500 / sp:ex:1000
-	spCbZonePrefix    = "sp:zone:"    // sp:zone:qingzhu
-	spPullPrefix      = "sp:pull:"    // sp:pull:qingzhu:fusu
-	spCbChapterPrefix = "sp:chapter:" // sp:chapter:1
-	spCbStagePrefix   = "sp:stage:"   // sp:stage:1:3
-	spCbFightPrefix   = "sp:fight:"   // sp:fight:1:3
-	spCbSweepPrefix   = "sp:sweep:"   // sp:sweep:1:3
+	spCbExPrefix      = "sp:ex:"         // sp:ex:100 / sp:ex:300 / sp:ex:500 / sp:ex:1000
+	spCbZonePrefix    = "sp:zone:"       // sp:zone:qingzhu
+	spPullPrefix      = "sp:pull:"       // sp:pull:qingzhu:fusu
+	spCbChapterPrefix = "sp:chapter:"    // sp:chapter:1
+	spCbStagePrefix   = "sp:stage:"      // sp:stage:1:3
+	spCbFightPrefix   = "sp:fight:"      // sp:fight:1:3
+	spCbSweepPrefix   = "sp:sweep:"      // sp:sweep:1:3
+	spCbEggs          = "sp:eggs"        // sp:eggs
+	spEggHatchPrefix  = "sp:eggs:hatch:" // sp:eggs:hatch:{eggID}
 )
 
 // 灵晶斋兑换档位（积分）
@@ -92,6 +94,7 @@ func spiritPanelHome(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboard
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("ℹ️ 玩法说明", spCbHelp),
+			tgbotapi.NewInlineKeyboardButtonData("🥚 灵侍蛋", spCbEggs),
 		),
 	)
 	return text, kb
@@ -373,6 +376,7 @@ func spiritPanelHelp() (string, tgbotapi.InlineKeyboardMarkup) {
 		"· 镜场：上架镜像供道友挑战，胜 30 / 负 10 灵晶，10 次/日，24h 内可复仇\n" +
 		"· 锻造：锻造炉产出兵甲/魂魄两类装备（目标品质50%/-1档30%/-2档20%），穿戴提升战力，熔炼返还 40%\n" +
 		"· 护宗神兽：宗门声望 2000 解锁，喂养耗 20-50 声望（随等级递增），三阶为全宗提供 +1%/+2%/+3.5% 世界Boss伤害\n" +
+		"· 灵侍蛋：击败章节 Boss 每次 30% 概率掉蛋（地阶及以下），在灵侍蛋面板孵化为对应品阶灵侍\n" +
 		"━━━━━━━━━━━━━━\n" +
 		"所有灵侍操作仅在私聊进行，请道友移步私聊。"
 	kb := tgbotapi.NewInlineKeyboardMarkup(
@@ -861,6 +865,41 @@ func spiritPanelBeast(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
+// spiritPanelEggs 灵侍蛋面板（未孵化列表 + 孵化历史）
+func spiritPanelEggs(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
+	bag, hatched := ListEggs(userID)
+	var b strings.Builder
+	b.WriteString("🥚 灵侍蛋\n")
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString("击败章节 Boss 有概率掉落灵侍蛋（地阶及以下），\n")
+	b.WriteString("孵化后生成对应品阶的灵侍。\n")
+	b.WriteString("【未孵化】\n")
+	if len(bag) == 0 {
+		b.WriteString("暂无未孵化的灵侍蛋。\n")
+	} else {
+		for i := range bag {
+			b.WriteString(fmt.Sprintf("· %s 品灵侍蛋（来源：%s）\n", bag[i].Quality, bag[i].ZoneName))
+		}
+	}
+	if len(hatched) > 0 {
+		b.WriteString("【最近孵化】\n")
+		for i := range hatched {
+			b.WriteString(fmt.Sprintf("· %s 品灵侍蛋（%s）→ 已孵化\n", hatched[i].Quality, hatched[i].ZoneName))
+		}
+	}
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i := range bag {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("孵化 %s 品灵侍蛋", bag[i].Quality),
+				fmt.Sprintf("%s%d", spEggHatchPrefix, bag[i].ID))))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔙 万灵阁", spCbHome)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
 // ------------------------------------------
 // 对外入口
 // ------------------------------------------
@@ -1008,6 +1047,9 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		}
 		if res.Win {
 			ackText = fmt.Sprintf("⚔️ 胜利！获得 %d 星，+%d 灵晶", res.Stars, res.Reward)
+			if res.DroppedEgg != nil {
+				ackText += fmt.Sprintf("\n🥚 Boss 掉落 %s 品灵侍蛋（可在灵侍蛋面板孵化）", res.DroppedEgg.Quality)
+			}
 		} else {
 			ackText = fmt.Sprintf("💀 不敌 %s，稍作休整再战", res.EnemyName)
 		}
@@ -1153,6 +1195,23 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 			ackText = "未知装备指令"
 			text, kb = spiritPanelEquip(userID)
 		}
+	case cb.Data == spCbEggs:
+		text, kb = spiritPanelEggs(userID)
+	case strings.HasPrefix(cb.Data, spEggHatchPrefix):
+		idStr := strings.TrimPrefix(cb.Data, spEggHatchPrefix)
+		eggID, err := strconv.ParseUint(idStr, 10, 64)
+		if err != nil {
+			ackText = "无效的灵侍蛋指令"
+			text, kb = spiritPanelEggs(userID)
+			break
+		}
+		ser, err := HatchEgg(userID, uint(eggID))
+		if err != nil {
+			ackText = fmt.Sprintf("孵化失败：%v", err)
+		} else {
+			ackText = fmt.Sprintf("🐣 孵化成功：%s %s品灵侍（Lv.%d）", ser.Name, ser.Quality, ser.Level)
+		}
+		text, kb = spiritPanelEggs(userID)
 	default:
 		ackText = "未知操作"
 		text, kb = spiritPanelHome(db, userID)

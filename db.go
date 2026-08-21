@@ -675,6 +675,21 @@ func (SectBeast) TableName() string {
 	return "sect_beasts"
 }
 
+// 灵侍蛋：章节 Boss 掉落（地阶及以下），孵化转为对应品质灵侍
+type SpiritEgg struct {
+	gorm.Model
+	UserID    int64  `gorm:"index;not null;default:0"`
+	Quality   string `gorm:"not null;default:'凡'"`
+	ZoneKey   string `gorm:"default:''"`          // 来源章节灵墟 key
+	ZoneName  string `gorm:"default:''"`          // 来源章节灵墟名（展示用）
+	Status    string `gorm:"index;default:'bag'"` // bag 未孵化 / hatched 已孵化
+	HatchedAt *time.Time
+}
+
+func (SpiritEgg) TableName() string {
+	return "spirit_eggs"
+}
+
 // 任务表：AGENTS.md、README.md、手册、docs
 
 var db *gorm.DB
@@ -1055,6 +1070,7 @@ func InitDB() {
 		&SpiritMirror{},
 		&SpiritPvpBattle{},
 		&SectBeast{},
+		&SpiritEgg{},
 	); err != nil {
 		log.Fatalf("数据库迁移失败: %s", formatPlainError(err))
 	}

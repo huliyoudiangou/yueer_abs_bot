@@ -321,6 +321,7 @@ type PveFightResult struct {
 	TeamHPTotal int
 	StaminaLeft int
 	IsBoss      bool
+	DroppedEgg  *SpiritEgg // Boss 胜利掉蛋（可空）
 }
 
 // PveFight 执行一次推图挑战（全程事务：扣体力 → 战斗 → 记进度 → 发奖励）
@@ -431,6 +432,15 @@ func PveFight(userID int64, chapterID, stageID int) (*PveFightResult, error) {
 				}
 				result.Reward = reward
 			}
+		}
+
+		// 7. Boss 掉蛋（每次胜利 30%，扫荡不掉）
+		if stageID == bossStageID {
+			egg, err := dropBossEgg(tx, userID, chapterID, zone)
+			if err != nil {
+				return err
+			}
+			result.DroppedEgg = egg
 		}
 		return nil
 	})
