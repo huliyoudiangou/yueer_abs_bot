@@ -49,7 +49,8 @@ const (
 	spEggHatchPrefix   = "sp:eggs:hatch:" // sp:eggs:hatch:{eggID}
 	spCbStarUpPrefix   = "sp:starup:"     // sp:starup:{servantID} / sp:starup:confirm:{id}:{sacID}
 	spCbFeed           = "sp:feed"        // sp:feed 灵侍养成面板
-	spCbFeedDoPrefix   = "sp:feed:do:"    // sp:feed:do:{servantID}
+	spCbFeedDoPrefix   = "sp:feed:do:"    // sp:feed:do:{servantID}:{page}（page 可省略，喂养后留在原页）
+	spCbFeedPagePrefix = "sp:feed:page:"  // sp:feed:page:{page} 养成分页（每页10只）
 )
 
 // 灵晶斋兑换档位（积分）
@@ -966,23 +967,45 @@ func spiritPanelEggs(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
-// spiritPanelFeed 灵侍养成：灵侍列表 + 喂养（消耗灵晶升级）
-func spiritPanelFeed(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
+// spiritPanelFeed 灵侍养成：灵侍分页列表 + 喂养（消耗灵晶升级）
+func spiritPanelFeed(userID int64, page int) (string, tgbotapi.InlineKeyboardMarkup) {
 	backKb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
 
 	lingjing, _ := GetUserWalletBalance(db, userID)
+	var total int64
+	if err := db.Model(&UserSpiritServant{}).Where("user_id = ?", userID).Count(&total).Error; err != nil {
+		log.Printf("[灵侍] 养成计数失败 user=%d err=%s", userID, formatTelegramSendError(err))
+	}
+	totalPages := int((total + spiritListPageSize - 1) / spiritListPageSize)
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	offset := (page - 1) * spiritListPageSize
+
 	var servants []UserSpiritServant
 	if err := db.Where("user_id = ?", userID).
-		Order("quality desc, star desc, level desc").Limit(10).Find(&servants).Error; err != nil {
-		log.Printf("[灵侍] 养成查询失败 user=%d err=%s", userID, formatTelegramSendError(err))
+		Order("quality desc, star desc, level desc, id asc").
+		Offset(offset).Limit(spiritListPageSize).Find(&servants).Error; err != nil {
+		log.Printf("[灵侍] 养成查询失败 user=%d page=%d err=%s", userID, page, formatTelegramSendError(err))
 	}
 	var b strings.Builder
-	b.WriteString("🌿 灵侍养成\n━━━━━━━━━━━━━━\n")
+	if totalPages > 1 {
+		b.WriteString(fmt.Sprintf("🌿 灵侍养成（第 %d/%d 页 · 共 %d 只）\n", page, totalPages, total))
+	} else {
+		b.WriteString("🌿 灵侍养成\n")
+	}
+	b.WriteString("━━━━━━━━━━━━━━\n")
 	b.WriteString(fmt.Sprintf("💎 灵晶：%d\n", lingjing))
 	b.WriteString("喂养升级：每级 +2% 一级基础属性，等级上限 = 星级 × 10（升星重置等级并提高上限）。\n")
-	if len(servants) == 0 {
+	if total == 0 {
 		b.WriteString("你尚未收服任何灵侍。前往「灵墟捕捉」收服吧！")
 		return b.String(), backKb
 	}
@@ -1004,8 +1027,18 @@ func spiritPanelFeed(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData(
 					fmt.Sprintf("喂养 %s（-%d 灵晶）", s.Name, cost),
-					fmt.Sprintf("%s%d", spCbFeedDoPrefix, s.ID))))
+					fmt.Sprintf("%s%d:%d", spCbFeedDoPrefix, s.ID, page))))
 		}
+	}
+	if totalPages > 1 {
+		var pageRow []tgbotapi.InlineKeyboardButton
+		if page > 1 {
+			pageRow = append(pageRow, tgbotapi.NewInlineKeyboardButtonData("◀ 上一页", fmt.Sprintf("%s%d", spCbFeedPagePrefix, page-1)))
+		}
+		if page < totalPages {
+			pageRow = append(pageRow, tgbotapi.NewInlineKeyboardButtonData("下一页 ▶", fmt.Sprintf("%s%d", spCbFeedPagePrefix, page+1)))
+		}
+		rows = append(rows, pageRow)
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
@@ -1466,12 +1499,25 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		}
 		text, kb = spiritPanelEggs(userID)
 	case cb.Data == spCbFeed:
-		text, kb = spiritPanelFeed(userID)
+		text, kb = spiritPanelFeed(userID, 1)
+	case strings.HasPrefix(cb.Data, spCbFeedPagePrefix):
+		page := 0
+		fmt.Sscanf(strings.TrimPrefix(cb.Data, spCbFeedPagePrefix), "%d", &page)
+		text, kb = spiritPanelFeed(userID, page)
 	case strings.HasPrefix(cb.Data, spCbFeedDoPrefix):
-		sid, err := strconv.ParseUint(strings.TrimPrefix(cb.Data, spCbFeedDoPrefix), 10, 64)
+		rest := strings.TrimPrefix(cb.Data, spCbFeedDoPrefix)
+		parts := strings.SplitN(rest, ":", 2)
+		page := 1
+		if len(parts) == 2 {
+			fmt.Sscanf(parts[1], "%d", &page)
+		}
+		if page < 1 {
+			page = 1
+		}
+		sid, err := strconv.ParseUint(parts[0], 10, 64)
 		if err != nil {
 			ackText = "无效的养成指令"
-			text, kb = spiritPanelFeed(userID)
+			text, kb = spiritPanelFeed(userID, 1)
 			break
 		}
 		var feedCost int
@@ -1487,7 +1533,7 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		} else {
 			ackText = fmt.Sprintf("🌿 喂养成功：等级 +1（-%d 灵晶），属性已提升", feedCost)
 		}
-		text, kb = spiritPanelFeed(userID)
+		text, kb = spiritPanelFeed(userID, page)
 	case strings.HasPrefix(cb.Data, spCbStarUpPrefix):
 		rest := strings.TrimPrefix(cb.Data, spCbStarUpPrefix)
 		fields := strings.SplitN(rest, ":", 2)
