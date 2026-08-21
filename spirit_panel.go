@@ -372,7 +372,7 @@ func spiritPanelHelp() (string, tgbotapi.InlineKeyboardMarkup) {
 		"· 推图：六大章节各 10 关 + Boss，神行符 10/日，三星可扫荡\n" +
 		"· 镜场：上架镜像供道友挑战，胜 30 / 负 10 灵晶，10 次/日，24h 内可复仇\n" +
 		"· 锻造：锻造炉产出兵甲/魂魄两类装备（目标品质50%/-1档30%/-2档20%），穿戴提升战力，熔炼返还 40%\n" +
-		"· 护宗神兽：建设中\n" +
+		"· 护宗神兽：宗门声望 2000 解锁，喂养耗 20-50 声望（随等级递增），三阶为全宗提供 +1%/+2%/+3.5% 世界Boss伤害\n" +
 		"━━━━━━━━━━━━━━\n" +
 		"所有灵侍操作仅在私聊进行，请道友移步私聊。"
 	kb := tgbotapi.NewInlineKeyboardMarkup(
@@ -800,6 +800,67 @@ func spiritPanelEquipPick(userID int64, equipmentID uint) (string, tgbotapi.Inli
 	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
+// spiritPanelBeast 护宗神兽面板
+func spiritPanelBeast(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
+	backKb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+
+	var member SectMember
+	if err := db.Where("user_id = ?", userID).First(&member).Error; err != nil {
+		return "🔮 护宗神兽\n━━━━━━━━━━━━━━\n你尚未加入宗门。\n加入宗门后，可与同门共养护宗神兽。", backKb
+	}
+	var sect Sect
+	if err := db.First(&sect, member.SectID).Error; err != nil {
+		return "🔮 护宗神兽\n━━━━━━━━━━━━━━\n宗门信息读取失败，请稍后再试。", backKb
+	}
+
+	var b strings.Builder
+	b.WriteString("🔮 护宗神兽\n")
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString(fmt.Sprintf("宗门：%s（声望 %d）\n", sect.Name, sect.Prestige))
+
+	if sect.Prestige < sectBeastUnlockPrestige {
+		b.WriteString(fmt.Sprintf("🔒 神兽尚在封印：需宗门声望 %d，当前 %d\n",
+			sectBeastUnlockPrestige, sect.Prestige))
+		b.WriteString("宗门声望达标后，成员即可喂养护宗神兽。")
+		return b.String(), backKb
+	}
+
+	var beast SectBeast
+	if err := db.Where("sect_id = ?", sect.ID).First(&beast).Error; err != nil {
+		if err != gorm.ErrRecordNotFound {
+			log.Printf("[灵侍] 神兽查询失败 user=%d sect=%d err=%s", userID, sect.ID, formatTelegramSendError(err))
+		}
+		beast = SectBeast{SectID: sect.ID}
+	}
+
+	cost := sectBeastFeedCost(beast.Level)
+	buffPct := sectBeastStageBuff(beast.Stage) * 100
+	b.WriteString(fmt.Sprintf("神兽：%s（等级 %d）\n", sectBeastStageNames[beast.Stage], beast.Level))
+	b.WriteString(fmt.Sprintf("阶段：%d/3｜全宗世界Boss伤害 buff：+%.1f%%\n", beast.Stage, buffPct))
+	if beast.Stage < 3 {
+		b.WriteString(fmt.Sprintf("下一阶段：等级 %d（当前 %d）\n", sectBeastNextStageLevel(beast.Stage), beast.Level))
+	}
+	b.WriteString(fmt.Sprintf("累计灌注：%d 声望\n", beast.TotalFed))
+	b.WriteString(fmt.Sprintf("喂养成本：%d 宗门声望\n", cost))
+
+	leaders := GetSectBeastLeaders(int64(sect.ID), 5)
+	if len(leaders) > 0 {
+		b.WriteString("喂养排行：\n")
+		for i, l := range leaders {
+			b.WriteString(fmt.Sprintf("  %d. %s 灌注 %d\n", i+1, spiritPvpUserName(l.UserID), l.Total))
+		}
+	}
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(
+			fmt.Sprintf("🐾 喂养（-%d 声望）", cost), "sp:beast:feed")))
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
 // ------------------------------------------
 // 对外入口
 // ------------------------------------------
@@ -852,7 +913,15 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 	case cb.Data == spCbPush:
 		text, kb = spiritPanelPush(db, userID)
 	case cb.Data == spCbBeast:
-		text, kb = spiritPanelComingSoon("🔮 护宗神兽", "宗门声望达到 2000 后可解锁护宗神兽喂养。")
+		text, kb = spiritPanelBeast(userID)
+	case cb.Data == "sp:beast:feed":
+		beast, cost, err := FeedSectBeast(userID)
+		if err != nil {
+			ackText = fmt.Sprintf("喂养失败：%v", err)
+		} else {
+			ackText = fmt.Sprintf("🐾 已喂养护宗神兽：等级 %d（-%d 声望）", beast.Level, cost)
+		}
+		text, kb = spiritPanelBeast(userID)
 	case cb.Data == spCbHelp:
 		text, kb = spiritPanelHelp()
 	case strings.HasPrefix(cb.Data, spCbExPrefix):

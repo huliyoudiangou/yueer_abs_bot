@@ -221,7 +221,7 @@ func startWorldBossEvent(bot *tgbotapi.BotAPI, chatID int64, now time.Time) {
 			"血量：`%.2f/%d`（基础 `%d` + 每名参与者 `%d`，最低 `%d`，最高 `%d`）\n\n"+
 			"发送 `参加Boss` 记录当前实际听书时长。\n"+
 			"最后 `%d` 分钟停止新道友加入。\n"+
-			"结算伤害 = 参与后 Boss 时段实际听书小时 × `%.0f` ×（1 + 修为加成 + 宗门科技）。\n"+
+			"结算伤害 = 参与后 Boss 时段实际听书小时 × `%.0f` ×（1 + 修为加成 + 宗门科技 + 护宗神兽）。\n"+
 			"修为加成：炼气初期 `+1%%`，每小段 `+1%%`，最高 `+25%%`。\n\n"+
 			"发送 `Boss状态` 查看进度，`Boss排行` 查看伤害榜。",
 		escapeMarkdown(event.Name),
@@ -1027,7 +1027,7 @@ func handleWorldBossStatus(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	replyText(bot, msg.Chat.ID, fmt.Sprintf(
-		"🌑 **世界Boss状态**\n\nBoss：**%s**\n状态：`%s`\n血量：`%.2f/%d`\n有效门槛：最终伤害 `>= %.2f`\n参与人数：`%d`\n\n血量按实际参与人数动态调整：基础 `%d`，每人 `%d`，最低 `%d`，最高 `%d`。\n伤害 = 参与后 Boss 时段实际听书小时 × `%.0f` ×（1 + 修为加成 + 宗门科技），不计算白天净修为，无单人伤害上限。\n修为加成：炼气初期 `+1%%`，每小段 `+1%%`，最高 `+25%%`。\n开放时间：每周六、周日 `21:00 - 22:00`，最后 `%d` 分钟停止新道友加入。\n发送 `参加Boss` 加入，`Boss排行` 查看榜单。",
+		"🌑 **世界Boss状态**\n\nBoss：**%s**\n状态：`%s`\n血量：`%.2f/%d`\n有效门槛：最终伤害 `>= %.2f`\n参与人数：`%d`\n\n血量按实际参与人数动态调整：基础 `%d`，每人 `%d`，最低 `%d`，最高 `%d`。\n伤害 = 参与后 Boss 时段实际听书小时 × `%.0f` ×（1 + 修为加成 + 宗门科技 + 护宗神兽），不计算白天净修为，无单人伤害上限。\n修为加成：炼气初期 `+1%%`，每小段 `+1%%`，最高 `+25%%`。\n开放时间：每周六、周日 `21:00 - 22:00`，最后 `%d` 分钟停止新道友加入。\n发送 `参加Boss` 加入，`Boss排行` 查看榜单。",
 		escapeMarkdown(event.Name),
 		statusText,
 		event.CurrentHP,
@@ -1172,7 +1172,7 @@ func renderWorldBossLiveBoard(event WorldBossEvent) string {
 
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf(
-		"🌑 **世界Boss实时战榜**\n\nBoss：**%s**\n状态：`%s`\n血量：`%.2f/%d`\n参与人数：`%d`\n规则：实听小时 × `%.0f` ×（1 + 修为加成 + 宗门科技），无单人伤害上限\n\n",
+		"🌑 **世界Boss实时战榜**\n\nBoss：**%s**\n状态：`%s`\n血量：`%.2f/%d`\n参与人数：`%d`\n规则：实听小时 × `%.0f` ×（1 + 修为加成 + 宗门科技 + 护宗神兽），无单人伤害上限\n\n",
 		escapeMarkdown(event.Name),
 		statusText,
 		event.CurrentHP,
@@ -1439,7 +1439,8 @@ func applyWorldBossDamageBonusesChecked(userID int64, baseDamage float64) (float
 	if err != nil {
 		return 0, 1, err
 	}
-	multiplier := 1 + cultivationBonus + sectBonus
+	beastBonus := getSectBeastDamageBonus(userID)
+	multiplier := 1 + cultivationBonus + sectBonus + beastBonus
 	damage := baseDamage * multiplier
 	if damage < 0 {
 		return 0, multiplier, nil

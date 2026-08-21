@@ -662,6 +662,19 @@ func (SpiritPvpBattle) TableName() string {
 	return "spirit_pvp_battles"
 }
 
+// 护宗神兽：每宗门一只，喂养提升阶段与全宗世界 Boss 伤害 buff
+type SectBeast struct {
+	gorm.Model
+	SectID   uint `gorm:"uniqueIndex;not null"`
+	Level    int  `gorm:"default:0"`
+	Stage    int  `gorm:"default:0"` // 0-3
+	TotalFed int  `gorm:"default:0"` // 累计灌注宗门声望
+}
+
+func (SectBeast) TableName() string {
+	return "sect_beasts"
+}
+
 // 任务表：AGENTS.md、README.md、手册、docs
 
 var db *gorm.DB
@@ -1041,6 +1054,7 @@ func InitDB() {
 		&SpiritStageProgress{},
 		&SpiritMirror{},
 		&SpiritPvpBattle{},
+		&SectBeast{},
 	); err != nil {
 		log.Fatalf("数据库迁移失败: %s", formatPlainError(err))
 	}
