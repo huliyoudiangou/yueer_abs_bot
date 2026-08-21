@@ -29,6 +29,16 @@ func CreateSpiritServant(userID int64, zone SpiritZone) (*UserSpiritServant, err
 			break
 		}
 	}
+	return createServantRecord(db, userID, chosenQuality, zone)
+}
+
+// CreateSpiritServantWithTx 在事务内创建一只灵侍（品阶已由调用方决定）
+func CreateSpiritServantWithTx(tx *gorm.DB, userID int64, quality string, zone SpiritZone) (*UserSpiritServant, error) {
+	return createServantRecord(tx, userID, quality, zone)
+}
+
+// createServantRecord 通用创建逻辑：随机名+属性+基础属性，落库
+func createServantRecord(tx *gorm.DB, userID int64, chosenQuality string, zone SpiritZone) (*UserSpiritServant, error) {
 
 	// 同名重抽（默认最多 30 次）
 	name := "灵侍"

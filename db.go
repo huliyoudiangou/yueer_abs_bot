@@ -474,18 +474,18 @@ func (PointTransaction) TableName() string {
 // 用户灵侍库存（个人战斗宠物）
 type UserSpiritServant struct {
 	gorm.Model
-	UserID     int64  `gorm:"index;not null"`
-	Name       string `gorm:"not null"` // 灵侍名（如"碧潭蛟崽"）
-	Quality    string `gorm:"not null"` // 品阶：凡/灵/玄/地/天/圣
-	Attribute  string `gorm:"not null"` // 属性：金/木/水/火/土/阴/阳
-	Level      int    `gorm:"default:1"` // 等级（1-120）
-	Star       int    `gorm:"default:1"` // 星级（1-9）
+	UserID    int64  `gorm:"index;not null"`
+	Name      string `gorm:"not null"`  // 灵侍名（如"碧潭蛟崽"）
+	Quality   string `gorm:"not null"`  // 品阶：凡/灵/玄/地/天/圣
+	Attribute string `gorm:"not null"`  // 属性：金/木/水/火/土/阴/阳
+	Level     int    `gorm:"default:1"` // 等级（1-120）
+	Star      int    `gorm:"default:1"` // 星级（1-9）
 	// 五维属性
-	HP         int `gorm:"default:0"` // 气血
-	ATK        int `gorm:"default:0"` // 攻击
-	DEF        int `gorm:"default:0"` // 防御
-	SPD        int `gorm:"default:0"` // 速度
-	MAG        int `gorm:"default:0"` // 灵识
+	HP         int  `gorm:"default:0"`     // 气血
+	ATK        int  `gorm:"default:0"`     // 攻击
+	DEF        int  `gorm:"default:0"`     // 防御
+	SPD        int  `gorm:"default:0"`     // 速度
+	MAG        int  `gorm:"default:0"`     // 灵识
 	IsLocked   bool `gorm:"default:false"` // 锁定防误触
 	IsDeployed bool `gorm:"default:false"` // 是否出战编制
 }
@@ -497,11 +497,11 @@ func (UserSpiritServant) TableName() string {
 // 灵晶余额（用户灵晶账户）
 type UserLingjingBalance struct {
 	gorm.Model
-	UserID     int64 `gorm:"uniqueIndex;not null"`
-	Lingjing   int   `gorm:"default:0"` // 灵晶
-	Lingchen   int   `gorm:"default:0"` // 灵尘（1灵晶 = 100灵尘）
-	TotalEarned int  `gorm:"default:0"` // 累计获取灵晶
-	TotalSpent  int  `gorm:"default:0"` // 累计消耗灵晶
+	UserID      int64 `gorm:"uniqueIndex;not null"`
+	Lingjing    int   `gorm:"default:0"` // 灵晶
+	Lingchen    int   `gorm:"default:0"` // 灵尘（1灵晶 = 100灵尘）
+	TotalEarned int   `gorm:"default:0"` // 累计获取灵晶
+	TotalSpent  int   `gorm:"default:0"` // 累计消耗灵晶
 }
 
 func (UserLingjingBalance) TableName() string {
@@ -511,14 +511,14 @@ func (UserLingjingBalance) TableName() string {
 // 灵晶流水（不可回退）
 type LingjingTransaction struct {
 	gorm.Model
-	UserID   int64  `gorm:"index;not null"`
-	Delta    int    `gorm:"default:0"` // 灵晶变化量（正=得，负=失）
-	BalanceBefore int `gorm:"default:0"`
-	BalanceAfter  int `gorm:"default:0"`
-	Type     string `gorm:"index;not null"` // transaction type: exchange_to_lingjing/lingjing_battle_reward/lingjing_feed等
-	Description string
-	RefType  string `gorm:"index"` // 引用类型：灵侍升星/Boss掉落/秘境探索等
-	RefID    string `gorm:"index"` // 关联ID
+	UserID        int64  `gorm:"index;not null"`
+	Delta         int    `gorm:"default:0"` // 灵晶变化量（正=得，负=失）
+	BalanceBefore int    `gorm:"default:0"`
+	BalanceAfter  int    `gorm:"default:0"`
+	Type          string `gorm:"index;not null"` // transaction type: exchange_to_lingjing/lingjing_battle_reward/lingjing_feed等
+	Description   string
+	RefType       string `gorm:"index"` // 引用类型：灵侍升星/Boss掉落/秘境探索等
+	RefID         string `gorm:"index"` // 关联ID
 }
 
 func (LingjingTransaction) TableName() string {
@@ -528,14 +528,14 @@ func (LingjingTransaction) TableName() string {
 // 灵侍升星吸收记录（祭品消耗）
 type ServantStarUpLog struct {
 	gorm.Model
-	UserID       int64  `gorm:"index;not null"`
-	ServantID    uint   `gorm:"index;not null"` // 被升星的灵侍ID
-	NewStar      int    `gorm:"not null"`       // 升星后的星级
-	SacrificeQuality string `gorm:"not null"`      // 祭品品阶（同阶/同属性/同名）
-	SacrificeAttribute string `gorm:"not null"`    // 祭品属性
-	SacrificeID  uint   `gorm:"index"`         // 祭品灵侍ID（可为空，如灵魄袋）
-	SpiritCost   int    `gorm:"default:0"`     // 消耗灵晶（灵晶手续费）
-	Remark       string // 备注（如"升星成功"）
+	UserID             int64  `gorm:"index;not null"`
+	ServantID          uint   `gorm:"index;not null"` // 被升星的灵侍ID
+	NewStar            int    `gorm:"not null"`       // 升星后的星级
+	SacrificeQuality   string `gorm:"not null"`       // 祭品品阶（同阶/同属性/同名）
+	SacrificeAttribute string `gorm:"not null"`       // 祭品属性
+	SacrificeID        uint   `gorm:"index"`          // 祭品灵侍ID（可为空，如灵魄袋）
+	SpiritCost         int    `gorm:"default:0"`      // 消耗灵晶（灵晶手续费）
+	Remark             string // 备注（如"升星成功"）
 }
 
 func (ServantStarUpLog) TableName() string {
@@ -545,16 +545,16 @@ func (ServantStarUpLog) TableName() string {
 // 灵侍装备（Phase 1仅2槽：兵甲/魂魄）
 type ServantEquipment struct {
 	gorm.Model
-	ServantID   uint   `gorm:"index;not null"`
-	SlotType    string `gorm:"not null"` // 兵甲/魂魄
-	Quality     string `gorm:"not null"` // 装备品阶：凡/灵/玄/地/天/圣
-	Attribute   string `gorm:"not null"` // 装备属性：金/木/水/火/土/阴/阳
-	HP          int `gorm:"default:0"`
-	ATK         int `gorm:"default:0"`
-	DEF         int `gorm:"default:0"`
-	SPD         int `gorm:"default:0"`
-	MAG         int `gorm:"default:0"`
-	IsLocked    bool `gorm:"default:false"` // 灵侍装备刻名锁定
+	ServantID uint   `gorm:"index;not null"`
+	SlotType  string `gorm:"not null"` // 兵甲/魂魄
+	Quality   string `gorm:"not null"` // 装备品阶：凡/灵/玄/地/天/圣
+	Attribute string `gorm:"not null"` // 装备属性：金/木/水/火/土/阴/阳
+	HP        int    `gorm:"default:0"`
+	ATK       int    `gorm:"default:0"`
+	DEF       int    `gorm:"default:0"`
+	SPD       int    `gorm:"default:0"`
+	MAG       int    `gorm:"default:0"`
+	IsLocked  bool   `gorm:"default:false"` // 灵侍装备刻名锁定
 }
 
 func (ServantEquipment) TableName() string {
@@ -566,8 +566,8 @@ type DailyLingjingQuota struct {
 	gorm.Model
 	UserID    int64  `gorm:"index;not null"`
 	DayKey    string `gorm:"index;not null"` // YYYYMMDD
-	Spent     int    `gorm:"default:0"`     // 今日已消耗积分
-	Exchanged int    `gorm:"default:0"`     // 今日已兑换灵晶
+	Spent     int    `gorm:"default:0"`      // 今日已消耗积分
+	Exchanged int    `gorm:"default:0"`      // 今日已兑换灵晶
 }
 
 func (DailyLingjingQuota) TableName() string {
@@ -580,17 +580,30 @@ type SectBeastContribution struct {
 	UserID    int64  `gorm:"index;not null"`
 	SectID    uint   `gorm:"index;not null"`
 	Buff      int    `gorm:"default:0"` // 灌注的声望数量（个人/宗门）
-	PointType string `gorm:"not null"` // 来源类型：个人贡献/宗门贡献
+	PointType string `gorm:"not null"`  // 来源类型：个人贡献/宗门贡献
 }
 
 func (SectBeastContribution) TableName() string {
 	return "sect_beast_contributions"
 }
 
+// 灵墟保底记录：每个用户在每个区域的天品/圣品保底计数器
+type SpiritZonePity struct {
+	gorm.Model
+	UserID     int64  `gorm:"uniqueIndex:idx_zone_pity;not null"`
+	ZoneKey    string `gorm:"uniqueIndex:idx_zone_pity;not null"`
+	TianPity   int    `gorm:"default:0"` // 天品保底计数（满30触发）
+	ShengPity  int    `gorm:"default:0"` // 圣品保底计数（按区域阈值）
+	TotalPulls int    `gorm:"default:0"` // 总抽数（统计用）
+}
+
+func (SpiritZonePity) TableName() string {
+	return "spirit_zone_pities"
+}
+
 // 任务表：AGENTS.md、README.md、手册、docs
 
 var db *gorm.DB
-
 
 type Inventory struct {
 	gorm.Model
@@ -962,6 +975,7 @@ func InitDB() {
 		&ServantEquipment{},
 		&DailyLingjingQuota{},
 		&SectBeastContribution{},
+		&SpiritZonePity{},
 	); err != nil {
 		log.Fatalf("数据库迁移失败: %s", formatPlainError(err))
 	}

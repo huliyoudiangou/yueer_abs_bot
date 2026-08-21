@@ -26,16 +26,17 @@ import (
 
 // sp: 回调常量
 const (
-	spCbHome      = "sp:home"
-	spCbList      = "sp:list"
-	spCbBag       = "sp:bag"
-	spCbCatch     = "sp:catch"
-	spCbTeam      = "sp:team"
-	spCbPush      = "sp:push"
-	spCbBeast     = "sp:beast"
-	spCbHelp      = "sp:help"
-	spCbExPrefix  = "sp:ex:" // sp:ex:100 / sp:ex:300 / sp:ex:500 / sp:ex:1000
-	spCbZonePreix = "sp:zone:"
+	spCbHome       = "sp:home"
+	spCbList       = "sp:list"
+	spCbBag        = "sp:bag"
+	spCbCatch      = "sp:catch"
+	spCbTeam       = "sp:team"
+	spCbPush       = "sp:push"
+	spCbBeast      = "sp:beast"
+	spCbHelp       = "sp:help"
+	spCbExPrefix   = "sp:ex:"   // sp:ex:100 / sp:ex:300 / sp:ex:500 / sp:ex:1000
+	spCbZonePrefix = "sp:zone:" // sp:zone:qingzhu
+	spPullPrefix   = "sp:pull:" // sp:pull:qingzhu:fusu
 )
 
 // 灵晶斋兑换档位（积分）
@@ -165,14 +166,164 @@ func spiritPanelComingSoon(title, body string) (string, tgbotapi.InlineKeyboardM
 }
 
 func spiritPanelCatch(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
-	var b strings.Builder
-	b.WriteString("🏹 灵墟\n━━━━━━━━━━━━━━\n六大灵墟区域随境界解锁：\n")
-	for _, z := range SpiritZones {
-		b.WriteString(fmt.Sprintf("· %s（境界门槛 %d 阶）\n", z.Name, z.Tier))
+	lingjing, err := GetUserWalletBalance(db, userID)
+	if err != nil {
+		lingjing = 0
 	}
-	b.WriteString("\n🏗 捕捉玩法即将开放，先来灵晶斋备好灵晶吧！")
+	cul := GetOrCreateCultivation(userID)
+	majorRealm := 0
+	if cul != nil {
+		majorRealm = cul.MajorRealm
+	}
+
+	var b strings.Builder
+	b.WriteString("🏹 灵墟\n")
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString(fmt.Sprintf("💎 灵晶：%d\n", lingjing))
+	b.WriteString("选择灵墟区域进行捕捉：\n\n")
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, z := range SpiritZones {
+		unlocked := majorRealm >= z.Tier
+		pity := GetUserZonePity(userID, z.Key)
+		status := "✅"
+		label := z.Name
+		if !unlocked {
+			status = "🔒"
+			label = fmt.Sprintf("%s（需境界%d阶）", z.Name, z.Tier)
+		}
+		pityStr := ""
+		if pity != nil && pity.TianPity > 0 {
+			pityStr = fmt.Sprintf(" 天保%d/%d", pity.TianPity, TianPityThreshold)
+		}
+		if pity != nil && pity.ShengPity > 0 {
+			if th, ok := ShengPityThreshold[z.Key]; ok {
+				pityStr += fmt.Sprintf(" 圣保%d/%d", pity.ShengPity, th)
+			}
+		}
+		rowText := fmt.Sprintf("%s %s%s", status, label, pityStr)
+		cbData := spCbZonePrefix + z.Key
+		if !unlocked {
+			cbData = "sp:locked"
+		}
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(rowText, cbData),
+		))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// spiritPanelZoneDetail 区域详情：显示灵索选择 + 保底进度
+func spiritPanelZoneDetail(userID int64, zoneKey string) (string, tgbotapi.InlineKeyboardMarkup) {
+	var zone *SpiritZone
+	for i := range SpiritZones {
+		if SpiritZones[i].Key == zoneKey {
+			zone = &SpiritZones[i]
+			break
+		}
+	}
+	if zone == nil {
+		return "未知区域", tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 灵墟", spCbCatch)))
+	}
+
+	lingjing, err := GetUserWalletBalance(db, userID)
+	if err != nil {
+		lingjing = 0
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("🏹 %s\n", zone.Name))
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString(fmt.Sprintf("💎 灵晶：%d\n", lingjing))
+	b.WriteString("品阶概率（万分率）：\n")
+	for i, q := range SpiritQualityNames {
+		if i < len(zone.SpawnRates) && zone.SpawnRates[i] > 0 {
+			b.WriteString(fmt.Sprintf("  %s：%.2f%%\n", q, float64(zone.SpawnRates[i])/100.0))
+		}
+	}
+	b.WriteString("━━━━━━━━━━━━━━\n")
+
+	// 保底进度
+	pity := GetUserZonePity(userID, zone.Key)
+	if pity != nil {
+		b.WriteString(fmt.Sprintf("天品保底：%d/%d抽\n", pity.TianPity, TianPityThreshold))
+		if th, ok := ShengPityThreshold[zone.Key]; ok {
+			b.WriteString(fmt.Sprintf("圣品保底：%d/%d抽\n", pity.ShengPity, th))
+		}
+	} else {
+		b.WriteString(fmt.Sprintf("天品保底：0/%d抽\n", TianPityThreshold))
+	}
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString("选择灵索进行捕捉：\n")
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, rope := range SpiritRopes {
+		afford := lingjing >= rope.Cost
+		label := fmt.Sprintf("%s（%d灵晶）", rope.Name, rope.Cost)
+		if rope.Bonus > 0 {
+			label += fmt.Sprintf(" +%.0f%%", rope.Bonus*100)
+		}
+		cb := spPullPrefix + zone.Key + ":" + rope.Key
+		if !afford {
+			label = "❌ " + label
+			cb = "sp:nojing"
+		}
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(label, cb),
+		))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 灵墟", spCbCatch)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// spiritPanelCatchResult 捕捉结果面板
+func spiritPanelCatchResult(userID int64, result *CatchResult, zoneKey string) (string, tgbotapi.InlineKeyboardMarkup) {
+	var zone *SpiritZone
+	for i := range SpiritZones {
+		if SpiritZones[i].Key == zoneKey {
+			zone = &SpiritZones[i]
+			break
+		}
+	}
+	zoneName := zoneKey
+	if zone != nil {
+		zoneName = zone.Name
+	}
+
+	var b strings.Builder
+	b.WriteString("🏹 捕捉结果\n")
+	b.WriteString("━━━━━━━━━━━━━━\n")
+
+	if result.UsedShengP {
+		b.WriteString("✨ 圣品保底触发！\n")
+	}
+	if result.UsedTianP {
+		b.WriteString("🌟 天品保底触发！\n")
+	}
+
+	if result.Success && result.Servant != nil {
+		s := result.Servant
+		b.WriteString(fmt.Sprintf("🎉 捕捉成功！\n"))
+		b.WriteString(fmt.Sprintf("━━━━━━━━━━━━━━\n"))
+		b.WriteString(fmt.Sprintf("名称：%s\n", s.Name))
+		b.WriteString(fmt.Sprintf("品阶：%s品\n", s.Quality))
+		b.WriteString(fmt.Sprintf("属性：%s\n", s.Attribute))
+		b.WriteString(fmt.Sprintf("战力：%d\n", GetBattlePower(s)))
+		b.WriteString(fmt.Sprintf("区域：%s\n", zoneName))
+	} else if result.Escape {
+		b.WriteString(fmt.Sprintf("💨 遇到%s品灵侍，但逃脱了！\n", result.EncounterQ))
+		b.WriteString("灵晶已消耗，保底计数已累加。\n")
+	} else {
+		b.WriteString("捕捉异常，请稍后重试。\n")
+	}
+
 	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🪷 灵晶斋", spCbBag)),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🏹 再次捕捉", spCbZonePrefix+zoneKey),
+			tgbotapi.NewInlineKeyboardButtonData("🏹 灵墟", spCbCatch),
+		),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)),
 	)
 	return b.String(), kb
@@ -288,6 +439,39 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 			ackText = fmt.Sprintf("兑换成功：%d 积分 → %d 灵晶", points, lingjing)
 		}
 		text, kb = spiritPanelBag(db, userID)
+	case strings.HasPrefix(cb.Data, spPullPrefix):
+		// 捕捉：sp:pull:{zone}:{rope}
+		rest := strings.TrimPrefix(cb.Data, spPullPrefix)
+		parts := strings.SplitN(rest, ":", 2)
+		if len(parts) != 2 {
+			ackText = "无效的捕捉指令"
+			text, kb = spiritPanelCatch(db, userID)
+			break
+		}
+		zoneKey := parts[0]
+		ropeKey := parts[1]
+		result, err := CatchSpiritServant(db, userID, zoneKey, ropeKey)
+		if err != nil {
+			log.Printf("[灵侍] 捕捉失败 user=%d zone=%s rope=%s err=%s", userID, zoneKey, ropeKey, formatTelegramSendError(err))
+			ackText = fmt.Sprintf("%v", err)
+			text, kb = spiritPanelZoneDetail(userID, zoneKey)
+			break
+		}
+		if result.Success && result.Servant != nil {
+			ackText = fmt.Sprintf("🎉 捕到 %s品·%s！", result.Servant.Quality, result.Servant.Name)
+		} else if result.Escape {
+			ackText = fmt.Sprintf("💨 %s品灵侍逃跑了！", result.EncounterQ)
+		}
+		text, kb = spiritPanelCatchResult(userID, result, zoneKey)
+	case cb.Data == "sp:locked":
+		ackText = "该区域尚未解锁，请提升修为境界"
+		text, kb = spiritPanelCatch(db, userID)
+	case cb.Data == "sp:nojing":
+		ackText = "灵晶不足，请前往灵晶斋兑换"
+		text, kb = spiritPanelBag(db, userID)
+	case strings.HasPrefix(cb.Data, spCbZonePrefix):
+		zoneKey := strings.TrimPrefix(cb.Data, spCbZonePrefix)
+		text, kb = spiritPanelZoneDetail(userID, zoneKey)
 	default:
 		ackText = "未知操作"
 		text, kb = spiritPanelHome(db, userID)

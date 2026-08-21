@@ -148,6 +148,36 @@ var LingjingCaptureRequirement = map[string]int{
 	"凡": 0, "灵": 1, "玄": 1, "地": 3, "天": 4, "圣": 5,
 }
 
+// 捕捉成功率（按品阶）
+var CaptureSuccessRate = map[string]float64{
+	"凡": 0.90, "灵": 0.75, "玄": 0.55, "地": 0.40, "天": 0.25, "圣": 0.12,
+}
+
+// 缚灵索配置
+type SpiritRope struct {
+	Key   string
+	Name  string
+	Cost  int     // 灵晶消耗
+	Bonus float64 // 捕捉率加成
+}
+
+var SpiritRopes = []SpiritRope{
+	{Key: "fusu", Name: "缚灵索", Cost: 30, Bonus: 0.0},
+	{Key: "xuanling", Name: "玄灵索", Cost: 120, Bonus: 0.15},
+}
+
+// 天品保底阈值
+const TianPityThreshold = 30
+
+// 圣品保底阈值（仅灵墟区域4-5生效）
+var ShengPityThreshold = map[string]int{
+	"guixu":  300,
+	"buzhou": 150,
+}
+
+// 每日免费探索次数（区域通用）
+const DailyFreeExplore = 3
+
 // PVP 每日奖励场次
 func LingjingBattleDailyCap() int { return 10 }
 
