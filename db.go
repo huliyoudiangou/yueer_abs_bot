@@ -966,6 +966,10 @@ func InitDB() {
 		log.Fatalf("数据库连接失败: %s", formatPlainError(err))
 	}
 
+	// 灵侍系统（spirit_*.go / spirit_panel.go）直接调用小写全局 db，
+	// 必须与 DB 同步初始化，否则 db 恒为 nil，面板首次查询即空指针 panic
+	db = DB
+
 	sqlDB, err := DB.DB()
 	if err == nil {
 		// SQLite 同一时间只有一个 writer。

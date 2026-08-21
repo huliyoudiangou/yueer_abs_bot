@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -458,7 +459,7 @@ func botWorker(bot *tgbotapi.BotAPI, jobs <-chan telegramMessageJob) {
 			startedAt := time.Now()
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("⚠️ botWorker 处理消息时发生 panic，已恢复: panic=%s", formatPlainValue(r))
+					log.Printf("⚠️ botWorker 处理消息时发生 panic，已恢复: panic=%s\nstack:\n%s", formatPlainValue(r), string(debug.Stack()))
 				}
 			}()
 
