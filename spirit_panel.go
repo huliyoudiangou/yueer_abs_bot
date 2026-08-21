@@ -47,6 +47,8 @@ const (
 	spCbEggs          = "sp:eggs"        // sp:eggs
 	spEggHatchPrefix  = "sp:eggs:hatch:" // sp:eggs:hatch:{eggID}
 	spCbStarUpPrefix  = "sp:starup:"     // sp:starup:{servantID} / sp:starup:confirm:{id}:{sacID}
+	spCbFeed          = "sp:feed"        // sp:feed 灵侍养成面板
+	spCbFeedDoPrefix  = "sp:feed:do:"    // sp:feed:do:{servantID}
 )
 
 // 灵晶斋兑换档位（积分）
@@ -96,6 +98,9 @@ func spiritPanelHome(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboard
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("ℹ️ 玩法说明", spCbHelp),
 			tgbotapi.NewInlineKeyboardButtonData("🥚 灵侍蛋", spCbEggs),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🌿 灵侍养成", spCbFeed),
 		),
 	)
 	return text, kb
@@ -392,6 +397,7 @@ func spiritPanelHelp() (string, tgbotapi.InlineKeyboardMarkup) {
 		"· 护宗神兽：宗门声望 2000 解锁，喂养耗 20-50 声望（随等级递增），三阶为全宗提供 +1%/+2%/+3.5% 世界Boss伤害\n" +
 		"· 灵侍蛋：击败章节 Boss 每次 30% 概率掉蛋（地阶及以下），在灵侍蛋面板孵化为对应品阶灵侍\n" +
 		"· 道具：灵魄随推图胜利掉落（普通关 25%/章节 Boss 50%）；万能真身碎片随第 5/6 章 Boss 掉落（10%）；扫荡不掉道具\n" +
+		"· 养成：养成面板喂养灵侍升级（每级耗灵晶 凡30/灵50/玄80/地120/天200/圣300），每级 +2% 一级基础属性，等级上限 = 星级 × 10\n" +
 		"━━━━━━━━━━━━━━\n" +
 		"所有灵侍操作仅在私聊进行，请道友移步私聊。"
 	kb := tgbotapi.NewInlineKeyboardMarkup(
@@ -915,6 +921,52 @@ func spiritPanelEggs(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
+// spiritPanelFeed 灵侍养成：灵侍列表 + 喂养（消耗灵晶升级）
+func spiritPanelFeed(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
+	backKb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+
+	lingjing, _ := GetUserWalletBalance(db, userID)
+	var servants []UserSpiritServant
+	if err := db.Where("user_id = ?", userID).
+		Order("quality desc, star desc, level desc").Limit(10).Find(&servants).Error; err != nil {
+		log.Printf("[灵侍] 养成查询失败 user=%d err=%s", userID, formatTelegramSendError(err))
+	}
+	var b strings.Builder
+	b.WriteString("🌿 灵侍养成\n━━━━━━━━━━━━━━\n")
+	b.WriteString(fmt.Sprintf("💎 灵晶：%d\n", lingjing))
+	b.WriteString("喂养升级：每级 +2% 一级基础属性，等级上限 = 星级 × 10（升星重置等级并提高上限）。\n")
+	if len(servants) == 0 {
+		b.WriteString("你尚未收服任何灵侍。前往「灵墟捕捉」收服吧！")
+		return b.String(), backKb
+	}
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i := range servants {
+		s := &servants[i]
+		maxLv := MaxLevelByStar(s.Star)
+		cost := FeedCostByQuality[s.Quality]
+		if cost <= 0 {
+			cost = FeedCostByQuality["凡"]
+		}
+		capMark := ""
+		if s.Level >= maxLv {
+			capMark = "（满级）"
+		}
+		b.WriteString(fmt.Sprintf("· %s %s品·%s ⭐%d Lv.%d/%d 战力%d%s\n",
+			s.Name, s.Quality, s.Attribute, s.Star, s.Level, maxLv, GetBattlePower(s), capMark))
+		if s.Level < maxLv {
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(
+					fmt.Sprintf("喂养 %s（-%d 灵晶）", s.Name, cost),
+					fmt.Sprintf("%s%d", spCbFeedDoPrefix, s.ID))))
+		}
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
 // spiritPanelStarUp 升星界面：目标 + 祭品需求 + 候选祭品列表
 func spiritPanelStarUp(userID int64, servantID uint) (string, tgbotapi.InlineKeyboardMarkup) {
 	backKb := tgbotapi.NewInlineKeyboardMarkup(
@@ -1343,6 +1395,29 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 			ackText = fmt.Sprintf("🐣 孵化成功：%s %s品灵侍（Lv.%d）", ser.Name, ser.Quality, ser.Level)
 		}
 		text, kb = spiritPanelEggs(userID)
+	case cb.Data == spCbFeed:
+		text, kb = spiritPanelFeed(userID)
+	case strings.HasPrefix(cb.Data, spCbFeedDoPrefix):
+		sid, err := strconv.ParseUint(strings.TrimPrefix(cb.Data, spCbFeedDoPrefix), 10, 64)
+		if err != nil {
+			ackText = "无效的养成指令"
+			text, kb = spiritPanelFeed(userID)
+			break
+		}
+		var feedCost int
+		err = db.Transaction(func(tx *gorm.DB) error {
+			c, e := FeedSpirit(tx, userID, uint(sid), 1)
+			if e == nil {
+				feedCost = c
+			}
+			return e
+		})
+		if err != nil {
+			ackText = fmt.Sprintf("喂养失败：%v", err)
+		} else {
+			ackText = fmt.Sprintf("🌿 喂养成功：等级 +1（-%d 灵晶），属性已提升", feedCost)
+		}
+		text, kb = spiritPanelFeed(userID)
 	case strings.HasPrefix(cb.Data, spCbStarUpPrefix):
 		rest := strings.TrimPrefix(cb.Data, spCbStarUpPrefix)
 		fields := strings.SplitN(rest, ":", 2)

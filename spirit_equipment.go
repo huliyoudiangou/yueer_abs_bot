@@ -235,6 +235,12 @@ func enhanceServantStats(userID int64, team []UserSpiritServant) []UserSpiritSer
 	out := make([]UserSpiritServant, 0, len(team))
 	for i := range team {
 		s := team[i]
+		// 先应用等级成长（数据库存一级基础值），再叠加装备加成
+		s.HP = ScaledHP(&s)
+		s.ATK = ScaledATK(&s)
+		s.DEF = ScaledDEF(&s)
+		s.SPD = ScaledSPD(&s)
+		s.MAG = ScaledMAG(&s)
 		hp, atk, def, spd, mag := getServantEquipBonus(userID, s.ID)
 		s.HP += hp
 		s.ATK += atk

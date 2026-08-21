@@ -87,32 +87,70 @@ func applyBaseStat(quality string, base int) int {
 	return base * int(QualityGrowth[quality])
 }
 
+// levelGrowthPerLevel 等级成长：每级 +2% 一级基础值（线性累计，不叠加）
+// 数据库存储的 HP/ATK/DEF/SPD/MAG 恒为一级基础值，战斗/战力走缩放函数
+const levelGrowthPerLevel = 0.02
+
+// LevelGrowthMult 指定等级的属性倍率（Lv.1 = 1.0，Lv.11 = 1.20，Lv.91 = 2.80）
+func LevelGrowthMult(level int) float64 {
+	if level < 1 {
+		level = 1
+	}
+	return 1 + levelGrowthPerLevel*float64(level-1)
+}
+
+// 等级缩放属性（战力/战斗引擎共享口径）
+func ScaledHP(s *UserSpiritServant) int  { return int(float64(s.HP) * LevelGrowthMult(s.Level)) }
+func ScaledATK(s *UserSpiritServant) int { return int(float64(s.ATK) * LevelGrowthMult(s.Level)) }
+func ScaledDEF(s *UserSpiritServant) int { return int(float64(s.DEF) * LevelGrowthMult(s.Level)) }
+func ScaledSPD(s *UserSpiritServant) int { return int(float64(s.SPD) * LevelGrowthMult(s.Level)) }
+func ScaledMAG(s *UserSpiritServant) int { return int(float64(s.MAG) * LevelGrowthMult(s.Level)) }
+
 func GetBattlePower(s *UserSpiritServant) int {
-	return int(float64(s.HP+s.ATK+s.DEF+s.SPD+s.MAG) * QualityGrowth[s.Quality])
+	total := ScaledHP(s) + ScaledATK(s) + ScaledDEF(s) + ScaledSPD(s) + ScaledMAG(s)
+	return int(float64(total) * QualityGrowth[s.Quality])
 }
 
 func GetLevelUpRequirement(s *UserSpiritServant) int {
 	return 10 + s.Level*15
 }
 
-// FeedSpirit 喂养升级骨架：按次数提升等级，受等级上限约束
-func FeedSpirit(tx *gorm.DB, userID int64, servantID uint, amount int) error {
+// FeedCostByQuality 每级喂养成本（灵晶）
+var FeedCostByQuality = map[string]int{
+	"凡": 30, "灵": 50, "玄": 80, "地": 120, "天": 200, "圣": 300,
+}
+
+// FeedSpirit 喂养升级：消耗灵晶（成本×次数，超出等级上限的部分不计费）→ 等级提升
+// 返回实际消耗的灵晶
+func FeedSpirit(tx *gorm.DB, userID int64, servantID uint, amount int) (int, error) {
+	if amount <= 0 {
+		return 0, fmt.Errorf("喂养次数必须大于0")
+	}
 	var s UserSpiritServant
 	if err := tx.Where("id = ? AND user_id = ?", servantID, userID).First(&s).Error; err != nil {
-		return err
+		return 0, fmt.Errorf("灵侍不存在")
 	}
 	maxLevel := MaxLevelByStar(s.Star)
 	if s.Level >= maxLevel {
-		return fmt.Errorf("已达当前星级等级上限：%d级", maxLevel)
+		return 0, fmt.Errorf("已达当前星级等级上限：%d级（升星可提高上限）", maxLevel)
 	}
-	if amount <= 0 {
-		return fmt.Errorf("喂养次数必须大于0")
+	if available := maxLevel - s.Level; amount > available {
+		amount = available
+	}
+	costPer := FeedCostByQuality[s.Quality]
+	if costPer <= 0 {
+		costPer = FeedCostByQuality["凡"]
+	}
+	cost := costPer * amount
+	if err := SpendLingjing(tx, userID, cost, "spirit_feed",
+		fmt.Sprintf("喂养%s×%d", s.Name, amount)); err != nil {
+		return 0, err
 	}
 	s.Level += amount
-	if s.Level > maxLevel {
-		s.Level = maxLevel
+	if err := tx.Save(&s).Error; err != nil {
+		return 0, err
 	}
-	return tx.Save(&s).Error
+	return cost, nil
 }
 
 // StarUpgrade 升星（三段制祭品 + 道具替代）：
