@@ -545,16 +545,18 @@ func (ServantStarUpLog) TableName() string {
 // 灵侍装备（Phase 1仅2槽：兵甲/魂魄）
 type ServantEquipment struct {
 	gorm.Model
-	ServantID uint   `gorm:"index;not null"`
-	SlotType  string `gorm:"not null"` // 兵甲/魂魄
-	Quality   string `gorm:"not null"` // 装备品阶：凡/灵/玄/地/天/圣
-	Attribute string `gorm:"not null"` // 装备属性：金/木/水/火/土/阴/阳
+	ServantID uint   `gorm:"index;not null;default:0"` // 0 = 仓库（未穿戴）
+	UserID    int64  `gorm:"index;not null;default:0"` // bound_to_uid：装备绑定拥有者
+	SlotType  string `gorm:"not null"`                 // 兵甲/魂魄
+	Quality   string `gorm:"not null"`                 // 装备品阶：凡/灵/玄/地/天/圣
+	Attribute string `gorm:"not null"`                 // 装备属性：金/木/水/火/土/阴/阳
 	HP        int    `gorm:"default:0"`
 	ATK       int    `gorm:"default:0"`
 	DEF       int    `gorm:"default:0"`
 	SPD       int    `gorm:"default:0"`
 	MAG       int    `gorm:"default:0"`
-	IsLocked  bool   `gorm:"default:false"` // 灵侍装备刻名锁定
+	Name      string `gorm:"default:''"`    // 装备名（品阶+属性+槽位）
+	IsLocked  bool   `gorm:"default:false"` // 灵侍装备刻名锁定（锁定后不可熔炼）
 }
 
 func (ServantEquipment) TableName() string {

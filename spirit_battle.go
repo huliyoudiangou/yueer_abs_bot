@@ -360,6 +360,7 @@ func PveFight(userID int64, chapterID, stageID int) (*PveFightResult, error) {
 		if len(team) == 0 {
 			return fmt.Errorf("尚未编排出战灵侍，请先在出战队列编队")
 		}
+		team = enhanceServantStats(userID, team) // 并入装备加成
 
 		// 4. 神行符消耗
 		stamina, err := getOrCreateStaminaTx(tx, userID)

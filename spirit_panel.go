@@ -34,6 +34,7 @@ const (
 	spCbTeam          = "sp:team"
 	spCbPush          = "sp:push"
 	spCbMirror        = "sp:mirror"
+	spCbForge         = "sp:forge"
 	spCbBeast         = "sp:beast"
 	spCbHelp          = "sp:help"
 	spCbExPrefix      = "sp:ex:"      // sp:ex:100 / sp:ex:300 / sp:ex:500 / sp:ex:1000
@@ -87,6 +88,9 @@ func spiritPanelHome(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboard
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🔮 护宗神兽", spCbBeast),
+			tgbotapi.NewInlineKeyboardButtonData("🔥 锻造炉", spCbForge),
+		),
+		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("ℹ️ 玩法说明", spCbHelp),
 		),
 	)
@@ -367,6 +371,7 @@ func spiritPanelHelp() (string, tgbotapi.InlineKeyboardMarkup) {
 		"· 升星：吞噬同阶灵侍提升星级，战力大涨\n" +
 		"· 推图：六大章节各 10 关 + Boss，神行符 10/日，三星可扫荡\n" +
 		"· 镜场：上架镜像供道友挑战，胜 30 / 负 10 灵晶，10 次/日，24h 内可复仇\n" +
+		"· 锻造：锻造炉产出兵甲/魂魄两类装备（目标品质50%/-1档30%/-2档20%），穿戴提升战力，熔炼返还 40%\n" +
 		"· 护宗神兽：建设中\n" +
 		"━━━━━━━━━━━━━━\n" +
 		"所有灵侍操作仅在私聊进行，请道友移步私聊。"
@@ -675,6 +680,127 @@ func pvpAttackResultPanel(res *PvpAttackResult) (string, tgbotapi.InlineKeyboard
 }
 
 // ------------------------------------------
+// 锻造炉 / 装备仓库
+// ------------------------------------------
+
+// spiritPanelForge 锻造炉主界面
+func spiritPanelForge(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
+	lingjing, err := GetUserWalletBalance(db, userID)
+	if err != nil {
+		lingjing = 0
+	}
+	var b strings.Builder
+	b.WriteString("🔥 锻造炉\n")
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString(fmt.Sprintf("💎 灵晶：%d\n", lingjing))
+	b.WriteString("锻造得目标品质或以下：50%目标 / 30%-1档 / 20%-2档\n")
+	b.WriteString("兵甲偏物攻（HP/攻/防/速），魂魄偏法术（HP/防/速/法）\n")
+	b.WriteString("熔炼仓库装备返还 40% 锻造成本\n")
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for qi, q := range SpiritQualityNames {
+		cost := equipmentForgeCost[q]
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("兵甲·%s品 %d", q, cost), fmt.Sprintf("sp:forge:0:%d", qi)),
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("魂魄·%s品 %d", q, cost), fmt.Sprintf("sp:forge:1:%d", qi)),
+		))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🎒 装备仓库", "sp:equip"),
+	))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// spiritPanelEquip 装备仓库 + 已装备列表
+func spiritPanelEquip(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
+	equipped, bag := ListEquipment(userID)
+	var b strings.Builder
+	b.WriteString("🎒 装备\n")
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString("【已装备】\n")
+	if len(equipped) == 0 {
+		b.WriteString("暂无已装备。\n")
+	} else {
+		for i := range equipped {
+			e := &equipped[i]
+			b.WriteString(fmt.Sprintf("· %s → %s\n", equipmentStatLine(e), getServantNameByID(userID, e.ServantID)))
+		}
+	}
+	b.WriteString("【仓库】\n")
+	if len(bag) == 0 {
+		b.WriteString("仓库暂无装备。\n")
+	} else {
+		for i := range bag {
+			b.WriteString(fmt.Sprintf("· %s\n", equipmentStatLine(&bag[i])))
+		}
+	}
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i := range bag {
+		e := &bag[i]
+		refund := equipmentForgeCost[e.Quality] * equipmentMeltRefundRatio / 100
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("穿戴 %s", e.Name), fmt.Sprintf("sp:equip:put:%d", e.ID)),
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("熔炼+%d", refund), fmt.Sprintf("sp:equip:melt:%d", e.ID)),
+		))
+	}
+	for i := range equipped {
+		e := &equipped[i]
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("卸下 %s", e.Name), fmt.Sprintf("sp:equip:off:%d", e.ID)),
+		))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔥 锻造炉", spCbForge),
+		tgbotapi.NewInlineKeyboardButtonData("🔙 万灵阁", spCbHome),
+	))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// spiritPanelEquipPick 选择穿戴目标灵侍
+func spiritPanelEquipPick(userID int64, equipmentID uint) (string, tgbotapi.InlineKeyboardMarkup) {
+	var eq ServantEquipment
+	if err := db.Where("id = ? AND user_id = ?", equipmentID, userID).First(&eq).Error; err != nil {
+		return "装备不存在或不属于你", tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🎒 装备", "sp:equip")))
+	}
+	var servants []UserSpiritServant
+	db.Where("user_id = ?", userID).Order("star desc, level desc").Limit(10).Find(&servants)
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("⚔️ 穿戴 %s\n", eq.Name))
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	if len(servants) == 0 {
+		b.WriteString("你还没有灵侍。")
+	} else {
+		b.WriteString("选择穿戴到哪只灵侍：\n")
+	}
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i := range servants {
+		s := &servants[i]
+		label := fmt.Sprintf("%s %s品 Lv.%d", s.Name, s.Quality, s.Level)
+		var occupied int64
+		db.Model(&ServantEquipment{}).
+			Where("servant_id = ? AND slot_type = ?", s.ID, eq.SlotType).Count(&occupied)
+		if occupied > 0 {
+			label += "（替换）"
+		}
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(label,
+				fmt.Sprintf("sp:equip:confirm:%d:%d", equipmentID, s.ID))))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🎒 装备", "sp:equip")))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// ------------------------------------------
 // 对外入口
 // ------------------------------------------
 
@@ -877,6 +1003,87 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 			ackText = fmt.Sprintf("😤 复仇未果… + %d 灵晶", res.Reward)
 		}
 		text, kb = pvpAttackResultPanel(res)
+	case cb.Data == spCbForge:
+		text, kb = spiritPanelForge(db, userID)
+	case strings.HasPrefix(cb.Data, "sp:forge:"):
+		rest := strings.TrimPrefix(cb.Data, "sp:forge:")
+		parts := strings.SplitN(rest, ":", 2)
+		if len(parts) != 2 {
+			ackText = "无效的锻造指令"
+			text, kb = spiritPanelForge(db, userID)
+			break
+		}
+		slotIdx, err1 := strconv.Atoi(parts[0])
+		qualityIdx, err2 := strconv.Atoi(parts[1])
+		if err1 != nil || err2 != nil {
+			ackText = "无效的锻造指令"
+			text, kb = spiritPanelForge(db, userID)
+			break
+		}
+		eq, err := ForgeEquipment(userID, slotIdx, qualityIdx)
+		if err != nil {
+			ackText = fmt.Sprintf("锻造失败：%v", err)
+		} else {
+			ackText = fmt.Sprintf("🔥 锻造成功：%s", equipmentStatLine(eq))
+		}
+		text, kb = spiritPanelForge(db, userID)
+	case cb.Data == "sp:equip":
+		text, kb = spiritPanelEquip(userID)
+	case strings.HasPrefix(cb.Data, "sp:equip:"):
+		rest := strings.TrimPrefix(cb.Data, "sp:equip:")
+		fields := strings.SplitN(rest, ":", 3)
+		if len(fields) < 2 {
+			ackText = "未知装备指令"
+			text, kb = spiritPanelEquip(userID)
+			break
+		}
+		switch fields[0] {
+		case "confirm":
+			if len(fields) == 3 {
+				eqID, err1 := strconv.ParseUint(fields[1], 10, 64)
+				sid, err2 := strconv.ParseUint(fields[2], 10, 64)
+				if err1 == nil && err2 == nil {
+					if err := EquipEquipment(userID, uint(eqID), uint(sid)); err != nil {
+						ackText = fmt.Sprintf("穿戴失败：%v", err)
+					} else {
+						ackText = "⚔️ 已穿戴"
+					}
+					text, kb = spiritPanelEquip(userID)
+					break
+				}
+			}
+			ackText = "无效的穿戴指令"
+			text, kb = spiritPanelEquip(userID)
+		case "put", "off", "melt":
+			id, err := strconv.ParseUint(fields[1], 10, 64)
+			if err != nil {
+				ackText = "无效的装备指令"
+				text, kb = spiritPanelEquip(userID)
+				break
+			}
+			switch fields[0] {
+			case "put":
+				text, kb = spiritPanelEquipPick(userID, uint(id))
+			case "off":
+				if err := UnequipEquipment(userID, uint(id)); err != nil {
+					ackText = fmt.Sprintf("卸下失败：%v", err)
+				} else {
+					ackText = "已卸下，装备回到仓库"
+				}
+				text, kb = spiritPanelEquip(userID)
+			case "melt":
+				refund, err := MeltEquipment(userID, uint(id))
+				if err != nil {
+					ackText = fmt.Sprintf("熔炼失败：%v", err)
+				} else {
+					ackText = fmt.Sprintf("♻️ 已熔炼，+ %d 灵晶", refund)
+				}
+				text, kb = spiritPanelEquip(userID)
+			}
+		default:
+			ackText = "未知装备指令"
+			text, kb = spiritPanelEquip(userID)
+		}
 	default:
 		ackText = "未知操作"
 		text, kb = spiritPanelHome(db, userID)

@@ -174,6 +174,7 @@ func SetupMirror(userID int64) (int, error) {
 		if len(team) == 0 {
 			return fmt.Errorf("尚未编排出战灵侍，请先在出战队列编队")
 		}
+		team = enhanceServantStats(userID, team) // 并入装备加成（镜像快照含装备）
 		fighters := teamToFighters(team)
 		b, err := json.Marshal(fighters)
 		if err != nil {
@@ -283,6 +284,7 @@ func PvpAttack(userID int64, defenderID int64) (*PvpAttackResult, error) {
 		if len(team) == 0 {
 			return fmt.Errorf("尚未编排出战灵侍，请先在出战队列编队")
 		}
+		team = enhanceServantStats(userID, team) // 并入装备加成
 		myPower := CalculateTeamPower(team, 0)
 
 		// 3. 目标选择
