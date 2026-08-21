@@ -87,7 +87,7 @@ const (
 	groupMemberPositiveTTL = 5 * time.Minute
 	groupMemberNegativeTTL = 1 * time.Minute
 	groupMemberFreshTTL    = 30 * time.Second
-	blindBoxCost           = 25
+	blindBoxCost           = 20
 )
 
 func getSession(userID int64) *SessionState {
@@ -1018,6 +1018,8 @@ func pointTransactionTypeText(txType string) string {
 		return "牌九退款"
 	case "pai_gow_win":
 		return "牌九中奖"
+	case "book_request_cost":
+		return "求书工单"
 	case "breakthrough_auto_buy":
 		return "突破代购"
 	case "breakthrough_refund":
@@ -2148,14 +2150,30 @@ const (
 	bookRequestStatusRejected  = "rejected"
 	bookRequestStatusCancelled = "cancelled"
 
-	bookRequestDailyLimit   = 3
 	bookRequestPendingLimit = 5
-	bookRequestNoteMaxLen   = 300
-	bookRequestLinkMaxLen   = 500
+
+	bookRequestWhitelistCost         = 10
+	bookRequestWhitelistWeeklyLimit  = 3
+	bookRequestWhitelistMonthlyLimit = 10
+	bookRequestNormalCost            = 15
+	bookRequestNormalWeeklyLimit     = 3
+	bookRequestNormalMonthlyLimit    = 5
+	bookRequestShortCost             = 20
+	bookRequestShortWeeklyLimit      = 1
+	bookRequestShortMonthlyLimit     = 3
+
+	bookRequestNoteMaxLen = 300
+	bookRequestLinkMaxLen = 500
 
 	bookRequestLinkRequirementText = "必须以 https:// 开头，仅支持 ximalaya.com / www.ximalaya.com / m.ximalaya.com / xima.tv，路径不能为首页，且不能包含空格、换行、制表符、URL 账号密码信息或其他控制/分隔字符"
 	bookRequestNoteInvalidText     = "内容不符合要求，请输入最多 300 字、可换行且不含制表符或其他控制字符的说明。"
 )
+
+type bookRequestUserPlan struct {
+	Cost         int
+	WeeklyLimit  int
+	MonthlyLimit int
+}
 
 func registrationExpireAtForExistingUser(existingExpireAt *time.Time, defaultExpireAt *time.Time) (*time.Time, bool) {
 	if defaultExpireAt == nil {
@@ -2619,16 +2637,68 @@ func displayBookRequestText(v string, fallback string) string {
 	return v
 }
 
-func bookRequestDayRange(t time.Time) (time.Time, time.Time) {
+func bookRequestWeekRange(t time.Time) (time.Time, time.Time) {
 	loc := time.FixedZone("CST", 8*3600)
 	local := t.In(loc)
-	start := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
-	return start, start.AddDate(0, 0, 1)
+	weekday := int(local.Weekday())
+	if weekday == 0 {
+		weekday = 7
+	}
+	start := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -(weekday - 1))
+	return start, start.AddDate(0, 0, 7)
 }
 
-func bookRequestLimitMessageFromCounts(todayCount int64, pendingCount int64) string {
-	if todayCount >= bookRequestDailyLimit {
-		return fmt.Sprintf("你今天已经提交了 %d 条求书，请明天再试。", bookRequestDailyLimit)
+func bookRequestMonthRange(t time.Time) (time.Time, time.Time) {
+	loc := time.FixedZone("CST", 8*3600)
+	local := t.In(loc)
+	start := time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, loc)
+	return start, start.AddDate(0, 1, 0)
+}
+
+func bookRequestUserPlanForUser(u User, now time.Time) bookRequestUserPlan {
+	if u.IsWhitelist {
+		return bookRequestUserPlan{
+			Cost:         bookRequestWhitelistCost,
+			WeeklyLimit:  bookRequestWhitelistWeeklyLimit,
+			MonthlyLimit: bookRequestWhitelistMonthlyLimit,
+		}
+	}
+
+	// 永久用户（无到期时间）视为长期有效，按“有效期 >= 3 个月”档位处理。
+	if u.ExpireAt == nil || !u.ExpireAt.Before(now.AddDate(0, 3, 0)) {
+		return bookRequestUserPlan{
+			Cost:         bookRequestNormalCost,
+			WeeklyLimit:  bookRequestNormalWeeklyLimit,
+			MonthlyLimit: bookRequestNormalMonthlyLimit,
+		}
+	}
+
+	return bookRequestUserPlan{
+		Cost:         bookRequestShortCost,
+		WeeklyLimit:  bookRequestShortWeeklyLimit,
+		MonthlyLimit: bookRequestShortMonthlyLimit,
+	}
+}
+
+func loadBookRequestUserPlanWithDB(db *gorm.DB, userID int64, now time.Time) (User, bookRequestUserPlan, error) {
+	var u User
+	if err := db.Where("telegram_id = ?", userID).First(&u).Error; err != nil {
+		return u, bookRequestUserPlan{}, err
+	}
+	return u, bookRequestUserPlanForUser(u, now), nil
+}
+
+func bookRequestPlanText(plan bookRequestUserPlan) string {
+	return fmt.Sprintf("每次提交消耗 %d 积分；本周限 %d 条，本月限 %d 条。", plan.Cost, plan.WeeklyLimit, plan.MonthlyLimit)
+}
+
+func bookRequestLimitMessageFromCounts(weeklyCount int64, monthlyCount int64, pendingCount int64, plan bookRequestUserPlan) string {
+	if weeklyCount >= int64(plan.WeeklyLimit) {
+		return fmt.Sprintf("你本周已经提交了 %d 条求书（本周上限 %d 条），请下周再试。", plan.WeeklyLimit, plan.WeeklyLimit)
+	}
+
+	if monthlyCount >= int64(plan.MonthlyLimit) {
+		return fmt.Sprintf("你本月已经提交了 %d 条求书（本月上限 %d 条），请下月再试。", plan.MonthlyLimit, plan.MonthlyLimit)
 	}
 
 	if pendingCount >= bookRequestPendingLimit {
@@ -2638,35 +2708,51 @@ func bookRequestLimitMessageFromCounts(todayCount int64, pendingCount int64) str
 	return ""
 }
 
-func queryBookRequestLimitCounts(db *gorm.DB, userID int64, now time.Time) (int64, int64, error) {
+func queryBookRequestLimitCounts(db *gorm.DB, userID int64, now time.Time) (int64, int64, int64, error) {
 	if db == nil || userID == 0 {
-		return 0, 0, fmt.Errorf("BOOK_REQUEST_LIMIT_DB_EMPTY")
+		return 0, 0, 0, fmt.Errorf("BOOK_REQUEST_LIMIT_DB_EMPTY")
 	}
 
-	startOfDay, endOfDay := bookRequestDayRange(now)
-	var todayCount int64
+	weekStart, weekEnd := bookRequestWeekRange(now)
+	monthStart, monthEnd := bookRequestMonthRange(now)
+
+	var weeklyCount int64
 	if err := db.Model(&BookRequest{}).
-		Where("user_id = ? AND created_at >= ? AND created_at < ?", userID, startOfDay, endOfDay).
-		Count(&todayCount).Error; err != nil {
-		return 0, 0, err
+		Where("user_id = ? AND created_at >= ? AND created_at < ?", userID, weekStart, weekEnd).
+		Count(&weeklyCount).Error; err != nil {
+		return 0, 0, 0, err
+	}
+
+	var monthlyCount int64
+	if err := db.Model(&BookRequest{}).
+		Where("user_id = ? AND created_at >= ? AND created_at < ?", userID, monthStart, monthEnd).
+		Count(&monthlyCount).Error; err != nil {
+		return 0, 0, 0, err
 	}
 
 	var pendingCount int64
 	if err := db.Model(&BookRequest{}).
 		Where("user_id = ? AND status = ?", userID, bookRequestStatusPending).
 		Count(&pendingCount).Error; err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 
-	return todayCount, pendingCount, nil
+	return weeklyCount, monthlyCount, pendingCount, nil
 }
 
 func checkBookRequestLimitsWithDB(db *gorm.DB, userID int64, now time.Time) (string, error) {
-	todayCount, pendingCount, err := queryBookRequestLimitCounts(db, userID, now)
+	if db == nil || userID == 0 {
+		return "", fmt.Errorf("BOOK_REQUEST_LIMIT_DB_EMPTY")
+	}
+	_, plan, err := loadBookRequestUserPlanWithDB(db, userID, now)
 	if err != nil {
 		return "", err
 	}
-	return bookRequestLimitMessageFromCounts(todayCount, pendingCount), nil
+	weeklyCount, monthlyCount, pendingCount, err := queryBookRequestLimitCounts(db, userID, now)
+	if err != nil {
+		return "", err
+	}
+	return bookRequestLimitMessageFromCounts(weeklyCount, monthlyCount, pendingCount, plan), nil
 }
 
 func checkBookRequestLimits(userID int64) string {
@@ -2688,14 +2774,20 @@ func createBookRequestWithinLimits(req *BookRequest, now time.Time) (string, err
 
 	var limitMsg string
 	err := DB.Transaction(func(tx *gorm.DB) error {
-		msg, err := checkBookRequestLimitsWithDB(tx, req.UserID, now)
+		_, plan, err := loadBookRequestUserPlanWithDB(tx, req.UserID, now)
 		if err != nil {
 			return err
 		}
+		weeklyCount, monthlyCount, pendingCount, err := queryBookRequestLimitCounts(tx, req.UserID, now)
+		if err != nil {
+			return err
+		}
+		msg := bookRequestLimitMessageFromCounts(weeklyCount, monthlyCount, pendingCount, plan)
 		if msg != "" {
 			limitMsg = msg
 			return nil
 		}
+
 		res := tx.Create(req)
 		if res.Error != nil {
 			return res.Error
@@ -2703,6 +2795,21 @@ func createBookRequestWithinLimits(req *BookRequest, now time.Time) (string, err
 		if res.RowsAffected == 0 {
 			return fmt.Errorf("BOOK_REQUEST_CREATE_MISSED")
 		}
+
+		if plan.Cost > 0 {
+			if err := applyPointDeltaInTx(
+				tx,
+				req.UserID,
+				-plan.Cost,
+				"book_request_cost",
+				fmt.Sprintf("提交求书工单，消耗 %d 积分", plan.Cost),
+				"book_request",
+				fmt.Sprintf("%d", req.ID),
+			); err != nil {
+				return err
+			}
+		}
+
 		if err := createBookRequestLogInTx(tx, req.ID, req.UserID, req.UserName, "create", "", bookRequestStatusPending, "user created book request"); err != nil {
 			return err
 		}
@@ -2924,8 +3031,14 @@ func handleBookRequestStart(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session
 	session.SetStep("WAITING_BOOK_LINK")
 	UserSessions.Store(msg.From.ID, session)
 
+	planText := "每次提交需消耗积分，具体以确认页为准。"
+	if _, plan, err := loadBookRequestUserPlanWithDB(DB, msg.From.ID, time.Now()); err == nil {
+		planText = bookRequestPlanText(plan)
+	}
+
 	sendPlainText(bot, msg.Chat.ID,
 		"📚 求书提交\n\n"+
+			planText+"\n\n"+
 			"请发送喜马拉雅链接。\n\n"+
 			"要求："+bookRequestLinkRequirementText+"。\n\n"+
 			"发送“取消”可退出。",
@@ -3158,6 +3271,11 @@ func submitBookRequest(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, session *Ses
 		return
 	}
 	if err != nil {
+		if errors.Is(err, errInsufficientPoints) {
+			sendPlainText(bot, msg.Chat.ID, "❌ 积分不足，无法提交求书工单。")
+			clearSession(msg.From.ID)
+			return
+		}
 		log.Printf("❌ 创建求书工单失败: user=%d err=%s", msg.From.ID, formatPlainError(err))
 		sendPlainText(bot, msg.Chat.ID, "❌ 提交失败，请稍后再试。")
 		clearSession(msg.From.ID)
@@ -5367,16 +5485,22 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 		xmlyLink := session.GetTemp("book_xmly_link")
 
+		costText := ""
+		if _, plan, err := loadBookRequestUserPlanWithDB(DB, userID, time.Now()); err == nil {
+			costText = fmt.Sprintf("\n本次提交将消耗 %d 积分。", plan.Cost)
+		}
+
 		sendPlainText(bot, chatID,
 			fmt.Sprintf(
 				"📚 请确认求书信息：\n\n"+
 					"喜马拉雅链接：\n%s\n\n"+
-					"用户备注：\n%s\n\n"+
+					"用户备注：\n%s%s\n\n"+
 					"确认提交请回复：确认提交\n"+
 					"重新填写请回复：重新填写\n"+
 					"取消请回复：取消",
 				xmlyLink,
 				displayBookRequestText(userNote, "无"),
+				costText,
 			),
 		)
 

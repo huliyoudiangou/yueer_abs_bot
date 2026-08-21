@@ -762,9 +762,13 @@ func ExecuteBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 		// 3B. 失败：增加失败次数。
 		tribulationFails = cul.TribulationFails + 1
 
+		nextConsolidate := now.Add(req.Cooldown)
 		res := tx.Model(&Cultivation{}).
 			Where("user_id = ? AND major_realm = ? AND minor_realm = ?", userID, cul.MajorRealm, cul.MinorRealm).
-			UpdateColumn("tribulation_fails", gorm.Expr("tribulation_fails + ?", 1))
+			Updates(map[string]interface{}{
+				"tribulation_fails": gorm.Expr("tribulation_fails + ?", 1),
+				"consolidate_until": nextConsolidate,
+			})
 
 		if res.Error != nil {
 			return res.Error

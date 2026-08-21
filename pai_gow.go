@@ -651,7 +651,7 @@ func runPaiGowRoutine(bot *tgbotapi.BotAPI, chatID int64) {
 			return fmt.Errorf("PAI_GOW_SETTLEMENT_MISSED")
 		}
 		if botWinTotal > 0 {
-			poolInjected = botWinTotal * 20 / 100
+			poolInjected = botWinTotal
 			if poolInjected > 0 {
 				var err error
 				poolAfter, poolBurst, err = addPointsToFusionPoolInTx(tx, poolInjected)
@@ -669,7 +669,7 @@ func runPaiGowRoutine(bot *tgbotapi.BotAPI, chatID int64) {
 	settled = true
 
 	if poolBurst {
-		notifyFusionPoolBurst(bot, chatID, "推牌九庄家筹码按20%注入天道")
+		notifyFusionPoolBurst(bot, chatID, "推牌九庄家筹码按100%注入天道")
 	}
 	sendPaiGowFinalAnnouncement(bot, chatID, dealerHand, dealerPoint, players, poolInjected, poolAfter, poolBurst)
 }
@@ -742,7 +742,7 @@ func sendPaiGowFinalAnnouncement(bot *tgbotapi.BotAPI, chatID int64, dealerHand 
 		}
 	}
 	if poolInjected > 0 {
-		b.WriteString(fmt.Sprintf("🌊 庄家赢下筹码按 20%% 注入天道奖池：`+%d` 积分，当前水位 `%d/300`。\n", poolInjected, poolAfter))
+		b.WriteString(fmt.Sprintf("🌊 庄家赢下筹码按 100%% 注入天道奖池：`+%d` 积分，当前水位 `%d/300`。\n", poolInjected, poolAfter))
 		if poolBurst {
 			b.WriteString("🎁 天道奖池已满，系统自动生成灵气红包。\n")
 		}
