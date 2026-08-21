@@ -601,6 +601,34 @@ func (SpiritZonePity) TableName() string {
 	return "spirit_zone_pities"
 }
 
+// 神行符（PVE 体力）：每日 10 点，每次推图战斗消耗 1 点
+type SpiritBattleStamina struct {
+	gorm.Model
+	UserID  int64  `gorm:"uniqueIndex;not null"`
+	DayKey  string // 北京时间 YYYYMMDD
+	Stamina int    // 当日剩余体力
+}
+
+func (SpiritBattleStamina) TableName() string {
+	return "spirit_battle_staminas"
+}
+
+// 推图进度：每关星级（0-3）、扫荡每日计数
+type SpiritStageProgress struct {
+	gorm.Model
+	UserID     int64 `gorm:"uniqueIndex:idx_stage_prog;not null"`
+	ChapterID  int   `gorm:"uniqueIndex:idx_stage_prog;not null"`
+	StageID    int   `gorm:"uniqueIndex:idx_stage_prog;not null"` // 1-10 普通关，11 = Boss
+	Stars      int   `gorm:"default:0"`                           // 0-3
+	ClearedAt  *time.Time
+	SweepDay   string `gorm:"default:''"` // 扫荡计数日
+	SweepCount int    `gorm:"default:0"`  // 当日已扫荡次数
+}
+
+func (SpiritStageProgress) TableName() string {
+	return "spirit_stage_progress"
+}
+
 // 任务表：AGENTS.md、README.md、手册、docs
 
 var db *gorm.DB
@@ -976,6 +1004,8 @@ func InitDB() {
 		&DailyLingjingQuota{},
 		&SectBeastContribution{},
 		&SpiritZonePity{},
+		&SpiritBattleStamina{},
+		&SpiritStageProgress{},
 	); err != nil {
 		log.Fatalf("数据库迁移失败: %s", formatPlainError(err))
 	}

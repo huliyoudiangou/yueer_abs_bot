@@ -17,6 +17,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,17 +27,21 @@ import (
 
 // sp: 回调常量
 const (
-	spCbHome       = "sp:home"
-	spCbList       = "sp:list"
-	spCbBag        = "sp:bag"
-	spCbCatch      = "sp:catch"
-	spCbTeam       = "sp:team"
-	spCbPush       = "sp:push"
-	spCbBeast      = "sp:beast"
-	spCbHelp       = "sp:help"
-	spCbExPrefix   = "sp:ex:"   // sp:ex:100 / sp:ex:300 / sp:ex:500 / sp:ex:1000
-	spCbZonePrefix = "sp:zone:" // sp:zone:qingzhu
-	spPullPrefix   = "sp:pull:" // sp:pull:qingzhu:fusu
+	spCbHome          = "sp:home"
+	spCbList          = "sp:list"
+	spCbBag           = "sp:bag"
+	spCbCatch         = "sp:catch"
+	spCbTeam          = "sp:team"
+	spCbPush          = "sp:push"
+	spCbBeast         = "sp:beast"
+	spCbHelp          = "sp:help"
+	spCbExPrefix      = "sp:ex:"      // sp:ex:100 / sp:ex:300 / sp:ex:500 / sp:ex:1000
+	spCbZonePrefix    = "sp:zone:"    // sp:zone:qingzhu
+	spPullPrefix      = "sp:pull:"    // sp:pull:qingzhu:fusu
+	spCbChapterPrefix = "sp:chapter:" // sp:chapter:1
+	spCbStagePrefix   = "sp:stage:"   // sp:stage:1:3
+	spCbFightPrefix   = "sp:fight:"   // sp:fight:1:3
+	spCbSweepPrefix   = "sp:sweep:"   // sp:sweep:1:3
 )
 
 // 灵晶斋兑换档位（积分）
@@ -358,13 +363,185 @@ func spiritPanelHelp() (string, tgbotapi.InlineKeyboardMarkup) {
 		"· 灵侍属性：金木水火土阴阳（阴阳仅地阶以上可得）\n" +
 		"· 捕捉：灵墟按境界开放六大区域，需消耗缚灵索\n" +
 		"· 升星：吞噬同阶灵侍提升星级，战力大涨\n" +
-		"· 推图 / 镜场斗法 / 护宗神兽：建设中\n" +
+		"· 推图：六大章节各 10 关 + Boss，神行符 10/日，三星可扫荡\n" +
+		"· 镜场斗法 / 护宗神兽：建设中\n" +
 		"━━━━━━━━━━━━━━\n" +
 		"所有灵侍操作仅在私聊进行，请道友移步私聊。"
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)),
 	)
 	return text, kb
+}
+
+// ------------------------------------------
+// 灵墟推图（PVE）
+// ------------------------------------------
+
+// parseSpStageData 解析 "sp:xxx:章节:关卡" → (章节, 关卡)
+func parseSpStageData(data, prefix string) (int, int, bool) {
+	rest := strings.TrimPrefix(data, prefix)
+	parts := strings.SplitN(rest, ":", 2)
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	ch, err1 := strconv.Atoi(parts[0])
+	st, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil || ch < 1 || ch > len(SpiritZones) || st < 1 || st > bossStageID {
+		return 0, 0, false
+	}
+	return ch, st, true
+}
+
+// spiritPanelPush 推图主界面：章节列表
+func spiritPanelPush(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
+	cul := GetOrCreateCultivation(userID)
+	majorRealm := 0
+	if cul != nil {
+		majorRealm = cul.MajorRealm
+	}
+
+	var b strings.Builder
+	b.WriteString("🗺 灵墟推图\n")
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString(fmt.Sprintf("🏃 神行符：%d/%d（每日恢复）\n", GetUserStamina(userID), divineTravelDailyCap))
+	b.WriteString("每章 10 关 + 1 Boss，每次挑战消耗 1 神行符\n")
+	b.WriteString("首通全额奖励，升星 20%，三星可扫荡（每日3次）\n\n")
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i, z := range SpiritZones {
+		chapterID := i + 1
+		var cleared int64
+		db.Model(&SpiritStageProgress{}).
+			Where("user_id = ? AND chapter_id = ? AND stars >= ?", userID, chapterID, 1).
+			Count(&cleared)
+		if majorRealm >= z.Tier {
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(
+					fmt.Sprintf("%s · %d/%d 关", z.Name, cleared, bossStageID),
+					fmt.Sprintf("%s%d", spCbChapterPrefix, chapterID))))
+		} else {
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(
+					fmt.Sprintf("🔒 %s（需境界%d阶）", z.Name, z.Tier), "sp:chlocked")))
+		}
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// spiritPanelStages 章节详情：11 个关卡按钮
+func spiritPanelStages(userID int64, chapterID int) (string, tgbotapi.InlineKeyboardMarkup) {
+	zone := chapterZone(chapterID)
+	if zone == nil {
+		return "未知章节", tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 推图", spCbPush)))
+	}
+	var progs []SpiritStageProgress
+	db.Where("user_id = ? AND chapter_id = ?", userID, chapterID).Find(&progs)
+	progMap := make(map[int]int, len(progs))
+	for _, p := range progs {
+		progMap[p.StageID] = p.Stars
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("🗺 第%d章 · %s\n", chapterID, zone.Name))
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString(fmt.Sprintf("🏃 神行符：%d/%d\n", GetUserStamina(userID), divineTravelDailyCap))
+	b.WriteString("选择关卡：\n")
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for stage := 1; stage <= bossStageID; stage++ {
+		label := fmt.Sprintf("%d", stage)
+		if stage == bossStageID {
+			label = "👑 Boss"
+		}
+		if stars := progMap[stage]; stars > 0 {
+			label += " " + strings.Repeat("★", stars)
+		}
+		unlocked := stage == 1 || progMap[stage-1] >= 1
+		if !unlocked {
+			label = "🔒 " + label
+		}
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("%s%d:%d", spCbStagePrefix, chapterID, stage))))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔙 推图", spCbPush)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// spiritPanelStageDetail 关卡详情：敌人预览 + 挑战/扫荡
+func spiritPanelStageDetail(userID int64, chapterID, stageID int) (string, tgbotapi.InlineKeyboardMarkup) {
+	zone := chapterZone(chapterID)
+	if zone == nil {
+		return "未知章节", tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 推图", spCbPush)))
+	}
+
+	// 解锁判断：前关至少 1 星
+	if stageID > 1 {
+		var prevP SpiritStageProgress
+		db.Where("user_id = ? AND chapter_id = ? AND stage_id = ?", userID, chapterID, stageID-1).
+			First(&prevP)
+		if prevP.Stars < 1 {
+			bossTag := ""
+			if stageID == bossStageID {
+				bossTag = "（章节 Boss）"
+			}
+			text := fmt.Sprintf("⚔️ 第%d关%s\n━━━━━━━━━━━━━━\n🔒 上一关尚未通关，此关未解锁。\n先击败「%s」再来挑战。",
+				stageID, bossTag, buildStageEnemy(chapterID, stageID-1).Name)
+			kb := tgbotapi.NewInlineKeyboardMarkup(
+				tgbotapi.NewInlineKeyboardRow(
+					tgbotapi.NewInlineKeyboardButtonData("🔙 章节", fmt.Sprintf("%s%d", spCbChapterPrefix, chapterID))))
+			return text, kb
+		}
+	}
+
+	var myProg SpiritStageProgress
+	stars := 0
+	sweepCount := 0
+	if err := db.Where("user_id = ? AND chapter_id = ? AND stage_id = ?", userID, chapterID, stageID).
+		First(&myProg).Error; err == nil {
+		stars = myProg.Stars
+		if myProg.SweepDay == time.Now().Format("20060102") {
+			sweepCount = myProg.SweepCount
+		}
+	}
+
+	enemy := buildStageEnemy(chapterID, stageID)
+	bossTag := ""
+	if stageID == bossStageID {
+		bossTag = "（章节 Boss）"
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("⚔️ 第%d关%s\n", stageID, bossTag))
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString(fmt.Sprintf("敌人：%s\n", enemy.Name))
+	b.WriteString(fmt.Sprintf("属性：%s｜HP %d｜ATK %d\n", enemy.Element, enemy.MaxHP, enemy.ATK))
+	b.WriteString(fmt.Sprintf("我方星级：%d/3\n", stars))
+	b.WriteString(fmt.Sprintf("首通奖励：%d 灵晶｜扫荡奖励：%d 灵晶\n",
+		stageReward(chapterID, stageID), stageReward(chapterID, stageID)*sweepRewardRatio/100))
+	b.WriteString(fmt.Sprintf("🏃 神行符：%d/%d\n", GetUserStamina(userID), divineTravelDailyCap))
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(
+			"⚔️ 挑战（-1 神行符）", fmt.Sprintf("%s%d:%d", spCbFightPrefix, chapterID, stageID))))
+	if stars >= 3 {
+		if sweepCount < sweepDailyLimit {
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(
+					fmt.Sprintf("🔄 扫荡（今日 %d/%d）", sweepCount, sweepDailyLimit),
+					fmt.Sprintf("%s%d:%d", spCbSweepPrefix, chapterID, stageID))))
+		} else {
+			b.WriteString("\n今日扫荡已用尽（3次），明日再来。")
+		}
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔙 章节", fmt.Sprintf("%s%d", spCbChapterPrefix, chapterID))))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
 // ------------------------------------------
@@ -417,7 +594,7 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 	case cb.Data == spCbTeam:
 		text, kb = spiritPanelTeam(db, userID)
 	case cb.Data == spCbPush:
-		text, kb = spiritPanelComingSoon("🗺 灵墟推图", "推图章节、三星通关与扫荡玩法即将开放。")
+		text, kb = spiritPanelPush(db, userID)
 	case cb.Data == spCbBeast:
 		text, kb = spiritPanelComingSoon("🔮 护宗神兽", "宗门声望达到 2000 后可解锁护宗神兽喂养。")
 	case cb.Data == spCbHelp:
@@ -466,12 +643,64 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 	case cb.Data == "sp:locked":
 		ackText = "该区域尚未解锁，请提升修为境界"
 		text, kb = spiritPanelCatch(db, userID)
+	case cb.Data == "sp:chlocked":
+		ackText = "该章节尚未解锁，请提升修为境界"
+		text, kb = spiritPanelPush(db, userID)
 	case cb.Data == "sp:nojing":
 		ackText = "灵晶不足，请前往灵晶斋兑换"
 		text, kb = spiritPanelBag(db, userID)
 	case strings.HasPrefix(cb.Data, spCbZonePrefix):
 		zoneKey := strings.TrimPrefix(cb.Data, spCbZonePrefix)
 		text, kb = spiritPanelZoneDetail(userID, zoneKey)
+	case strings.HasPrefix(cb.Data, spCbChapterPrefix):
+		ch, err := strconv.Atoi(strings.TrimPrefix(cb.Data, spCbChapterPrefix))
+		if err != nil || ch < 1 || ch > len(SpiritZones) {
+			ackText = "未知章节"
+			text, kb = spiritPanelPush(db, userID)
+			break
+		}
+		text, kb = spiritPanelStages(userID, ch)
+	case strings.HasPrefix(cb.Data, spCbStagePrefix):
+		ch, st, ok := parseSpStageData(cb.Data, spCbStagePrefix)
+		if !ok {
+			ackText = "未知关卡"
+			text, kb = spiritPanelPush(db, userID)
+			break
+		}
+		text, kb = spiritPanelStageDetail(userID, ch, st)
+	case strings.HasPrefix(cb.Data, spCbFightPrefix):
+		ch, st, ok := parseSpStageData(cb.Data, spCbFightPrefix)
+		if !ok {
+			ackText = "未知关卡"
+			text, kb = spiritPanelPush(db, userID)
+			break
+		}
+		res, err := PveFight(userID, ch, st)
+		if err != nil {
+			ackText = fmt.Sprintf("挑战失败：%v", err)
+			text, kb = spiritPanelStageDetail(userID, ch, st)
+			break
+		}
+		if res.Win {
+			ackText = fmt.Sprintf("⚔️ 胜利！获得 %d 星，+%d 灵晶", res.Stars, res.Reward)
+		} else {
+			ackText = fmt.Sprintf("💀 不敌 %s，稍作休整再战", res.EnemyName)
+		}
+		text, kb = spiritPanelStageDetail(userID, ch, st)
+	case strings.HasPrefix(cb.Data, spCbSweepPrefix):
+		ch, st, ok := parseSpStageData(cb.Data, spCbSweepPrefix)
+		if !ok {
+			ackText = "未知关卡"
+			text, kb = spiritPanelPush(db, userID)
+			break
+		}
+		reward, err := PveSweep(userID, ch, st)
+		if err != nil {
+			ackText = fmt.Sprintf("扫荡失败：%v", err)
+		} else {
+			ackText = fmt.Sprintf("🔄 扫荡完成，+%d 灵晶", reward)
+		}
+		text, kb = spiritPanelStageDetail(userID, ch, st)
 	default:
 		ackText = "未知操作"
 		text, kb = spiritPanelHome(db, userID)
