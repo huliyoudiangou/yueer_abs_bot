@@ -385,12 +385,13 @@ func spiritPanelHelp() (string, tgbotapi.InlineKeyboardMarkup) {
 		"· 灵侍品阶：凡/灵/玄/地/天/圣，共六阶\n" +
 		"· 灵侍属性：金木水火土阴阳（阴阳仅地阶以上可得）\n" +
 		"· 捕捉：灵墟按境界开放六大区域，需消耗缚灵索\n" +
-		"· 升星：星级上限 凡3/灵4/玄5/地6/天7/圣9；≤3★ 需同品同属性祭品，4-6★ 另需同星级，7-9★ 需同名同星级灵侍；升星后等级重置\n" +
+		"· 升星：星级上限 凡3/灵4/玄5/地6/天7/圣9；≤3★ 需同品同属性祭品，4-6★ 另需同星级，7-9★ 需同名同星级灵侍；段1-2 可消耗灵魄替代祭品，段3 可消耗万能真身碎片替代同名要求；升星后等级重置\n" +
 		"· 推图：六大章节各 10 关 + Boss，神行符 10/日，三星可扫荡\n" +
 		"· 镜场：上架镜像供道友挑战，胜 30 / 负 10 灵晶，10 次/日，24h 内可复仇\n" +
 		"· 锻造：锻造炉产出兵甲/魂魄两类装备（目标品质50%/-1档30%/-2档20%），穿戴提升战力，熔炼返还 40%\n" +
 		"· 护宗神兽：宗门声望 2000 解锁，喂养耗 20-50 声望（随等级递增），三阶为全宗提供 +1%/+2%/+3.5% 世界Boss伤害\n" +
 		"· 灵侍蛋：击败章节 Boss 每次 30% 概率掉蛋（地阶及以下），在灵侍蛋面板孵化为对应品阶灵侍\n" +
+		"· 道具：灵魄随推图胜利掉落（普通关 25%/章节 Boss 50%）；万能真身碎片随第 5/6 章 Boss 掉落（10%）；扫荡不掉道具\n" +
 		"━━━━━━━━━━━━━━\n" +
 		"所有灵侍操作仅在私聊进行，请道友移步私聊。"
 	kb := tgbotapi.NewInlineKeyboardMarkup(
@@ -944,22 +945,54 @@ func spiritPanelStarUp(userID int64, servantID uint) (string, tgbotapi.InlineKey
 	b.WriteString(StarUpRequirementText(&target) + "\n")
 	b.WriteString("升星后等级重置为 Lv.1，祭品灵侍将被消耗。\n")
 
+	items := GetUserSpiritItems(userID)
+	soulN := items[itemTypeSoul]
+	shardN := items[itemTypeShard]
+	stage := StarUpStage(target.Star + 1)
+	b.WriteString(fmt.Sprintf("\n🧪 持有灵魄：%d  🎭 持有真身碎片：%d\n", soulN, shardN))
+
 	cands := ListStarUpSacrifices(userID, &target)
-	if len(cands) == 0 {
-		b.WriteString("\n当前没有符合条件的祭品灵侍。\n可前往灵墟捕捉，或孵化灵侍蛋获得。")
-		return b.String(), backKb
-	}
-	b.WriteString("\n可用祭品：\n")
-	for i := range cands {
-		if i >= 15 {
-			break
+	if len(cands) > 0 {
+		b.WriteString("\n可用祭品：\n")
+		for i := range cands {
+			if i >= 15 {
+				break
+			}
+			c := &cands[i]
+			b.WriteString(fmt.Sprintf("· %s %s品·%s ⭐%d 战力%d\n",
+				c.Name, c.Quality, c.Attribute, c.Star, GetBattlePower(c)))
 		}
-		c := &cands[i]
-		b.WriteString(fmt.Sprintf("· %s %s品·%s ⭐%d 战力%d\n",
-			c.Name, c.Quality, c.Attribute, c.Star, GetBattlePower(c)))
+		if len(cands) > 15 {
+			b.WriteString(fmt.Sprintf("（共 %d 只，仅显示前 15 只）", len(cands)))
+		}
+	} else {
+		b.WriteString("\n当前没有符合条件的祭品灵侍。\n可前往灵墟捕捉，或孵化灵侍蛋获得。")
 	}
-	if len(cands) > 15 {
-		b.WriteString(fmt.Sprintf("（共 %d 只，仅显示前 15 只）", len(cands)))
+
+	// 灵魄选项（段1-2）
+	if stage <= 2 && soulN > 0 {
+		b.WriteString("\n💡 可直接消耗 1 个灵魄升星，无需祭品灵侍。")
+	}
+
+	// 碎片祭品段（段3）
+	var shardCands []UserSpiritServant
+	if stage == 3 && shardN > 0 {
+		shardCands = ListShardSacrifices(userID, &target)
+		b.WriteString("\n【碎片祭品】消耗 1 个万能真身碎片，祭品仅需同品质+同星级：\n")
+		if len(shardCands) == 0 {
+			b.WriteString("· 暂无同品质同星级灵侍\n")
+		}
+		for i := range shardCands {
+			if i >= 15 {
+				break
+			}
+			c := &shardCands[i]
+			b.WriteString(fmt.Sprintf("· %s %s品·%s ⭐%d 战力%d\n",
+				c.Name, c.Quality, c.Attribute, c.Star, GetBattlePower(c)))
+		}
+		if len(shardCands) > 15 {
+			b.WriteString(fmt.Sprintf("（共 %d 只，仅显示前 15 只）", len(shardCands)))
+		}
 	}
 
 	var rows [][]tgbotapi.InlineKeyboardButton
@@ -972,6 +1005,22 @@ func spiritPanelStarUp(userID int64, servantID uint) (string, tgbotapi.InlineKey
 			tgbotapi.NewInlineKeyboardButtonData(
 				fmt.Sprintf("以 %s 为祭品", c.Name),
 				fmt.Sprintf("sp:starup:confirm:%d:%d", servantID, c.ID))))
+	}
+	if stage <= 2 && soulN > 0 {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				"⭐ 灵魄升星（-1 灵魄）",
+				fmt.Sprintf("sp:starup:confirm:%d:item:%s", servantID, itemTypeSoul))))
+	}
+	for i := range shardCands {
+		if i >= 15 {
+			break
+		}
+		c := &shardCands[i]
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("🎭 碎片祭品：%s", c.Name),
+				fmt.Sprintf("sp:starup:confirm:%d:%d:%s", servantID, c.ID, itemTypeShard))))
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("🐾 灵侍图鉴", spCbList),
@@ -1128,6 +1177,9 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 			ackText = fmt.Sprintf("⚔️ 胜利！获得 %d 星，+%d 灵晶", res.Stars, res.Reward)
 			if res.DroppedEgg != nil {
 				ackText += fmt.Sprintf("\n🥚 Boss 掉落 %s 品灵侍蛋（可在灵侍蛋面板孵化）", res.DroppedEgg.Quality)
+			}
+			for _, it := range res.DroppedItems {
+				ackText += fmt.Sprintf("\n🎁 获得 %s ×1（升星可用）", spiritItemNames[it])
 			}
 		} else {
 			ackText = fmt.Sprintf("💀 不敌 %s，稍作休整再战", res.EnemyName)
@@ -1295,27 +1347,49 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		rest := strings.TrimPrefix(cb.Data, spCbStarUpPrefix)
 		fields := strings.SplitN(rest, ":", 2)
 		if len(fields) == 2 && fields[0] == "confirm" {
-			ids := strings.SplitN(fields[1], ":", 2)
-			if len(ids) == 2 {
-				targetID, err1 := strconv.ParseUint(ids[0], 10, 64)
-				sacID, err2 := strconv.ParseUint(ids[1], 10, 64)
-				if err1 == nil && err2 == nil {
-					err := db.Transaction(func(tx *gorm.DB) error {
-						return StarUpgrade(tx, userID, uint(targetID), []uint{uint(sacID)})
-					})
-					if err != nil {
-						ackText = fmt.Sprintf("升星失败：%v", err)
-					} else {
-						var t2 UserSpiritServant
-						if e2 := db.First(&t2, targetID).Error; e2 == nil {
-							ackText = fmt.Sprintf("⭐ 升星成功：%s ⭐%d（等级重置为 1）", t2.Name, t2.Star)
-						} else {
-							ackText = "⭐ 升星成功"
-						}
+			// confirm:{target}（灵侍ID 段）——3 种格式：
+			// {target}:{sacID}            普通灵侍祭品
+			// {target}:item:lingpo        灵魄直接升星
+			// {target}:{sacID}:shard      真身碎片 + 祭品
+			ids := strings.SplitN(fields[1], ":", 3)
+			targetID, err1 := strconv.ParseUint(ids[0], 10, 64)
+			var sacIDs []uint
+			var useItem string
+			valid := false
+			if err1 == nil {
+				switch len(ids) {
+				case 2:
+					if v, err2 := strconv.ParseUint(ids[1], 10, 64); err2 == nil {
+						sacIDs = []uint{uint(v)}
+						valid = true
 					}
-					text, kb = spiritPanelStarUp(userID, uint(targetID))
-					break
+				case 3:
+					if ids[1] == "item" && ids[2] == itemTypeSoul {
+						useItem = itemTypeSoul
+						valid = true
+					} else if v, err2 := strconv.ParseUint(ids[1], 10, 64); err2 == nil && ids[2] == itemTypeShard {
+						sacIDs = []uint{uint(v)}
+						useItem = itemTypeShard
+						valid = true
+					}
 				}
+			}
+			if valid {
+				err := db.Transaction(func(tx *gorm.DB) error {
+					return StarUpgrade(tx, userID, uint(targetID), sacIDs, useItem)
+				})
+				if err != nil {
+					ackText = fmt.Sprintf("升星失败：%v", err)
+				} else {
+					var t2 UserSpiritServant
+					if e2 := db.First(&t2, targetID).Error; e2 == nil {
+						ackText = fmt.Sprintf("⭐ 升星成功：%s ⭐%d（等级重置为 1）", t2.Name, t2.Star)
+					} else {
+						ackText = "⭐ 升星成功"
+					}
+				}
+				text, kb = spiritPanelStarUp(userID, uint(targetID))
+				break
 			}
 			ackText = "无效的升星指令"
 			text, kb = spiritPanelList(db, userID)

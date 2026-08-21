@@ -115,12 +115,17 @@ func FeedSpirit(tx *gorm.DB, userID int64, servantID uint, amount int) error {
 	return tx.Save(&s).Error
 }
 
-// StarUpgrade 升星（三段制祭品）：
+// StarUpgrade 升星（三段制祭品 + 道具替代）：
 // - 段1（升至 ≤3 星）：祭品同品阶 + 同属性（不限星级）
 // - 段2（升至 4-6 星）：同品阶 + 同属性 + 同星级（祭品星级=目标当前星级）
 // - 段3（升至 7-9 星）：同名 + 同星级（祭品星级=目标当前星级）
+// 道具替代：
+//   - 灵魄（useItem=itemTypeSoul）：段1-2，无需灵侍祭品，消耗 1 灵魄
+//   - 万能真身碎片（useItem=itemTypeShard）：段3，替代「同名」要求——
+//     祭品仅需同品质 + 同星级（不限属性/名称），消耗 1 碎片
+//
 // 祭品不能是自己/已锁定/出战中；成功后等级重置为 1，祭品被消耗（软删除）
-func StarUpgrade(tx *gorm.DB, userID int64, targetServantID uint, sacrificeIDs []uint) error {
+func StarUpgrade(tx *gorm.DB, userID int64, targetServantID uint, sacrificeIDs []uint, useItem string) error {
 	var target UserSpiritServant
 	if err := tx.Where("id = ? AND user_id = ?", targetServantID, userID).First(&target).Error; err != nil {
 		return fmt.Errorf("灵侍不存在")
@@ -132,64 +137,106 @@ func StarUpgrade(tx *gorm.DB, userID int64, targetServantID uint, sacrificeIDs [
 	if target.IsDeployed {
 		return fmt.Errorf("出战中的灵侍不能升星")
 	}
-	if len(sacrificeIDs) < 1 {
-		return fmt.Errorf("至少需要1个祭品")
-	}
-	seen := map[uint]bool{}
-	for _, sid := range sacrificeIDs {
-		if seen[sid] {
-			return fmt.Errorf("祭品重复")
-		}
-		seen[sid] = true
-	}
 
 	nextStar := target.Star + 1
-	for _, sid := range sacrificeIDs {
-		if sid == targetServantID {
-			return fmt.Errorf("不能用自己作祭品")
+	stage := StarUpStage(nextStar)
+
+	// 道具消耗校验（在事务内条件更新，失败整体回滚）
+	switch useItem {
+	case itemTypeSoul:
+		if stage > 2 {
+			return fmt.Errorf("灵魄仅可用于升至 6 星及以下的升星")
 		}
-		var sacrifice UserSpiritServant
-		if err := tx.Where("id = ? AND user_id = ?", sid, userID).First(&sacrifice).Error; err != nil {
-			return fmt.Errorf("祭品无效：%d", sid)
+		if len(sacrificeIDs) != 0 {
+			return fmt.Errorf("灵魄升星无需提供祭品灵侍")
 		}
-		if sacrifice.IsLocked {
-			return fmt.Errorf("祭品已锁定不能消耗")
+		if err := spendSpiritItemTx(tx, userID, itemTypeSoul, 1); err != nil {
+			return err
 		}
-		if sacrifice.IsDeployed {
-			return fmt.Errorf("出战中的祭品不能消耗")
+	case itemTypeShard:
+		if stage != 3 {
+			return fmt.Errorf("真身碎片仅可用于升至 7 星及以上的升星")
 		}
-		switch {
-		case nextStar <= 3: // 段1：同品阶 + 同属性
-			if sacrifice.Quality != target.Quality {
-				return fmt.Errorf("祭品品阶不匹配：需%s品阶", target.Quality)
-			}
-			if sacrifice.Attribute != target.Attribute {
-				return fmt.Errorf("祭品属性不匹配：需%s属性", target.Attribute)
-			}
-		case nextStar <= 6: // 段2：同品阶 + 同属性 + 同星级
-			if sacrifice.Quality != target.Quality {
-				return fmt.Errorf("祭品品阶不匹配：需%s品阶", target.Quality)
-			}
-			if sacrifice.Attribute != target.Attribute {
-				return fmt.Errorf("祭品属性不匹配：需%s属性", target.Attribute)
-			}
-			if sacrifice.Star != target.Star {
-				return fmt.Errorf("祭品星级不匹配：需%d星", target.Star)
-			}
-		default: // 段3：同名 + 同星级
-			if sacrifice.Name != target.Name {
-				return fmt.Errorf("祭品名称不匹配：需%s", target.Name)
-			}
-			if sacrifice.Star != target.Star {
-				return fmt.Errorf("祭品星级不匹配：需%d星", target.Star)
-			}
+		if len(sacrificeIDs) != 1 {
+			return fmt.Errorf("碎片升星需且仅需 1 只祭品灵侍")
 		}
+		if err := spendSpiritItemTx(tx, userID, itemTypeShard, 1); err != nil {
+			return err
+		}
+	case "":
+		if len(sacrificeIDs) < 1 {
+			return fmt.Errorf("至少需要1个祭品")
+		}
+	default:
+		return fmt.Errorf("未知升星道具")
 	}
 
-	// 消耗祭品
-	for _, sid := range sacrificeIDs {
-		if err := tx.Where("id = ? AND user_id = ?", sid, userID).Delete(&UserSpiritServant{}).Error; err != nil {
-			return fmt.Errorf("删除祭品失败")
+	if len(sacrificeIDs) > 0 {
+		seen := map[uint]bool{}
+		for _, sid := range sacrificeIDs {
+			if seen[sid] {
+				return fmt.Errorf("祭品重复")
+			}
+			seen[sid] = true
+		}
+
+		for _, sid := range sacrificeIDs {
+			if sid == targetServantID {
+				return fmt.Errorf("不能用自己作祭品")
+			}
+			var sacrifice UserSpiritServant
+			if err := tx.Where("id = ? AND user_id = ?", sid, userID).First(&sacrifice).Error; err != nil {
+				return fmt.Errorf("祭品无效：%d", sid)
+			}
+			if sacrifice.IsLocked {
+				return fmt.Errorf("祭品已锁定不能消耗")
+			}
+			if sacrifice.IsDeployed {
+				return fmt.Errorf("出战中的祭品不能消耗")
+			}
+			if useItem == itemTypeShard {
+				// 碎片路径：同品质 + 同星级（不限属性/名称）
+				if sacrifice.Quality != target.Quality {
+					return fmt.Errorf("祭品品阶不匹配：需%s品阶", target.Quality)
+				}
+				if sacrifice.Star != target.Star {
+					return fmt.Errorf("祭品星级不匹配：需%d星", target.Star)
+				}
+				continue
+			}
+			switch {
+			case nextStar <= 3: // 段1：同品阶 + 同属性
+				if sacrifice.Quality != target.Quality {
+					return fmt.Errorf("祭品品阶不匹配：需%s品阶", target.Quality)
+				}
+				if sacrifice.Attribute != target.Attribute {
+					return fmt.Errorf("祭品属性不匹配：需%s属性", target.Attribute)
+				}
+			case nextStar <= 6: // 段2：同品阶 + 同属性 + 同星级
+				if sacrifice.Quality != target.Quality {
+					return fmt.Errorf("祭品品阶不匹配：需%s品阶", target.Quality)
+				}
+				if sacrifice.Attribute != target.Attribute {
+					return fmt.Errorf("祭品属性不匹配：需%s属性", target.Attribute)
+				}
+				if sacrifice.Star != target.Star {
+					return fmt.Errorf("祭品星级不匹配：需%d星", target.Star)
+				}
+			default: // 段3：同名 + 同星级
+				if sacrifice.Name != target.Name {
+					return fmt.Errorf("祭品名称不匹配：需%s", target.Name)
+				}
+				if sacrifice.Star != target.Star {
+					return fmt.Errorf("祭品星级不匹配：需%d星", target.Star)
+				}
+			}
+		}
+
+		// 消耗祭品
+		for _, sid := range sacrificeIDs {
+			if err := tx.Where("id = ? AND user_id = ?", sid, userID).Delete(&UserSpiritServant{}).Error; err != nil {
+				return fmt.Errorf("删除祭品失败")
+			}
 		}
 	}
 
@@ -197,6 +244,12 @@ func StarUpgrade(tx *gorm.DB, userID int64, targetServantID uint, sacrificeIDs [
 	var firstSacrificeID uint
 	if len(sacrificeIDs) > 0 {
 		firstSacrificeID = sacrificeIDs[0]
+	}
+	remark := fmt.Sprintf("星级提升:%d->%d, 消耗祭品%d件", target.Star, nextStar, len(sacrificeIDs))
+	if useItem == itemTypeSoul {
+		remark = fmt.Sprintf("星级提升:%d->%d, 消耗灵魄1个", target.Star, nextStar)
+	} else if useItem == itemTypeShard {
+		remark = fmt.Sprintf("星级提升:%d->%d, 消耗真身碎片1个+祭品1件", target.Star, nextStar)
 	}
 	logRecord := ServantStarUpLog{
 		UserID:             userID,
@@ -206,7 +259,7 @@ func StarUpgrade(tx *gorm.DB, userID int64, targetServantID uint, sacrificeIDs [
 		SacrificeAttribute: target.Attribute,
 		SacrificeID:        firstSacrificeID,
 		SpiritCost:         0,
-		Remark:             fmt.Sprintf("星级提升:%d->%d, 消耗祭品%d件", target.Star, nextStar, len(sacrificeIDs)),
+		Remark:             remark,
 	}
 	if err := tx.Create(&logRecord).Error; err != nil {
 		return fmt.Errorf("升星日志写入失败")
@@ -217,8 +270,28 @@ func StarUpgrade(tx *gorm.DB, userID int64, targetServantID uint, sacrificeIDs [
 	if err := tx.Save(&target).Error; err != nil {
 		return fmt.Errorf("升星保存失败")
 	}
-	log.Printf("[灵侍] 升星成功 user=%d name=%s new_star=%d sacrifices=%d", userID, target.Name, nextStar, len(sacrificeIDs))
+	log.Printf("[灵侍] 升星成功 user=%d name=%s new_star=%d sacrifices=%d item=%s",
+		userID, target.Name, nextStar, len(sacrificeIDs), useItem)
 	return nil
+}
+
+// ListShardSacrifices 列出真身碎片可用祭品（同品质+同星级，不限属性/名称；排除自己/锁定/出战中）
+func ListShardSacrifices(userID int64, target *UserSpiritServant) []UserSpiritServant {
+	var cands []UserSpiritServant
+	if err := db.Where("user_id = ?", userID).
+		Order("star desc, level desc").Find(&cands).Error; err != nil {
+		return nil
+	}
+	var out []UserSpiritServant
+	for _, c := range cands {
+		if c.ID == target.ID || c.IsLocked || c.IsDeployed {
+			continue
+		}
+		if c.Quality == target.Quality && c.Star == target.Star {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // StarUpStage 升至 nextStar 所属的段（1/2/3）

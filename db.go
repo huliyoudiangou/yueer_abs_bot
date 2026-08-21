@@ -690,6 +690,18 @@ func (SpiritEgg) TableName() string {
 	return "spirit_eggs"
 }
 
+// 灵侍道具：灵魄（升星段1-2祭品替代）/ 万能真身碎片（升星段3同名替代）
+type UserSpiritItem struct {
+	gorm.Model
+	UserID   int64  `gorm:"uniqueIndex:idx_user_item;not null;default:0"`
+	ItemType string `gorm:"uniqueIndex:idx_user_item;not null"` // lingpo=灵魄 / shard=万能真身碎片
+	Count    int    `gorm:"default:0"`
+}
+
+func (UserSpiritItem) TableName() string {
+	return "user_spirit_items"
+}
+
 // 任务表：AGENTS.md、README.md、手册、docs
 
 var db *gorm.DB
@@ -1071,6 +1083,7 @@ func InitDB() {
 		&SpiritPvpBattle{},
 		&SectBeast{},
 		&SpiritEgg{},
+		&UserSpiritItem{},
 	); err != nil {
 		log.Fatalf("数据库迁移失败: %s", formatPlainError(err))
 	}

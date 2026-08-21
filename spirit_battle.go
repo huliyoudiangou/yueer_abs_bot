@@ -313,15 +313,16 @@ func GetUserStamina(userID int64) int {
 
 // PveFightResult 一次挑战的结果
 type PveFightResult struct {
-	Win         bool
-	Stars       int
-	Reward      int
-	EnemyName   string
-	TeamHPLeft  int
-	TeamHPTotal int
-	StaminaLeft int
-	IsBoss      bool
-	DroppedEgg  *SpiritEgg // Boss 胜利掉蛋（可空）
+	Win          bool
+	Stars        int
+	Reward       int
+	EnemyName    string
+	TeamHPLeft   int
+	TeamHPTotal  int
+	StaminaLeft  int
+	IsBoss       bool
+	DroppedEgg   *SpiritEgg // Boss 胜利掉蛋（可空）
+	DroppedItems []string   // 掉落道具（灵魄/真身碎片）
 }
 
 // PveFight 执行一次推图挑战（全程事务：扣体力 → 战斗 → 记进度 → 发奖励）
@@ -441,6 +442,16 @@ func PveFight(userID int64, chapterID, stageID int) (*PveFightResult, error) {
 				return err
 			}
 			result.DroppedEgg = egg
+		}
+
+		// 8. 道具掉落（灵魄/万能真身碎片，扫荡不掉）
+		if items := rollPveItemDrops(chapterID, stageID); len(items) > 0 {
+			for _, it := range items {
+				if err := addSpiritItemTx(tx, userID, it, 1); err != nil {
+					return err
+				}
+			}
+			result.DroppedItems = items
 		}
 		return nil
 	})
