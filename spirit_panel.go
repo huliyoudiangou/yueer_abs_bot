@@ -46,6 +46,7 @@ const (
 	spCbSweepPrefix   = "sp:sweep:"      // sp:sweep:1:3
 	spCbEggs          = "sp:eggs"        // sp:eggs
 	spEggHatchPrefix  = "sp:eggs:hatch:" // sp:eggs:hatch:{eggID}
+	spCbStarUpPrefix  = "sp:starup:"     // sp:starup:{servantID} / sp:starup:confirm:{id}:{sacID}
 )
 
 // 灵晶斋兑换档位（积分）
@@ -116,17 +117,30 @@ func spiritPanelList(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboard
 			if s.IsDeployed {
 				deploy = "〔出战〕"
 			}
-			b.WriteString(fmt.Sprintf("· %s%s %s品·%s Lv.%d ⭐%d 战力%d\n",
-				s.Name, deploy, s.Quality, s.Attribute, s.Level, s.Star, GetBattlePower(s)))
+			capMark := ""
+			if s.Star >= QualityMaxStar[s.Quality] {
+				capMark = "（满星）"
+			}
+			b.WriteString(fmt.Sprintf("· %s%s %s品·%s Lv.%d ⭐%d 战力%d%s\n",
+				s.Name, deploy, s.Quality, s.Attribute, s.Level, s.Star, GetBattlePower(s), capMark))
 		}
 		if len(servants) == 10 {
-			b.WriteString("\n（仅显示前 10 只）")
+			b.WriteString("\n（仅显示前 10 只）\n")
 		}
+		b.WriteString("点击下方灵侍进入升星。")
 	}
-	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)),
-	)
-	return b.String(), kb
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i := range servants {
+		s := &servants[i]
+		label := fmt.Sprintf("⭐ %s", s.Name)
+		if s.Star >= QualityMaxStar[s.Quality] {
+			label += "（满星）"
+		}
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("%s%d", spCbStarUpPrefix, s.ID))))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
 func spiritPanelBag(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
@@ -371,7 +385,7 @@ func spiritPanelHelp() (string, tgbotapi.InlineKeyboardMarkup) {
 		"· 灵侍品阶：凡/灵/玄/地/天/圣，共六阶\n" +
 		"· 灵侍属性：金木水火土阴阳（阴阳仅地阶以上可得）\n" +
 		"· 捕捉：灵墟按境界开放六大区域，需消耗缚灵索\n" +
-		"· 升星：吞噬同阶灵侍提升星级，战力大涨\n" +
+		"· 升星：星级上限 凡3/灵4/玄5/地6/天7/圣9；≤3★ 需同品同属性祭品，4-6★ 另需同星级，7-9★ 需同名同星级灵侍；升星后等级重置\n" +
 		"· 推图：六大章节各 10 关 + Boss，神行符 10/日，三星可扫荡\n" +
 		"· 镜场：上架镜像供道友挑战，胜 30 / 负 10 灵晶，10 次/日，24h 内可复仇\n" +
 		"· 锻造：锻造炉产出兵甲/魂魄两类装备（目标品质50%/-1档30%/-2档20%），穿戴提升战力，熔炼返还 40%\n" +
@@ -900,6 +914,71 @@ func spiritPanelEggs(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
+// spiritPanelStarUp 升星界面：目标 + 祭品需求 + 候选祭品列表
+func spiritPanelStarUp(userID int64, servantID uint) (string, tgbotapi.InlineKeyboardMarkup) {
+	backKb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🐾 灵侍图鉴", spCbList),
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+
+	var target UserSpiritServant
+	if err := db.Where("id = ? AND user_id = ?", servantID, userID).First(&target).Error; err != nil {
+		return "灵侍不存在或不属于你。", backKb
+	}
+	maxStar := QualityMaxStar[target.Quality]
+	var b strings.Builder
+	b.WriteString("⭐ 升星\n")
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString(fmt.Sprintf("目标：%s %s品·%s Lv.%d ⭐%d/%d\n",
+		target.Name, target.Quality, target.Attribute, target.Level, target.Star, maxStar))
+
+	if target.Star >= maxStar {
+		b.WriteString("该灵侍已达品阶星级上限。")
+		return b.String(), backKb
+	}
+	if target.IsDeployed {
+		b.WriteString("该灵侍当前出战中，请先下阵再升星。")
+		return b.String(), backKb
+	}
+
+	b.WriteString(StarUpRequirementText(&target) + "\n")
+	b.WriteString("升星后等级重置为 Lv.1，祭品灵侍将被消耗。\n")
+
+	cands := ListStarUpSacrifices(userID, &target)
+	if len(cands) == 0 {
+		b.WriteString("\n当前没有符合条件的祭品灵侍。\n可前往灵墟捕捉，或孵化灵侍蛋获得。")
+		return b.String(), backKb
+	}
+	b.WriteString("\n可用祭品：\n")
+	for i := range cands {
+		if i >= 15 {
+			break
+		}
+		c := &cands[i]
+		b.WriteString(fmt.Sprintf("· %s %s品·%s ⭐%d 战力%d\n",
+			c.Name, c.Quality, c.Attribute, c.Star, GetBattlePower(c)))
+	}
+	if len(cands) > 15 {
+		b.WriteString(fmt.Sprintf("（共 %d 只，仅显示前 15 只）", len(cands)))
+	}
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i := range cands {
+		if i >= 15 {
+			break
+		}
+		c := &cands[i]
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("以 %s 为祭品", c.Name),
+				fmt.Sprintf("sp:starup:confirm:%d:%d", servantID, c.ID))))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🐾 灵侍图鉴", spCbList),
+		tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
 // ------------------------------------------
 // 对外入口
 // ------------------------------------------
@@ -1212,6 +1291,48 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 			ackText = fmt.Sprintf("🐣 孵化成功：%s %s品灵侍（Lv.%d）", ser.Name, ser.Quality, ser.Level)
 		}
 		text, kb = spiritPanelEggs(userID)
+	case strings.HasPrefix(cb.Data, spCbStarUpPrefix):
+		rest := strings.TrimPrefix(cb.Data, spCbStarUpPrefix)
+		fields := strings.SplitN(rest, ":", 2)
+		if len(fields) == 2 && fields[0] == "confirm" {
+			ids := strings.SplitN(fields[1], ":", 2)
+			if len(ids) == 2 {
+				targetID, err1 := strconv.ParseUint(ids[0], 10, 64)
+				sacID, err2 := strconv.ParseUint(ids[1], 10, 64)
+				if err1 == nil && err2 == nil {
+					err := db.Transaction(func(tx *gorm.DB) error {
+						return StarUpgrade(tx, userID, uint(targetID), []uint{uint(sacID)})
+					})
+					if err != nil {
+						ackText = fmt.Sprintf("升星失败：%v", err)
+					} else {
+						var t2 UserSpiritServant
+						if e2 := db.First(&t2, targetID).Error; e2 == nil {
+							ackText = fmt.Sprintf("⭐ 升星成功：%s ⭐%d（等级重置为 1）", t2.Name, t2.Star)
+						} else {
+							ackText = "⭐ 升星成功"
+						}
+					}
+					text, kb = spiritPanelStarUp(userID, uint(targetID))
+					break
+				}
+			}
+			ackText = "无效的升星指令"
+			text, kb = spiritPanelList(db, userID)
+			break
+		}
+		if len(fields) == 1 {
+			sid, err := strconv.ParseUint(fields[0], 10, 64)
+			if err != nil {
+				ackText = "无效的升星指令"
+				text, kb = spiritPanelList(db, userID)
+				break
+			}
+			text, kb = spiritPanelStarUp(userID, uint(sid))
+			break
+		}
+		ackText = "无效的升星指令"
+		text, kb = spiritPanelList(db, userID)
 	default:
 		ackText = "未知操作"
 		text, kb = spiritPanelHome(db, userID)
