@@ -4540,6 +4540,19 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 
+	// 万灵阁入口：放在群门槛之后、会话状态判断之前。
+	// 主菜单其余按钮要求会话处于 IDLE；若会话卡在等待步骤（突破确认/求书补充等），
+	// 那些按钮会静默无响应，而万灵阁作为灵侍体系总入口必须始终可用。
+	if text == "🐉 万灵阁" || text == "万灵阁" {
+		if msg.Chat.IsPrivate() {
+			clearSession(userID)
+			SendSpiritPanel(bot, userID, chatID)
+		} else {
+			sendPlainText(bot, chatID, "🐉 万灵阁仅在私聊开放，请私聊我使用")
+		}
+		return
+	}
+
 	if HandleBookAnnouncementRecoveryCommand(bot, msg, text) {
 		return
 	}
@@ -4809,15 +4822,6 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	if isMenuCommand && session.GetStep() == "IDLE" {
 		clearSession(userID)
 		session = getSession(userID)
-
-		if text == "🐉 万灵阁" {
-			if msg.Chat.IsPrivate() {
-				SendSpiritPanel(bot, userID, chatID)
-			} else {
-				sendPlainText(bot, chatID, "🐉 万灵阁仅在私聊开放，请私聊我使用")
-			}
-			return
-		}
 
 		if strings.Contains(text, "药园") {
 			handleGardenEntry(bot, msg)
