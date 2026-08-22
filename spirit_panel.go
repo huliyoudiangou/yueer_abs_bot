@@ -677,8 +677,21 @@ func spiritPanelStageDetail(userID int64, chapterID, stageID int) (string, tgbot
 			b.WriteString("\n今日扫荡已用尽（3次），明日再来。")
 		}
 	}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🔙 章节", fmt.Sprintf("%s%d", spCbChapterPrefix, chapterID))))
+	// 下一关捷径（推图流）：无需返回章节列表；第 11 关为章节 Boss，Boss 之后是下一章第 1 关
+	nextLabel, nextData := "", ""
+	if stageID < bossStageID {
+		nextLabel = "⏭️ 下一关"
+		nextData = fmt.Sprintf("%s%d:%d", spCbStagePrefix, chapterID, stageID+1)
+	} else if chapterID < len(SpiritZones) {
+		nextLabel = "⏭️ 下一章"
+		nextData = fmt.Sprintf("%s%d:%d", spCbStagePrefix, chapterID+1, 1)
+	}
+	lastRow := tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔙 章节", fmt.Sprintf("%s%d", spCbChapterPrefix, chapterID)))
+	if nextData != "" {
+		lastRow = append(lastRow, tgbotapi.NewInlineKeyboardButtonData(nextLabel, nextData))
+	}
+	rows = append(rows, lastRow)
 	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
