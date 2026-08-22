@@ -313,11 +313,11 @@ func StarUpgrade(tx *gorm.DB, userID int64, targetServantID uint, sacrificeIDs [
 	return nil
 }
 
-// ListShardSacrifices 列出真身碎片可用祭品（同品质+同星级，不限属性/名称；排除自己/锁定/出战中）
+// ListShardSacrifices 列出真身碎片可用祭品（同品质+同星级，不限属性/名称；排除自己/锁定/出战中，战力高→低）
 func ListShardSacrifices(userID int64, target *UserSpiritServant) []UserSpiritServant {
 	var cands []UserSpiritServant
 	if err := db.Where("user_id = ?", userID).
-		Order("star desc, level desc").Find(&cands).Error; err != nil {
+		Order("id asc").Find(&cands).Error; err != nil {
 		return nil
 	}
 	var out []UserSpiritServant
@@ -329,6 +329,7 @@ func ListShardSacrifices(userID int64, target *UserSpiritServant) []UserSpiritSe
 			out = append(out, c)
 		}
 	}
+	SortServantsByPower(userID, out)
 	return out
 }
 
@@ -357,11 +358,11 @@ func StarUpRequirementText(t *UserSpiritServant) string {
 	}
 }
 
-// ListStarUpSacrifices 列出下一星可用的祭品（排除自己/锁定/出战中，按段规则过滤）
+// ListStarUpSacrifices 列出下一星可用的祭品（排除自己/锁定/出战中，按段规则过滤，战力高→低）
 func ListStarUpSacrifices(userID int64, target *UserSpiritServant) []UserSpiritServant {
 	var cands []UserSpiritServant
 	if err := db.Where("user_id = ?", userID).
-		Order("star desc, level desc").Find(&cands).Error; err != nil {
+		Order("id asc").Find(&cands).Error; err != nil {
 		return nil
 	}
 	nextStar := target.Star + 1
@@ -383,6 +384,7 @@ func ListStarUpSacrifices(userID int64, target *UserSpiritServant) []UserSpiritS
 			out = append(out, c)
 		}
 	}
+	SortServantsByPower(userID, out)
 	return out
 }
 
@@ -394,4 +396,48 @@ func TeamDeploy(tx *gorm.DB, userID int64, servantID uint, deployed bool) error 
 	}
 	s.IsDeployed = deployed
 	return tx.Save(&s).Error
+}
+
+// pickDeployedTeamTx 取出战队伍：已上阵、战力（含装备）高→低，最多 maxTeamSize 名。
+// PVE 推图 / 镜场上架 / PVP 攻击统一用此口径选队（与出战队列面板展示顺序一致）。
+func pickDeployedTeamTx(tx *gorm.DB, userID int64) ([]UserSpiritServant, error) {
+	var team []UserSpiritServant
+	if err := tx.Where("user_id = ? AND is_deployed = ?", userID, true).
+		Find(&team).Error; err != nil {
+		return nil, err
+	}
+	sortServantsWithBonus(equipBonusMap(tx, userID), team) // 装备加成走 tx，不占独立连接
+	if len(team) > maxTeamSize {
+		team = team[:maxTeamSize]
+	}
+	return team, nil
+}
+
+// toggleTeamDeploy 上阵/下阵（含上限检查），返回用户提示文案。
+// 调用方需已持有用户锁（handleSpiritCallback 约定），计数检查后落库不并发穿透。
+func toggleTeamDeploy(q *gorm.DB, userID int64, servantID uint) (string, error) {
+	var target UserSpiritServant
+	if err := q.Where("id = ? AND user_id = ?", servantID, userID).First(&target).Error; err != nil {
+		return "", fmt.Errorf("灵侍不存在或不属于你")
+	}
+	if target.IsDeployed {
+		if err := q.Transaction(func(tx *gorm.DB) error {
+			return TeamDeploy(tx, userID, servantID, false)
+		}); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("🔙 %s 已下阵", target.Name), nil
+	}
+	var deployedCount int64
+	q.Model(&UserSpiritServant{}).
+		Where("user_id = ? AND is_deployed = ?", userID, true).Count(&deployedCount)
+	if deployedCount >= int64(maxTeamSize) {
+		return "", fmt.Errorf("出战队列已满（%d/%d），请先下阵再上阵", maxTeamSize, maxTeamSize)
+	}
+	if err := q.Transaction(func(tx *gorm.DB) error {
+		return TeamDeploy(tx, userID, servantID, true)
+	}); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("⚔️ %s 已上阵", target.Name), nil
 }

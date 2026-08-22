@@ -534,6 +534,8 @@ func HandleSectCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string)
 		run = func() { handleRenameSect(bot, msg, name) }
 	case text == "宗门科技":
 		run = func() { handleSectTechnology(bot, msg) }
+	case text == "护宗神兽":
+		run = func() { handleSectBeastPanel(bot, msg) }
 	case text == "升级宗门":
 		run = func() { handleUpgradeSect(bot, msg) }
 	case text == "退出宗门":

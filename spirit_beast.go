@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log"
 
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"gorm.io/gorm"
 )
 
@@ -143,21 +144,47 @@ func FeedSectBeast(userID int64) (*SectBeast, int, error) {
 			return fmt.Errorf("宗门声望不足：喂养需 %d，当前 %d", cost, sect.Prestige)
 		}
 
-		// 神兽升级 + 阶段
+		// 神兽升级 + 阶段（条件更新防并发丢更新：同一 level 上恰好一个事务能成功，
+		// 失败者提示重试；声望扣减与升级同事务，失败整体回滚不产生“扣了没升”）
+		// 首次喂养（beast.ID==0）靠 sect_id 唯一索引防并发重复建行
 		oldStage := beast.Stage
-		beast.Level++
-		beast.TotalFed += cost
-		if newStage := sectBeastStageForLevel(beast.Level); newStage > beast.Stage {
-			beast.Stage = newStage
-		}
-		var saveErr error
+		newLevel := beast.Level + 1
 		if beast.ID == 0 {
-			saveErr = tx.Create(&beast).Error
+			beast.Level = newLevel
+			beast.TotalFed += cost
+			if newStage := sectBeastStageForLevel(newLevel); newStage > beast.Stage {
+				beast.Stage = newStage
+			}
+			if err := tx.Create(&beast).Error; err != nil {
+				return err
+			}
 		} else {
-			saveErr = tx.Save(&beast).Error
-		}
-		if saveErr != nil {
-			return saveErr
+			resBeast := tx.Model(&SectBeast{}).
+				Where("id = ? AND level = ?", beast.ID, beast.Level).
+				Updates(map[string]interface{}{
+					"level":     newLevel,
+					"total_fed": gorm.Expr("total_fed + ?", cost),
+				})
+			if resBeast.Error != nil {
+				return resBeast.Error
+			}
+			if resBeast.RowsAffected == 0 {
+				return fmt.Errorf("神兽正被同门喂养，请稍后再试")
+			}
+			beast.Level = newLevel
+			beast.TotalFed += cost
+			if newStage := sectBeastStageForLevel(newLevel); newStage > beast.Stage {
+				// 升阶条件更新：每次喂养 level+1，阶段至多前进一阶，条件保证只有一个事务成功
+				resStage := tx.Model(&SectBeast{}).
+					Where("id = ? AND stage = ?", beast.ID, beast.Stage).
+					Update("stage", newStage)
+				if resStage.Error != nil {
+					return resStage.Error
+				}
+				if resStage.RowsAffected > 0 {
+					beast.Stage = newStage
+				}
+			}
 		}
 		if beast.Stage > oldStage {
 			log.Printf("[灵侍] 护宗神兽升阶 sect=%d user=%d level=%d stage=%d",
@@ -216,4 +243,22 @@ func getSectBeastDamageBonus(userID int64) float64 {
 		return 0
 	}
 	return sectBeastStageBuff(beast.Stage)
+}
+
+// handleSectBeastPanel 宗门菜单入口（🏯 宗门 → 护宗神兽）：发送神兽面板（新消息）。
+// 由 HandleSectCommand 的「护宗神兽」文本命令触发；群聊提示转私聊。
+func handleSectBeastPanel(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
+	if msg == nil || msg.From == nil || msg.Chat == nil {
+		return
+	}
+	if !msg.Chat.IsPrivate() {
+		sendPlainText(bot, msg.Chat.ID, "🔮 护宗神兽仅在私聊开放，请私聊我使用。")
+		return
+	}
+	text, kb := spiritPanelBeast(msg.From.ID)
+	m := tgbotapi.NewMessage(msg.Chat.ID, text)
+	m.ReplyMarkup = kb
+	if _, err := bot.Send(m); err != nil {
+		log.Printf("[灵侍] 发送护宗神兽面板失败 user=%d chat=%d err=%s", msg.From.ID, msg.Chat.ID, formatTelegramSendError(err))
+	}
 }

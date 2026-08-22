@@ -32,11 +32,13 @@ const (
 	spCbListPagePrefix = "sp:list:page:" // sp:list:page:{page} 图鉴分页（每页10只）
 	spCbBag            = "sp:bag"
 	spCbCatch          = "sp:catch"
-	spCbTeam           = "sp:team"
+	spCbTeam           = "sp:team"       // sp:team 出战队列
+	spCbTeamPagePrefix = "sp:team:page:" // sp:team:page:{page} 出战队列分页（每页10只）
+	spCbTeamDoPrefix   = "sp:team:do:"   // sp:team:do:{servantID}:{page} 上阵/下阵（page 可省略）
 	spCbPush           = "sp:push"
 	spCbMirror         = "sp:mirror"
 	spCbForge          = "sp:forge"
-	spCbBeast          = "sp:beast"
+	spCbBeast          = "sp:beast" // 兼容旧消息；新入口在宗门菜单（🏯 宗门 → 护宗神兽）
 	spCbHelp           = "sp:help"
 	spCbExPrefix       = "sp:ex:"         // sp:ex:100 / sp:ex:300 / sp:ex:500 / sp:ex:1000
 	spCbZonePrefix     = "sp:zone:"       // sp:zone:qingzhu
@@ -46,8 +48,9 @@ const (
 	spCbFightPrefix    = "sp:fight:"      // sp:fight:1:3
 	spCbSweepPrefix    = "sp:sweep:"      // sp:sweep:1:3
 	spCbEggs           = "sp:eggs"        // sp:eggs
-	spEggHatchPrefix   = "sp:eggs:hatch:" // sp:eggs:hatch:{eggID}
-	spCbStarUpPrefix   = "sp:starup:"     // sp:starup:{servantID} / sp:starup:confirm:{id}:{sacID}
+	spEggHatchPrefix   = "sp:eggs:hatch:" // sp:eggs:hatch:{eggID}（可追加页码：sp:eggs:hatch:{eggID}:{page}）
+	spCbEggsPagePrefix = "sp:eggs:page:"  // sp:eggs:page:{page} 灵侍蛋分页（每页10枚）
+	spCbStarUpPrefix   = "sp:starup:"     // sp:starup:{servantID}[:{page}] / sp:starup:confirm:{id}:{sacID}
 	spCbFeed           = "sp:feed"        // sp:feed 灵侍养成面板
 	spCbFeedDoPrefix   = "sp:feed:do:"    // sp:feed:do:{servantID}:{page}（page 可省略，喂养后留在原页）
 	spCbFeedPagePrefix = "sp:feed:page:"  // sp:feed:page:{page} 养成分页（每页10只）
@@ -94,7 +97,6 @@ func spiritPanelHome(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboard
 			tgbotapi.NewInlineKeyboardButtonData("🪞 镜场", spCbMirror),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔮 护宗神兽", spCbBeast),
 			tgbotapi.NewInlineKeyboardButtonData("🔥 锻造炉", spCbForge),
 		),
 		tgbotapi.NewInlineKeyboardRow(
@@ -112,10 +114,14 @@ func spiritPanelHome(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboard
 const spiritListPageSize = 10
 
 func spiritPanelList(db *gorm.DB, userID int64, page int) (string, tgbotapi.InlineKeyboardMarkup) {
-	var total int64
-	if err := db.Model(&UserSpiritServant{}).Where("user_id = ?", userID).Count(&total).Error; err != nil {
-		log.Printf("[灵侍] 图鉴计数失败 user=%d err=%s", userID, formatTelegramSendError(err))
+	// 全量取回后内存按战力（含装备）高→低排序再分页：排序口径稳定，翻页不漂移
+	var all []UserSpiritServant
+	if err := db.Where("user_id = ?", userID).Order("id asc").Find(&all).Error; err != nil {
+		log.Printf("[灵侍] 图鉴查询失败 user=%d err=%s", userID, formatTelegramSendError(err))
 	}
+	total := int64(len(all))
+	bonusMap := userEquipBonusMap(userID)
+	sortServantsWithBonus(bonusMap, all)
 	totalPages := int((total + spiritListPageSize - 1) / spiritListPageSize)
 	if totalPages < 1 {
 		totalPages = 1
@@ -127,13 +133,11 @@ func spiritPanelList(db *gorm.DB, userID int64, page int) (string, tgbotapi.Inli
 		page = totalPages
 	}
 	offset := (page - 1) * spiritListPageSize
-
-	var servants []UserSpiritServant
-	if err := db.Where("user_id = ?", userID).
-		Order("quality desc, star desc, level desc, id asc").
-		Offset(offset).Limit(spiritListPageSize).Find(&servants).Error; err != nil {
-		log.Printf("[灵侍] 图鉴查询失败 user=%d page=%d err=%s", userID, page, formatTelegramSendError(err))
+	end := offset + spiritListPageSize
+	if end > len(all) {
+		end = len(all)
 	}
+	servants := all[offset:end]
 	var b strings.Builder
 	if totalPages > 1 {
 		b.WriteString(fmt.Sprintf("🐾 灵侍图鉴（第 %d/%d 页 · 共 %d 只）\n", page, totalPages, total))
@@ -155,7 +159,7 @@ func spiritPanelList(db *gorm.DB, userID int64, page int) (string, tgbotapi.Inli
 				capMark = "（满星）"
 			}
 			b.WriteString(fmt.Sprintf("· %s%s %s品·%s Lv.%d ⭐%d 战力%d%s\n",
-				s.Name, deploy, s.Quality, s.Attribute, s.Level, s.Star, GetBattlePower(s), capMark))
+				s.Name, deploy, s.Quality, s.Attribute, s.Level, s.Star, EnhancedBattlePower(bonusMap, s), capMark))
 		}
 		b.WriteString("点击下方灵侍进入升星。")
 	}
@@ -397,24 +401,87 @@ func spiritPanelCatchResult(userID int64, result *CatchResult, zoneKey string) (
 	return b.String(), kb
 }
 
-func spiritPanelTeam(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
+// spiritPanelTeam 出战队列：已上阵队伍（战力高→低）+ 编队调整（分页、上阵/下阵）
+// 上阵上限 maxTeamSize；出战队伍 = 已上阵全部（战斗时按战力高→低取前 maxTeamSize，二者一致）
+func spiritPanelTeam(db *gorm.DB, userID int64, page int) (string, tgbotapi.InlineKeyboardMarkup) {
+	backKb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+
+	var all []UserSpiritServant
+	if err := db.Where("user_id = ?", userID).Order("id asc").Find(&all).Error; err != nil {
+		log.Printf("[灵侍] 出战队列查询失败 user=%d err=%s", userID, formatTelegramSendError(err))
+		return "出战队列查询失败，请稍后再试。", backKb
+	}
+	bonusMap := userEquipBonusMap(userID)
+	sortServantsWithBonus(bonusMap, all) // 战力（含装备）高→低
 	var deployed []UserSpiritServant
-	db.Where("user_id = ? AND is_deployed = ?", userID, true).Find(&deployed)
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("🛡 出战队列（%d/5）\n━━━━━━━━━━━━━━\n", len(deployed)))
-	if len(deployed) == 0 {
-		b.WriteString("尚无出战灵侍。")
-	} else {
-		for i := range deployed {
-			s := &deployed[i]
-			b.WriteString(fmt.Sprintf("· %s %s品 Lv.%d ⭐%d\n", s.Name, s.Quality, s.Level, s.Star))
+	for i := range all {
+		if all[i].IsDeployed {
+			deployed = append(deployed, all[i])
 		}
 	}
-	b.WriteString("\n\n🏗 编队调整即将开放。")
-	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)),
-	)
-	return b.String(), kb
+	total := len(all)
+	totalPages := (total + spiritListPageSize - 1) / spiritListPageSize
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	offset := (page - 1) * spiritListPageSize
+	end := offset + spiritListPageSize
+	if end > total {
+		end = total
+	}
+	pageServants := all[offset:end]
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("🛡 出战队列（%d/%d）\n━━━━━━━━━━━━━━\n", len(deployed), maxTeamSize))
+	if len(deployed) == 0 {
+		b.WriteString("尚无出战灵侍。推图/镜场/PVP 需要上阵灵侍，\n请在下方列表上阵。")
+	} else {
+		b.WriteString("出战顺序（战力高→低）：\n")
+		for i := range deployed {
+			s := &deployed[i]
+			b.WriteString(fmt.Sprintf("· %s %s品·%s Lv.%d ⭐%d 战力%d\n",
+				s.Name, s.Quality, s.Attribute, s.Level, s.Star, EnhancedBattlePower(bonusMap, s)))
+		}
+	}
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	if total == 0 {
+		b.WriteString("\n你尚未收服任何灵侍，请先前往「灵墟捕捉」。")
+	} else {
+		b.WriteString(fmt.Sprintf("\n🏗 编队调整（第 %d/%d 页 · 共 %d 只）\n", page, totalPages, total))
+		for i := range pageServants {
+			s := &pageServants[i]
+			label := "⚔️ 上阵："
+			if s.IsDeployed {
+				label = "🔙 下阵："
+			}
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(
+					fmt.Sprintf("%s%s", label, s.Name),
+					fmt.Sprintf("%s%d:%d", spCbTeamDoPrefix, s.ID, page))))
+		}
+		if totalPages > 1 {
+			var pageRow []tgbotapi.InlineKeyboardButton
+			if page > 1 {
+				pageRow = append(pageRow, tgbotapi.NewInlineKeyboardButtonData("◀ 上一页", fmt.Sprintf("%s%d", spCbTeamPagePrefix, page-1)))
+			}
+			if page < totalPages {
+				pageRow = append(pageRow, tgbotapi.NewInlineKeyboardButtonData("下一页 ▶", fmt.Sprintf("%s%d", spCbTeamPagePrefix, page+1)))
+			}
+			rows = append(rows, pageRow)
+		}
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
 func spiritPanelHelp() (string, tgbotapi.InlineKeyboardMarkup) {
@@ -427,9 +494,11 @@ func spiritPanelHelp() (string, tgbotapi.InlineKeyboardMarkup) {
 		"· 捕捉：灵墟按境界开放六大区域，需消耗缚灵索\n" +
 		"· 升星：星级上限 凡3/灵4/玄5/地6/天7/圣9；≤3★ 需同品同属性祭品，4-6★ 另需同星级，7-9★ 需同名同星级灵侍；段1-2 可消耗灵魄替代祭品，段3 可消耗万能真身碎片替代同名要求；升星后等级重置\n" +
 		"· 推图：六大章节各 10 关 + Boss，神行符 10/日，三星可扫荡\n" +
+		"· 出战队列：上阵/下阵灵侍组成出战队伍（上限 5 只，出战顺序按含装备战力高→低），推图/镜场/PVP 需先上阵\n" +
+		"· 战力：图鉴/养成/出战队列/装备选择均按战力（含装备加成）高→低排列，分页展示\n" +
 		"· 镜场：上架镜像供道友挑战，胜 30 / 负 10 灵晶，10 次/日，24h 内可复仇\n" +
 		"· 锻造：锻造炉产出兵甲/魂魄两类装备（目标品质50%/-1档30%/-2档20%），穿戴提升战力；精炼：每级该装备属性 +2%，上限 +10，成本随等级与品阶递增；熔炼返还 40%\n" +
-		"· 护宗神兽：宗门声望 2000 解锁，喂养耗 20-50 声望（随等级递增），三阶为全宗提供 +1%/+2%/+3.5% 世界Boss伤害\n" +
+		"· 护宗神兽：入口「🏯 宗门 → 护宗神兽」（宗门玩法），宗门声望 2000 解锁，喂养耗 20-50 声望（随等级递增），三阶为全宗提供 +1%/+2%/+3.5% 世界Boss伤害\n" +
 		"· 灵侍蛋：击败章节 Boss 每次 30% 概率掉蛋（地阶及以下），在灵侍蛋面板孵化为对应品阶灵侍\n" +
 		"· 道具：灵魄随推图胜利掉落（普通关 25%/章节 Boss 50%）；万能真身碎片随第 5/6 章 Boss 掉落（10%）；扫荡不掉道具\n" +
 		"· 养成：养成面板喂养灵侍升级（每级耗灵晶 凡30/灵50/玄80/地120/天200/圣300），每级 +2% 一级基础属性，等级上限 = 星级 × 10\n" +
@@ -673,11 +742,29 @@ func spiritPanelMirrorRevenge(userID int64) (string, tgbotapi.InlineKeyboardMark
 	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
-// spiritPanelMirrorHistory 镜场战绩
-func spiritPanelMirrorHistory(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
-	battles := GetPvpHistory(userID)
+// spiritPanelMirrorHistory 镜场战绩（分页 10 条/页，新→旧）
+func spiritPanelMirrorHistory(userID int64, page int) (string, tgbotapi.InlineKeyboardMarkup) {
+	backRow := tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔙 镜场", spCbMirror),
+		tgbotapi.NewInlineKeyboardButtonData("🐉 万灵阁", spCbHome))
+	battles, total := GetPvpHistory(userID, page, pvpHistoryLimit)
+	totalPages := int((total + pvpHistoryLimit - 1) / pvpHistoryLimit)
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
 	var b strings.Builder
-	b.WriteString("📜 镜场战绩\n━━━━━━━━━━━━━━\n")
+	if totalPages > 1 {
+		b.WriteString(fmt.Sprintf("📜 镜场战绩（第 %d/%d 页 · 共 %d 条）\n", page, totalPages, total))
+	} else {
+		b.WriteString("📜 镜场战绩\n")
+	}
+	b.WriteString("━━━━━━━━━━━━━━\n")
 	if len(battles) == 0 {
 		b.WriteString("暂无战斗记录。")
 	} else {
@@ -702,11 +789,19 @@ func spiritPanelMirrorHistory(userID int64) (string, tgbotapi.InlineKeyboardMark
 			}
 		}
 	}
-	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔙 镜场", spCbMirror),
-			tgbotapi.NewInlineKeyboardButtonData("🐉 万灵阁", spCbHome)))
-	return b.String(), kb
+	var rows [][]tgbotapi.InlineKeyboardButton
+	if totalPages > 1 {
+		var pageRow []tgbotapi.InlineKeyboardButton
+		if page > 1 {
+			pageRow = append(pageRow, tgbotapi.NewInlineKeyboardButtonData("◀ 上一页", fmt.Sprintf("sp:mirror:hist:page:%d", page-1)))
+		}
+		if page < totalPages {
+			pageRow = append(pageRow, tgbotapi.NewInlineKeyboardButtonData("下一页 ▶", fmt.Sprintf("sp:mirror:hist:page:%d", page+1)))
+		}
+		rows = append(rows, pageRow)
+	}
+	rows = append(rows, backRow)
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
 // pvpAttackResultPanel 攻击结果面板
@@ -833,23 +928,43 @@ func spiritPanelEquip(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
-// spiritPanelEquipPick 选择穿戴目标灵侍
-func spiritPanelEquipPick(userID int64, equipmentID uint) (string, tgbotapi.InlineKeyboardMarkup) {
+// spiritPanelEquipPick 选择穿戴目标灵侍（分页 10/页，战力高→低）
+func spiritPanelEquipPick(userID int64, equipmentID uint, page int) (string, tgbotapi.InlineKeyboardMarkup) {
+	backRow := tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🎒 装备", "sp:equip"))
 	var eq ServantEquipment
 	if err := db.Where("id = ? AND user_id = ?", equipmentID, userID).First(&eq).Error; err != nil {
-		return "装备不存在或不属于你", tgbotapi.NewInlineKeyboardMarkup(
-			tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🎒 装备", "sp:equip")))
+		return "装备不存在或不属于你", tgbotapi.NewInlineKeyboardMarkup(backRow)
 	}
-	var servants []UserSpiritServant
-	db.Where("user_id = ?", userID).Order("star desc, level desc").Limit(10).Find(&servants)
+	var all []UserSpiritServant
+	db.Where("user_id = ?", userID).Order("id asc").Find(&all)
+	bonusMap := userEquipBonusMap(userID)
+	sortServantsWithBonus(bonusMap, all)
+	total := len(all)
+	totalPages := (total + spiritListPageSize - 1) / spiritListPageSize
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	offset := (page - 1) * spiritListPageSize
+	end := offset + spiritListPageSize
+	if end > total {
+		end = total
+	}
+	servants := all[offset:end]
 
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("⚔️ 穿戴 %s\n", eq.Name))
 	b.WriteString("━━━━━━━━━━━━━━\n")
-	if len(servants) == 0 {
+	if total == 0 {
 		b.WriteString("你还没有灵侍。")
 	} else {
-		b.WriteString("选择穿戴到哪只灵侍：\n")
+		b.WriteString(fmt.Sprintf("选择穿戴到哪只灵侍（第 %d/%d 页 · 共 %d 只）：\n", page, totalPages, total))
 	}
 
 	var rows [][]tgbotapi.InlineKeyboardButton
@@ -866,15 +981,24 @@ func spiritPanelEquipPick(userID int64, equipmentID uint) (string, tgbotapi.Inli
 			tgbotapi.NewInlineKeyboardButtonData(label,
 				fmt.Sprintf("sp:equip:confirm:%d:%d", equipmentID, s.ID))))
 	}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🎒 装备", "sp:equip")))
+	if totalPages > 1 {
+		var pageRow []tgbotapi.InlineKeyboardButton
+		if page > 1 {
+			pageRow = append(pageRow, tgbotapi.NewInlineKeyboardButtonData("◀ 上一页", fmt.Sprintf("sp:equip:put:%d:%d", equipmentID, page-1)))
+		}
+		if page < totalPages {
+			pageRow = append(pageRow, tgbotapi.NewInlineKeyboardButtonData("下一页 ▶", fmt.Sprintf("sp:equip:put:%d:%d", equipmentID, page+1)))
+		}
+		rows = append(rows, pageRow)
+	}
+	rows = append(rows, backRow)
 	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
-// spiritPanelBeast 护宗神兽面板
+// spiritPanelBeast 护宗神兽面板（入口：🏯 宗门 → 护宗神兽；返回键回宗门菜单）
 func spiritPanelBeast(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 	backKb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 返回宗门", "menu:sect")))
 
 	var member SectMember
 	if err := db.Where("user_id = ?", userID).First(&member).Error; err != nil {
@@ -928,19 +1052,32 @@ func spiritPanelBeast(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 		tgbotapi.NewInlineKeyboardButtonData(
 			fmt.Sprintf("🐾 喂养（-%d 声望）", cost), "sp:beast:feed")))
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+		tgbotapi.NewInlineKeyboardButtonData("🔙 返回宗门", "menu:sect")))
 	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
-// spiritPanelEggs 灵侍蛋面板（未孵化列表 + 孵化历史）
-func spiritPanelEggs(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
-	bag, hatched := ListEggs(userID)
+// spiritPanelEggs 灵侍蛋面板（未孵化列表分页 10/枚 + 最近孵化历史 ≤5）
+func spiritPanelEggs(userID int64, page int) (string, tgbotapi.InlineKeyboardMarkup) {
+	bag, hatched, total := ListEggs(userID, page, spiritListPageSize)
+	totalPages := int((total + spiritListPageSize - 1) / spiritListPageSize)
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
 	var b strings.Builder
-	b.WriteString("🥚 灵侍蛋\n")
+	if totalPages > 1 {
+		b.WriteString(fmt.Sprintf("🥚 灵侍蛋（未孵化 %d 枚，第 %d/%d 页）\n", total, page, totalPages))
+	} else {
+		b.WriteString(fmt.Sprintf("🥚 灵侍蛋（未孵化 %d 枚）\n", total))
+	}
 	b.WriteString("━━━━━━━━━━━━━━\n")
 	b.WriteString("击败章节 Boss 有概率掉落灵侍蛋（地阶及以下），\n")
 	b.WriteString("孵化后生成对应品阶的灵侍。\n")
-	b.WriteString("【未孵化】\n")
 	if len(bag) == 0 {
 		b.WriteString("暂无未孵化的灵侍蛋。\n")
 	} else {
@@ -960,7 +1097,17 @@ func spiritPanelEggs(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(
 				fmt.Sprintf("孵化 %s 品灵侍蛋", bag[i].Quality),
-				fmt.Sprintf("%s%d", spEggHatchPrefix, bag[i].ID))))
+				fmt.Sprintf("%s%d:%d", spEggHatchPrefix, bag[i].ID, page))))
+	}
+	if totalPages > 1 {
+		var pageRow []tgbotapi.InlineKeyboardButton
+		if page > 1 {
+			pageRow = append(pageRow, tgbotapi.NewInlineKeyboardButtonData("◀ 上一页", fmt.Sprintf("%s%d", spCbEggsPagePrefix, page-1)))
+		}
+		if page < totalPages {
+			pageRow = append(pageRow, tgbotapi.NewInlineKeyboardButtonData("下一页 ▶", fmt.Sprintf("%s%d", spCbEggsPagePrefix, page+1)))
+		}
+		rows = append(rows, pageRow)
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("🔙 万灵阁", spCbHome)))
@@ -974,10 +1121,14 @@ func spiritPanelFeed(userID int64, page int) (string, tgbotapi.InlineKeyboardMar
 			tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
 
 	lingjing, _ := GetUserWalletBalance(db, userID)
-	var total int64
-	if err := db.Model(&UserSpiritServant{}).Where("user_id = ?", userID).Count(&total).Error; err != nil {
-		log.Printf("[灵侍] 养成计数失败 user=%d err=%s", userID, formatTelegramSendError(err))
+	// 全量取回后内存按战力（含装备）高→低排序再分页：与图鉴同口径
+	var all []UserSpiritServant
+	if err := db.Where("user_id = ?", userID).Order("id asc").Find(&all).Error; err != nil {
+		log.Printf("[灵侍] 养成查询失败 user=%d err=%s", userID, formatTelegramSendError(err))
 	}
+	total := int64(len(all))
+	bonusMap := userEquipBonusMap(userID)
+	sortServantsWithBonus(bonusMap, all)
 	totalPages := int((total + spiritListPageSize - 1) / spiritListPageSize)
 	if totalPages < 1 {
 		totalPages = 1
@@ -989,13 +1140,11 @@ func spiritPanelFeed(userID int64, page int) (string, tgbotapi.InlineKeyboardMar
 		page = totalPages
 	}
 	offset := (page - 1) * spiritListPageSize
-
-	var servants []UserSpiritServant
-	if err := db.Where("user_id = ?", userID).
-		Order("quality desc, star desc, level desc, id asc").
-		Offset(offset).Limit(spiritListPageSize).Find(&servants).Error; err != nil {
-		log.Printf("[灵侍] 养成查询失败 user=%d page=%d err=%s", userID, page, formatTelegramSendError(err))
+	end := offset + spiritListPageSize
+	if end > len(all) {
+		end = len(all)
 	}
+	servants := all[offset:end]
 	var b strings.Builder
 	if totalPages > 1 {
 		b.WriteString(fmt.Sprintf("🌿 灵侍养成（第 %d/%d 页 · 共 %d 只）\n", page, totalPages, total))
@@ -1022,7 +1171,7 @@ func spiritPanelFeed(userID int64, page int) (string, tgbotapi.InlineKeyboardMar
 			capMark = "（满级）"
 		}
 		b.WriteString(fmt.Sprintf("· %s %s品·%s ⭐%d Lv.%d/%d 战力%d%s\n",
-			s.Name, s.Quality, s.Attribute, s.Star, s.Level, maxLv, GetBattlePower(s), capMark))
+			s.Name, s.Quality, s.Attribute, s.Star, s.Level, maxLv, EnhancedBattlePower(bonusMap, s), capMark))
 		if s.Level < maxLv {
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData(
@@ -1045,8 +1194,9 @@ func spiritPanelFeed(userID int64, page int) (string, tgbotapi.InlineKeyboardMar
 	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
-// spiritPanelStarUp 升星界面：目标 + 祭品需求 + 候选祭品列表
-func spiritPanelStarUp(userID int64, servantID uint) (string, tgbotapi.InlineKeyboardMarkup) {
+// spiritPanelStarUp 升星界面：目标 + 祭品需求 + 候选祭品列表（分页，每页10只，战力高→低）
+// 合并列表：普通祭品在前，碎片祭品（段3）在后，同页内保持两段顺序
+func spiritPanelStarUp(userID int64, servantID uint, page int) (string, tgbotapi.InlineKeyboardMarkup) {
 	backKb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🐾 灵侍图鉴", spCbList),
@@ -1081,22 +1231,62 @@ func spiritPanelStarUp(userID int64, servantID uint) (string, tgbotapi.InlineKey
 	stage := StarUpStage(target.Star + 1)
 	b.WriteString(fmt.Sprintf("\n🧪 持有灵魄：%d  🎭 持有真身碎片：%d\n", soulN, shardN))
 
+	// 合并候选列表（两段各自已按战力高→低排序，见 ListStarUpSacrifices / ListShardSacrifices）
+	type starUpCandidate struct {
+		s     UserSpiritServant
+		shard bool
+	}
+	var combined []starUpCandidate
 	cands := ListStarUpSacrifices(userID, &target)
-	if len(cands) > 0 {
-		b.WriteString("\n可用祭品：\n")
-		for i := range cands {
-			if i >= 15 {
-				break
-			}
-			c := &cands[i]
-			b.WriteString(fmt.Sprintf("· %s %s品·%s ⭐%d 战力%d\n",
-				c.Name, c.Quality, c.Attribute, c.Star, GetBattlePower(c)))
+	for i := range cands {
+		combined = append(combined, starUpCandidate{cands[i], false})
+	}
+	var shardCands []UserSpiritServant
+	if stage == 3 && shardN > 0 {
+		shardCands = ListShardSacrifices(userID, &target)
+		for i := range shardCands {
+			combined = append(combined, starUpCandidate{shardCands[i], true})
 		}
-		if len(cands) > 15 {
-			b.WriteString(fmt.Sprintf("（共 %d 只，仅显示前 15 只）", len(cands)))
-		}
-	} else {
+	}
+
+	total := len(combined)
+	totalPages := (total + spiritListPageSize - 1) / spiritListPageSize
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	offset := (page - 1) * spiritListPageSize
+	end := offset + spiritListPageSize
+	if end > total {
+		end = total
+	}
+	pageCands := combined[offset:end]
+
+	bonusMap := userEquipBonusMap(userID)
+
+	if total == 0 {
 		b.WriteString("\n当前没有符合条件的祭品灵侍。\n可前往灵墟捕捉，或孵化灵侍蛋获得。")
+	} else {
+		if totalPages > 1 {
+			b.WriteString(fmt.Sprintf("\n可用祭品（共 %d 只，第 %d/%d 页 · 每页 10 只）：\n", total, page, totalPages))
+		} else {
+			b.WriteString(fmt.Sprintf("\n可用祭品（共 %d 只）：\n", total))
+		}
+		shardHeaderShown := false
+		for i := range pageCands {
+			c := &pageCands[i]
+			if c.shard && !shardHeaderShown {
+				b.WriteString("\n【碎片祭品】消耗 1 个万能真身碎片，祭品仅需同品质+同星级：\n")
+				shardHeaderShown = true
+			}
+			b.WriteString(fmt.Sprintf("· %s %s品·%s ⭐%d 战力%d\n",
+				c.s.Name, c.s.Quality, c.s.Attribute, c.s.Star, EnhancedBattlePower(bonusMap, &c.s)))
+		}
 	}
 
 	// 灵魄选项（段1-2）
@@ -1104,37 +1294,20 @@ func spiritPanelStarUp(userID int64, servantID uint) (string, tgbotapi.InlineKey
 		b.WriteString("\n💡 可直接消耗 1 个灵魄升星，无需祭品灵侍。")
 	}
 
-	// 碎片祭品段（段3）
-	var shardCands []UserSpiritServant
-	if stage == 3 && shardN > 0 {
-		shardCands = ListShardSacrifices(userID, &target)
-		b.WriteString("\n【碎片祭品】消耗 1 个万能真身碎片，祭品仅需同品质+同星级：\n")
-		if len(shardCands) == 0 {
-			b.WriteString("· 暂无同品质同星级灵侍\n")
-		}
-		for i := range shardCands {
-			if i >= 15 {
-				break
-			}
-			c := &shardCands[i]
-			b.WriteString(fmt.Sprintf("· %s %s品·%s ⭐%d 战力%d\n",
-				c.Name, c.Quality, c.Attribute, c.Star, GetBattlePower(c)))
-		}
-		if len(shardCands) > 15 {
-			b.WriteString(fmt.Sprintf("（共 %d 只，仅显示前 15 只）", len(shardCands)))
-		}
-	}
-
 	var rows [][]tgbotapi.InlineKeyboardButton
-	for i := range cands {
-		if i >= 15 {
-			break
+	for i := range pageCands {
+		c := &pageCands[i]
+		if c.shard {
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(
+					fmt.Sprintf("🎭 碎片祭品：%s", c.s.Name),
+					fmt.Sprintf("sp:starup:confirm:%d:%d:%s", servantID, c.s.ID, itemTypeShard))))
+		} else {
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(
+					fmt.Sprintf("以 %s 为祭品", c.s.Name),
+					fmt.Sprintf("sp:starup:confirm:%d:%d", servantID, c.s.ID))))
 		}
-		c := &cands[i]
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(
-				fmt.Sprintf("以 %s 为祭品", c.Name),
-				fmt.Sprintf("sp:starup:confirm:%d:%d", servantID, c.ID))))
 	}
 	if stage <= 2 && soulN > 0 {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
@@ -1142,15 +1315,15 @@ func spiritPanelStarUp(userID int64, servantID uint) (string, tgbotapi.InlineKey
 				"⭐ 灵魄升星（-1 灵魄）",
 				fmt.Sprintf("sp:starup:confirm:%d:item:%s", servantID, itemTypeSoul))))
 	}
-	for i := range shardCands {
-		if i >= 15 {
-			break
+	if totalPages > 1 {
+		var pageRow []tgbotapi.InlineKeyboardButton
+		if page > 1 {
+			pageRow = append(pageRow, tgbotapi.NewInlineKeyboardButtonData("◀ 上一页", fmt.Sprintf("%s%d:%d", spCbStarUpPrefix, servantID, page-1)))
 		}
-		c := &shardCands[i]
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(
-				fmt.Sprintf("🎭 碎片祭品：%s", c.Name),
-				fmt.Sprintf("sp:starup:confirm:%d:%d:%s", servantID, c.ID, itemTypeShard))))
+		if page < totalPages {
+			pageRow = append(pageRow, tgbotapi.NewInlineKeyboardButtonData("下一页 ▶", fmt.Sprintf("%s%d:%d", spCbStarUpPrefix, servantID, page+1)))
+		}
+		rows = append(rows, pageRow)
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("🐾 灵侍图鉴", spCbList),
@@ -1210,7 +1383,31 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 	case cb.Data == spCbCatch:
 		text, kb = spiritPanelCatch(db, userID)
 	case cb.Data == spCbTeam:
-		text, kb = spiritPanelTeam(db, userID)
+		text, kb = spiritPanelTeam(db, userID, 1)
+	case strings.HasPrefix(cb.Data, spCbTeamPagePrefix):
+		page := 0
+		fmt.Sscanf(strings.TrimPrefix(cb.Data, spCbTeamPagePrefix), "%d", &page)
+		text, kb = spiritPanelTeam(db, userID, page)
+	case strings.HasPrefix(cb.Data, spCbTeamDoPrefix):
+		rest := strings.TrimPrefix(cb.Data, spCbTeamDoPrefix)
+		parts := strings.SplitN(rest, ":", 2)
+		sid, perr := strconv.ParseUint(parts[0], 10, 64)
+		page := 1
+		if len(parts) == 2 {
+			fmt.Sscanf(parts[1], "%d", &page)
+		}
+		if perr != nil {
+			ackText = "无效的出战指令"
+			text, kb = spiritPanelTeam(db, userID, 1)
+			break
+		}
+		m, terr := toggleTeamDeploy(db, userID, uint(sid))
+		if terr != nil {
+			ackText = terr.Error()
+		} else {
+			ackText = m
+		}
+		text, kb = spiritPanelTeam(db, userID, page)
 	case cb.Data == spCbPush:
 		text, kb = spiritPanelPush(db, userID)
 	case cb.Data == spCbBeast:
@@ -1359,7 +1556,11 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 	case cb.Data == "sp:mirror:rev":
 		text, kb = spiritPanelMirrorRevenge(userID)
 	case cb.Data == "sp:mirror:hist":
-		text, kb = spiritPanelMirrorHistory(userID)
+		text, kb = spiritPanelMirrorHistory(userID, 1)
+	case strings.HasPrefix(cb.Data, "sp:mirror:hist:page:"):
+		page := 0
+		fmt.Sscanf(strings.TrimPrefix(cb.Data, "sp:mirror:hist:page:"), "%d", &page)
+		text, kb = spiritPanelMirrorHistory(userID, page)
 	case strings.HasPrefix(cb.Data, "sp:mirror:rev:"):
 		targetID, err := strconv.ParseInt(strings.TrimPrefix(cb.Data, "sp:mirror:rev:"), 10, 64)
 		if err != nil || targetID <= 0 {
@@ -1439,7 +1640,11 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 			}
 			switch fields[0] {
 			case "put":
-				text, kb = spiritPanelEquipPick(userID, uint(id))
+				eqPage := 1
+				if len(fields) == 3 {
+					fmt.Sscanf(fields[2], "%d", &eqPage)
+				}
+				text, kb = spiritPanelEquipPick(userID, uint(id), eqPage)
 			case "off":
 				if err := UnequipEquipment(userID, uint(id)); err != nil {
 					ackText = fmt.Sprintf("卸下失败：%v", err)
@@ -1482,13 +1687,22 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 			text, kb = spiritPanelEquip(userID)
 		}
 	case cb.Data == spCbEggs:
-		text, kb = spiritPanelEggs(userID)
+		text, kb = spiritPanelEggs(userID, 1)
+	case strings.HasPrefix(cb.Data, spCbEggsPagePrefix):
+		page := 0
+		fmt.Sscanf(strings.TrimPrefix(cb.Data, spCbEggsPagePrefix), "%d", &page)
+		text, kb = spiritPanelEggs(userID, page)
 	case strings.HasPrefix(cb.Data, spEggHatchPrefix):
-		idStr := strings.TrimPrefix(cb.Data, spEggHatchPrefix)
-		eggID, err := strconv.ParseUint(idStr, 10, 64)
+		// sp:eggs:hatch:{eggID} 或 sp:eggs:hatch:{eggID}:{page}
+		idParts := strings.SplitN(strings.TrimPrefix(cb.Data, spEggHatchPrefix), ":", 2)
+		eggID, err := strconv.ParseUint(idParts[0], 10, 64)
+		page := 1
+		if len(idParts) == 2 {
+			fmt.Sscanf(idParts[1], "%d", &page)
+		}
 		if err != nil {
 			ackText = "无效的灵侍蛋指令"
-			text, kb = spiritPanelEggs(userID)
+			text, kb = spiritPanelEggs(userID, 1)
 			break
 		}
 		ser, err := HatchEgg(userID, uint(eggID))
@@ -1497,7 +1711,7 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		} else {
 			ackText = fmt.Sprintf("🐣 孵化成功：%s %s品灵侍（Lv.%d）", ser.Name, ser.Quality, ser.Level)
 		}
-		text, kb = spiritPanelEggs(userID)
+		text, kb = spiritPanelEggs(userID, page)
 	case cb.Data == spCbFeed:
 		text, kb = spiritPanelFeed(userID, 1)
 	case strings.HasPrefix(cb.Data, spCbFeedPagePrefix):
@@ -1579,7 +1793,7 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 						ackText = "⭐ 升星成功"
 					}
 				}
-				text, kb = spiritPanelStarUp(userID, uint(targetID))
+				text, kb = spiritPanelStarUp(userID, uint(targetID), 1)
 				break
 			}
 			ackText = "无效的升星指令"
@@ -1593,7 +1807,20 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 				text, kb = spiritPanelList(db, userID, 1)
 				break
 			}
-			text, kb = spiritPanelStarUp(userID, uint(sid))
+			text, kb = spiritPanelStarUp(userID, uint(sid), 1)
+			break
+		}
+		if len(fields) == 2 {
+			// {target}:{page} 升星候选分页（confirm 已在上方分支处理）
+			sid, err := strconv.ParseUint(fields[0], 10, 64)
+			if err != nil {
+				ackText = "无效的升星指令"
+				text, kb = spiritPanelList(db, userID, 1)
+				break
+			}
+			page := 0
+			fmt.Sscanf(fields[1], "%d", &page)
+			text, kb = spiritPanelStarUp(userID, uint(sid), page)
 			break
 		}
 		ackText = "无效的升星指令"

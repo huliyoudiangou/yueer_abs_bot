@@ -89,10 +89,24 @@ func dropBossEgg(tx *gorm.DB, userID int64, chapterID int, zone *SpiritZone) (*S
 	return egg, nil
 }
 
-// ListEggs 返回未孵化蛋（≤20）与最近孵化历史（≤5）
-func ListEggs(userID int64) (bag []SpiritEgg, hatched []SpiritEgg) {
-	db.Where("user_id = ? AND status = ?", userID, eggStatusBag).
-		Order("id desc").Limit(20).Find(&bag)
+// ListEggs 返回未孵化蛋（新→旧，分页；page 从 1 起，越界钳制）与最近孵化历史（≤5）
+// 未孵化蛋无持有上限，必须分页保证所有蛋可达（否则老蛋无法孵化）
+func ListEggs(userID int64, page, pageSize int) (bag []SpiritEgg, hatched []SpiritEgg, total int64) {
+	db.Model(&SpiritEgg{}).Where("user_id = ? AND status = ?", userID, eggStatusBag).Count(&total)
+	if total > 0 {
+		if pageSize <= 0 {
+			pageSize = 10
+		}
+		if page < 1 {
+			page = 1
+		}
+		maxPage := int((total + int64(pageSize) - 1) / int64(pageSize))
+		if page > maxPage {
+			page = maxPage
+		}
+		db.Where("user_id = ? AND status = ?", userID, eggStatusBag).
+			Order("id desc").Offset((page - 1) * pageSize).Limit(pageSize).Find(&bag)
+	}
 	db.Where("user_id = ? AND status = ?", userID, eggStatusHatch).
 		Order("id desc").Limit(5).Find(&hatched)
 	return

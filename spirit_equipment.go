@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"sort"
 
 	"gorm.io/gorm"
 )
@@ -254,9 +255,11 @@ func EnhanceEquipment(tx *gorm.DB, userID int64, equipmentID uint) (int, error) 
 	return cost, nil
 }
 
-func getServantEquipBonus(userID int64, servantID uint) (hp, atk, def, spd, mag int) {
+// getServantEquipBonus 单只灵侍的装备加成合计（精炼后）
+// q 为 DB 句柄：事务内调用方必须传 tx，避免占用独立连接（小连接池下会死等）
+func getServantEquipBonus(q *gorm.DB, userID int64, servantID uint) (hp, atk, def, spd, mag int) {
 	var eqs []ServantEquipment
-	db.Where("user_id = ? AND servant_id = ?", userID, servantID).Find(&eqs)
+	q.Where("user_id = ? AND servant_id = ?", userID, servantID).Find(&eqs)
 	for i := range eqs {
 		e := &eqs[i]
 		m := 1 + equipEnhancePerLevel*float64(e.Enhance) // 精炼加成
@@ -270,7 +273,8 @@ func getServantEquipBonus(userID int64, servantID uint) (hp, atk, def, spd, mag 
 }
 
 // enhanceServantStats 返回并入装备加成后的灵侍副本（战斗/战力计算用，不改原对象）
-func enhanceServantStats(userID int64, team []UserSpiritServant) []UserSpiritServant {
+// q 为 DB 句柄（调用方在事务内必须传 tx）
+func enhanceServantStats(q *gorm.DB, userID int64, team []UserSpiritServant) []UserSpiritServant {
 	out := make([]UserSpiritServant, 0, len(team))
 	for i := range team {
 		s := team[i]
@@ -280,7 +284,7 @@ func enhanceServantStats(userID int64, team []UserSpiritServant) []UserSpiritSer
 		s.DEF = ScaledDEF(&s)
 		s.SPD = ScaledSPD(&s)
 		s.MAG = ScaledMAG(&s)
-		hp, atk, def, spd, mag := getServantEquipBonus(userID, s.ID)
+		hp, atk, def, spd, mag := getServantEquipBonus(q, userID, s.ID)
 		s.HP += hp
 		s.ATK += atk
 		s.DEF += def
@@ -289,6 +293,64 @@ func enhanceServantStats(userID int64, team []UserSpiritServant) []UserSpiritSer
 		out = append(out, s)
 	}
 	return out
+}
+
+// servantEquipBonus 单只灵侍的装备加成合计（精炼后）
+type servantEquipBonus struct {
+	HP, ATK, DEF, SPD, MAG int
+}
+
+// equipBonusMap 批量查询用户全部装备并按灵侍归组（列表渲染避免逐只查询）
+// q 为 DB 句柄：事务内调用方必须传 tx（见 getServantEquipBonus 说明）
+func equipBonusMap(q *gorm.DB, userID int64) map[uint]servantEquipBonus {
+	var eqs []ServantEquipment
+	if err := q.Where("user_id = ?", userID).Find(&eqs).Error; err != nil {
+		log.Printf("[灵侍] 装备加成查询失败 user=%d err=%s", userID, formatTelegramSendError(err))
+		return map[uint]servantEquipBonus{}
+	}
+	m := make(map[uint]servantEquipBonus, len(eqs))
+	for i := range eqs {
+		e := &eqs[i]
+		b := m[e.ServantID]
+		mul := 1 + equipEnhancePerLevel*float64(e.Enhance) // 精炼加成
+		b.HP += int(float64(e.HP) * mul)
+		b.ATK += int(float64(e.ATK) * mul)
+		b.DEF += int(float64(e.DEF) * mul)
+		b.SPD += int(float64(e.SPD) * mul)
+		b.MAG += int(float64(e.MAG) * mul)
+		m[e.ServantID] = b
+	}
+	return m
+}
+
+// userEquipBonusMap 面板渲染用（无事务，走全局 db）
+func userEquipBonusMap(userID int64) map[uint]servantEquipBonus {
+	return equipBonusMap(db, userID)
+}
+
+// EnhancedBattlePower 含装备加成的战力（与战斗引擎 enhanceServantStats 后的口径一致）
+// 无装备时等于 GetBattlePower。
+func EnhancedBattlePower(bonusMap map[uint]servantEquipBonus, s *UserSpiritServant) int {
+	b := bonusMap[s.ID]
+	total := ScaledHP(s) + b.HP + ScaledATK(s) + b.ATK + ScaledDEF(s) + b.DEF + ScaledSPD(s) + b.SPD + ScaledMAG(s) + b.MAG
+	return int(float64(total) * QualityGrowth[s.Quality])
+}
+
+// sortServantsWithBonus 按战力（含装备）高→低就地排序，同战力按 id 升序（稳定分页）
+func sortServantsWithBonus(bonusMap map[uint]servantEquipBonus, servants []UserSpiritServant) {
+	sort.SliceStable(servants, func(i, j int) bool {
+		pi := EnhancedBattlePower(bonusMap, &servants[i])
+		pj := EnhancedBattlePower(bonusMap, &servants[j])
+		if pi != pj {
+			return pi > pj
+		}
+		return servants[i].ID < servants[j].ID
+	})
+}
+
+// SortServantsByPower 按战力（含装备）高→低就地排序（批量查装备 + sortServantsWithBonus）
+func SortServantsByPower(userID int64, servants []UserSpiritServant) {
+	sortServantsWithBonus(userEquipBonusMap(userID), servants)
 }
 
 // ListEquipment 装备列表（装备中 + 仓库）

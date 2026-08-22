@@ -166,15 +166,14 @@ func runTeamBattle(teamA, teamB []*BattleFighter) *TeamBattleResult {
 func SetupMirror(userID int64) (int, error) {
 	var power int
 	err := db.Transaction(func(tx *gorm.DB) error {
-		var team []UserSpiritServant
-		if err := tx.Where("user_id = ? AND is_deployed = ?", userID, true).
-			Order("star desc, level desc").Limit(maxTeamSize).Find(&team).Error; err != nil {
+		team, err := pickDeployedTeamTx(tx, userID) // 战力高→低（快照含装备）
+		if err != nil {
 			return err
 		}
 		if len(team) == 0 {
 			return fmt.Errorf("尚未编排出战灵侍，请先在出战队列编队")
 		}
-		team = enhanceServantStats(userID, team) // 并入装备加成（镜像快照含装备）
+		team = enhanceServantStats(tx, userID, team) // 并入装备加成（镜像快照含装备）
 		fighters := teamToFighters(team)
 		b, err := json.Marshal(fighters)
 		if err != nil {
@@ -275,16 +274,15 @@ func PvpAttack(userID int64, defenderID int64) (*PvpAttackResult, error) {
 		}
 		result.Remaining = int(pvpDailyLimit - cnt - 1)
 
-		// 2. 出阵队伍
-		var team []UserSpiritServant
-		if err := tx.Where("user_id = ? AND is_deployed = ?", userID, true).
-			Order("star desc, level desc").Limit(maxTeamSize).Find(&team).Error; err != nil {
+		// 2. 出阵队伍（战力高→低）
+		team, err := pickDeployedTeamTx(tx, userID)
+		if err != nil {
 			return err
 		}
 		if len(team) == 0 {
 			return fmt.Errorf("尚未编排出战灵侍，请先在出战队列编队")
 		}
-		team = enhanceServantStats(userID, team) // 并入装备加成
+		team = enhanceServantStats(tx, userID, team) // 并入装备加成
 		myPower := CalculateTeamPower(team, 0)
 
 		// 3. 目标选择
@@ -355,12 +353,13 @@ func PvpAttack(userID int64, defenderID int64) (*PvpAttackResult, error) {
 	return result, nil
 }
 
-// GetPvpRevengeTargets 我可复仇的道友（24h 内破我镜像且镜像仍有效，最多 5 名）
+// GetPvpRevengeTargets 我可复仇的道友（24h 内破我镜像且镜像仍有效，最多 pvpRevengeLimit 名）
 func GetPvpRevengeTargets(userID int64) []SpiritPvpBattle {
 	var battles []SpiritPvpBattle
 	cutoff := time.Now().Add(-pvpRevengeWindowH * time.Hour)
+	// 预查上限放宽到 50：先去重再截断，避免多名道友重复破镜时漏掉有效复仇目标
 	if err := db.Where("defender_id = ? AND attacker_win = ? AND created_at > ?",
-		userID, true, cutoff).Order("id desc").Limit(20).Find(&battles).Error; err != nil {
+		userID, true, cutoff).Order("id desc").Limit(50).Find(&battles).Error; err != nil {
 		return nil
 	}
 	var out []SpiritPvpBattle
@@ -380,12 +379,28 @@ func GetPvpRevengeTargets(userID int64) []SpiritPvpBattle {
 	return out
 }
 
-// GetPvpHistory 我的近期镜场战绩（攻+守，最多 10 条）
-func GetPvpHistory(userID int64) []SpiritPvpBattle {
-	var battles []SpiritPvpBattle
+// GetPvpHistory 我的镜场战绩（攻+守，新→旧，分页）
+// page 从 1 起，越界钳制到 [1, 总页数]（无记录时 total=0）
+func GetPvpHistory(userID int64, page, pageSize int) (battles []SpiritPvpBattle, total int64) {
+	db.Model(&SpiritPvpBattle{}).
+		Where("attacker_id = ? OR defender_id = ?", userID, userID).
+		Count(&total)
+	if total == 0 {
+		return nil, 0
+	}
+	if pageSize <= 0 {
+		pageSize = pvpHistoryLimit
+	}
+	if page < 1 {
+		page = 1
+	}
+	maxPage := int((total + int64(pageSize) - 1) / int64(pageSize))
+	if page > maxPage {
+		page = maxPage
+	}
 	db.Where("attacker_id = ? OR defender_id = ?", userID, userID).
-		Order("id desc").Limit(pvpHistoryLimit).Find(&battles)
-	return battles
+		Order("id desc").Offset((page - 1) * pageSize).Limit(pageSize).Find(&battles)
+	return battles, total
 }
 
 // GetPvpDailyRemaining 今日剩余攻击次数

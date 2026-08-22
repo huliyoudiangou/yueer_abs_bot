@@ -353,16 +353,15 @@ func PveFight(userID int64, chapterID, stageID int) (*PveFightResult, error) {
 			}
 		}
 
-		// 3. 出战队伍
-		var team []UserSpiritServant
-		if err := tx.Where("user_id = ? AND is_deployed = ?", userID, true).
-			Order("star desc, level desc").Limit(maxTeamSize).Find(&team).Error; err != nil {
+		// 3. 出战队伍（战力高→低，最多 maxTeamSize）
+		team, err := pickDeployedTeamTx(tx, userID)
+		if err != nil {
 			return err
 		}
 		if len(team) == 0 {
 			return fmt.Errorf("尚未编排出战灵侍，请先在出战队列编队")
 		}
-		team = enhanceServantStats(userID, team) // 并入装备加成
+		team = enhanceServantStats(tx, userID, team) // 并入装备加成
 
 		// 4. 神行符消耗
 		stamina, err := getOrCreateStaminaTx(tx, userID)
