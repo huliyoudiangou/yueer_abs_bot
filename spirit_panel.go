@@ -499,7 +499,7 @@ func spiritPanelHelp() (string, tgbotapi.InlineKeyboardMarkup) {
 		"· 战力：图鉴/养成/出战队列/装备选择均按战力（含装备加成）高→低排列，分页展示\n" +
 		"· 镜场：上架镜像供道友挑战，胜 30 / 负 10 灵晶，10 次/日，24h 内可复仇\n" +
 		"· 锻造：锻造炉产出兵甲/魂魄两类装备（目标品质50%/-1档30%/-2档20%），穿戴提升战力；精炼：每级该装备属性 +2%，上限 +10，成本随等级与品阶递增；熔炼返还 40%\n" +
-		"· 护宗神兽：入口「🏯 宗门 → 护宗神兽」（宗门玩法），宗门声望 2000 解锁，喂养耗 20-50 声望（随等级递增），三阶为全宗提供 +1%/+2%/+3.5% 世界Boss伤害\n" +
+		"· 护宗神兽：入口「🏯 宗门 → 护宗神兽」（宗门玩法），宗门声望 2000 解锁，喂养耗 20-50 声望或等量积分（1:1，随等级递增）；宗主/长老可用声望，普通成员仅积分；三阶为全宗提供 +1%/+2%/+3.5% 世界Boss伤害\n" +
 		"· 灵侍蛋：击败章节 Boss 每次 30% 概率掉蛋（地阶及以下），在灵侍蛋面板孵化为对应品阶灵侍\n" +
 		"· 道具：灵魄随推图胜利掉落（普通关 25%/章节 Boss 50%）；万能真身碎片随第 5/6 章 Boss 掉落（10%）；扫荡不掉道具\n" +
 		"· 养成：养成面板喂养灵侍升级（每级耗灵晶 凡30/灵50/玄80/地120/天200/圣300），每级 +2% 一级基础属性，等级上限 = 星级 × 10\n" +
@@ -1050,8 +1050,22 @@ func spiritPanelBeast(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 	if beast.Stage < 3 {
 		b.WriteString(fmt.Sprintf("下一阶段：等级 %d（当前 %d）\n", sectBeastNextStageLevel(beast.Stage), beast.Level))
 	}
-	b.WriteString(fmt.Sprintf("累计灌注：%d 声望\n", beast.TotalFed))
-	b.WriteString(fmt.Sprintf("喂养成本：%d 宗门声望\n", cost))
+	b.WriteString(fmt.Sprintf("累计灌注：%d\n", beast.TotalFed))
+
+	// 喂养权限：宗主/长老可动用宗门声望，普通成员仅可积分喂养（1:1 等价）
+	canUsePrestige := canUpgradeSectAsset(member.Role)
+	if canUsePrestige {
+		b.WriteString(fmt.Sprintf("喂养成本：%d 宗门声望 或 %d 积分（1:1）\n", cost, cost))
+	} else {
+		b.WriteString(fmt.Sprintf("喂养成本：%d 积分（与声望 1:1）\n", cost))
+		b.WriteString("你为普通成员，不可动用宗门声望，仅可积分喂养。\n")
+	}
+	var u User
+	if err := db.Where("telegram_id = ?", userID).First(&u).Error; err != nil {
+		log.Printf("[灵侍] 读取用户积分失败 user=%d err=%s", userID, formatTelegramSendError(err))
+	} else {
+		b.WriteString(fmt.Sprintf("我的积分：%d\n", u.Points))
+	}
 
 	leaders := GetSectBeastLeaders(int64(sect.ID), 5)
 	if len(leaders) > 0 {
@@ -1062,9 +1076,17 @@ func spiritPanelBeast(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 	}
 
 	var rows [][]tgbotapi.InlineKeyboardButton
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData(
-			fmt.Sprintf("🐾 喂养（-%d 声望）", cost), "sp:beast:feed")))
+	if canUsePrestige {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("🐾 喂养（-%d 声望）", cost), "sp:beast:feed:prestige"),
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("🐾 积分喂养（-%d 积分）", cost), "sp:beast:feed:points")))
+	} else {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("🐾 积分喂养（-%d 积分）", cost), "sp:beast:feed:points")))
+	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("🔙 返回宗门", "menu:sect")))
 	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
@@ -1426,13 +1448,25 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		text, kb = spiritPanelPush(db, userID)
 	case cb.Data == spCbBeast:
 		text, kb = spiritPanelBeast(userID)
-	case cb.Data == "sp:beast:feed":
-		beast, cost, err := FeedSectBeast(userID)
+	case cb.Data == "sp:beast:feed:prestige":
+		beast, cost, err := FeedSectBeast(userID, sectBeastFeedModePrestige)
 		if err != nil {
 			ackText = fmt.Sprintf("喂养失败：%v", err)
 		} else {
 			ackText = fmt.Sprintf("🐾 已喂养护宗神兽：等级 %d（-%d 声望）", beast.Level, cost)
 		}
+		text, kb = spiritPanelBeast(userID)
+	case cb.Data == "sp:beast:feed:points":
+		beast, cost, err := FeedSectBeast(userID, sectBeastFeedModePoints)
+		if err != nil {
+			ackText = fmt.Sprintf("喂养失败：%v", err)
+		} else {
+			ackText = fmt.Sprintf("🐾 已喂养护宗神兽：等级 %d（-%d 积分）", beast.Level, cost)
+		}
+		text, kb = spiritPanelBeast(userID)
+	case cb.Data == "sp:beast:feed":
+		// 旧版喂养按钮（历史消息残留）：不再直接扣费，提示使用新按钮
+		ackText = "喂养方式已更新：宗主/长老可用声望或积分，普通成员仅积分。请使用下方新按钮喂养。"
 		text, kb = spiritPanelBeast(userID)
 	case cb.Data == spCbHelp:
 		text, kb = spiritPanelHelp()

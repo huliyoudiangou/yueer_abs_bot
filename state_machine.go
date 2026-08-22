@@ -1040,6 +1040,8 @@ func pointTransactionTypeText(txType string) string {
 		return "宗门秘境"
 	case "sect_horn":
 		return "宗门喇叭"
+	case "beast_feed_points":
+		return "神兽喂养"
 	case "world_horn":
 		return "世界喇叭"
 	case "shop_buy_item":

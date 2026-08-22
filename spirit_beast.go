@@ -5,27 +5,37 @@ package main
 //
 // 设计（锁定）：
 // - 解锁：宗门声望 >= 2000
-// - 喂养：消耗宗门声望，神兽等级 +1
+// - 喂养：神兽等级 +1，两种出资方式（1:1 等价）：
+//   * 声望喂养：消耗宗门声望，仅宗主/长老可执行（普通成员无权动用宗门声望）
+//   * 积分喂养：消耗个人积分（成本 = 声望成本 1:1），全体宗门成员可执行
 // - 成本档位（方案B，按当前等级）：<10 级 20 / 10-29 级 25 / 30-59 级 35 / 60 级+ 50
 // - 三阶段（buff 为全宗世界 Boss 伤害加成，加法叠加）：
 //   10 级 → 1 阶 +1%；30 级 → 2 阶 +2%；60 级 → 3 阶 +3.5%
-// - 贡献：每次喂养记 SectBeastContribution（个人贡献）
+// - 贡献：每次喂养记 SectBeastContribution（PointType 区分出资：宗门声望/个人积分）
 //
 // 资产规则：
-// - 宗门声望扣减用条件更新（prestige >= cost）防并发超扣
-// - 扣声望/升神兽/记贡献在同一事务
+// - 声望喂养：宗门声望扣减用条件更新（prestige >= cost）防并发超扣
+// - 积分喂养：applyPointDeltaInTx（条件更新 points >= cost + PointTransaction 流水），不能扣成负数
+// - 出资扣减/升神兽/记贡献在同一事务
 // ==========================================
 
 import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"gorm.io/gorm"
 )
 
 const sectBeastUnlockPrestige = 2000 // 解锁门槛：宗门声望
+
+// 喂养出资方式（与声望成本 1:1 等价）
+const (
+	sectBeastFeedModePrestige = "prestige" // 消耗宗门声望（仅宗主/长老）
+	sectBeastFeedModePoints   = "points"   // 消耗个人积分（全体成员）
+)
 
 // 喂养成本档位（方案B）：当前等级达到 MinLevel 后采用该档成本
 var sectBeastFeedCostBands = []struct {
@@ -99,19 +109,34 @@ func sectBeastNextStageLevel(stage int) int {
 	return 0
 }
 
-// FeedSectBeast 喂养护宗神兽一次（扣宗门声望 → 等级+1 → 记贡献）
-func FeedSectBeast(userID int64) (*SectBeast, int, error) {
-	var member SectMember
-	if err := db.Where("user_id = ?", userID).First(&member).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, 0, fmt.Errorf("你尚未加入宗门，无法喂养护宗神兽")
-		}
-		return nil, 0, err
+// FeedSectBeast 喂养护宗神兽一次（出资扣减 → 等级+1 → 记贡献）。
+// mode：sectBeastFeedModePrestige 用宗门声望（仅宗主/长老）；
+//
+//	sectBeastFeedModePoints 用个人积分（成本与声望 1:1，全体成员可执行）
+func FeedSectBeast(userID int64, mode string) (*SectBeast, int, error) {
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	if mode != sectBeastFeedModePrestige && mode != sectBeastFeedModePoints {
+		return nil, 0, fmt.Errorf("未知的喂养方式")
 	}
 
 	var result *SectBeast
 	var cost int
+	var member SectMember
 	err := db.Transaction(func(tx *gorm.DB) error {
+		// 成员与职位在事务内读取：与出资扣减共用同一快照，
+		// 避免并发转让宗主/任命长老时，职位读取与声望扣减之间被插入
+		if err := tx.Where("user_id = ?", userID).First(&member).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("你尚未加入宗门，无法喂养护宗神兽")
+			}
+			return err
+		}
+
+		// 声望喂养消耗宗门资产：仅宗主/长老（与宗门升级/科技权限边界一致）
+		if mode == sectBeastFeedModePrestige && !canUpgradeSectAsset(member.Role) {
+			return fmt.Errorf("普通成员不能动用宗门声望喂养，请改用积分喂养")
+		}
+
 		var sect Sect
 		if err := tx.Where("id = ?", member.SectID).First(&sect).Error; err != nil {
 			return fmt.Errorf("宗门不存在")
@@ -130,22 +155,50 @@ func FeedSectBeast(userID int64) (*SectBeast, int, error) {
 		}
 
 		cost = sectBeastFeedCost(beast.Level)
-		if sect.Prestige < cost {
-			return fmt.Errorf("宗门声望不足：喂养需 %d，当前 %d", cost, sect.Prestige)
-		}
 
-		// 条件更新扣声望（并发安全：WHERE prestige >= cost）
-		res := tx.Model(&Sect{}).Where("id = ? AND prestige >= ?", sect.ID, cost).
-			Update("prestige", gorm.Expr("prestige - ?", cost))
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
-			return fmt.Errorf("宗门声望不足：喂养需 %d，当前 %d", cost, sect.Prestige)
+		if mode == sectBeastFeedModePrestige {
+			if sect.Prestige < cost {
+				return fmt.Errorf("宗门声望不足：喂养需 %d，当前 %d", cost, sect.Prestige)
+			}
+			// 条件更新扣声望（并发安全：WHERE prestige >= cost）
+			res := tx.Model(&Sect{}).Where("id = ? AND prestige >= ?", sect.ID, cost).
+				Update("prestige", gorm.Expr("prestige - ?", cost))
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 0 {
+				return fmt.Errorf("宗门声望不足：喂养需 %d，当前 %d", cost, sect.Prestige)
+			}
+		} else {
+			var u User
+			if err := tx.Where("telegram_id = ?", userID).First(&u).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return fmt.Errorf("用户档案不存在，无法积分喂养")
+				}
+				return err
+			}
+			if u.Points < cost {
+				return fmt.Errorf("积分不足：喂养需 %d，当前 %d", cost, u.Points)
+			}
+			// 积分扣除：条件更新 points >= cost + PointTransaction 流水，与神兽升级同事务
+			if err := applyPointDeltaInTx(
+				tx,
+				userID,
+				-cost,
+				"beast_feed_points",
+				fmt.Sprintf("喂养护宗神兽（喂养前等级 %d），消耗 %d 积分", beast.Level, cost),
+				"sect_beast",
+				fmt.Sprintf("%d", sect.ID),
+			); err != nil {
+				if errors.Is(err, errPointsNotEnough) {
+					return fmt.Errorf("积分不足：喂养需 %d", cost)
+				}
+				return err
+			}
 		}
 
 		// 神兽升级 + 阶段（条件更新防并发丢更新：同一 level 上恰好一个事务能成功，
-		// 失败者提示重试；声望扣减与升级同事务，失败整体回滚不产生“扣了没升”）
+		// 失败者提示重试；出资扣减与升级同事务，失败整体回滚不产生“扣了没升”）
 		// 首次喂养（beast.ID==0）靠 sect_id 唯一索引防并发重复建行
 		oldStage := beast.Stage
 		newLevel := beast.Level + 1
@@ -157,7 +210,7 @@ func FeedSectBeast(userID int64) (*SectBeast, int, error) {
 			}
 			if err := tx.Create(&beast).Error; err != nil {
 				if isUniqueConstraintError(err) {
-					// 并发首喂：同门已建行，本次回滚（声望同退）
+					// 并发首喂：同门已建行，本次回滚（已扣出资同退）
 					return fmt.Errorf("神兽正被同门喂养，请稍后再试")
 				}
 				return err
@@ -195,12 +248,16 @@ func FeedSectBeast(userID int64) (*SectBeast, int, error) {
 				sect.ID, userID, beast.Level, beast.Stage)
 		}
 
-		// 贡献记录
+		// 贡献记录（PointType 记录出资方式，供审计区分声望/积分）
+		pointType := "个人积分"
+		if mode == sectBeastFeedModePrestige {
+			pointType = "宗门声望"
+		}
 		c := SectBeastContribution{
 			UserID:    userID,
 			SectID:    sect.ID,
 			Buff:      cost,
-			PointType: "个人贡献",
+			PointType: pointType,
 		}
 		if err := tx.Create(&c).Error; err != nil {
 			return err

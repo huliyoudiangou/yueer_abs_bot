@@ -577,13 +577,13 @@ func (DailyLingjingQuota) TableName() string {
 	return "daily_lingjing_quotas"
 }
 
-// 宗门声望灵兽灌注记录（护宗神兽养成）
+// 灵兽灌注记录（护宗神兽养成）
 type SectBeastContribution struct {
 	gorm.Model
 	UserID    int64  `gorm:"index;not null"`
 	SectID    uint   `gorm:"index;not null"`
-	Buff      int    `gorm:"default:0"` // 灌注的声望数量（个人/宗门）
-	PointType string `gorm:"not null"`  // 来源类型：个人贡献/宗门贡献
+	Buff      int    `gorm:"default:0"` // 灌注量（声望与积分按 1:1 等价累计）
+	PointType string `gorm:"not null"`  // 出资方式：宗门声望/个人积分（早期历史数据为「个人贡献」）
 }
 
 func (SectBeastContribution) TableName() string {
@@ -669,7 +669,7 @@ type SectBeast struct {
 	SectID   uint `gorm:"uniqueIndex;not null"`
 	Level    int  `gorm:"default:0"`
 	Stage    int  `gorm:"default:0"` // 0-3
-	TotalFed int  `gorm:"default:0"` // 累计灌注宗门声望
+	TotalFed int  `gorm:"default:0"` // 累计灌注量（声望与积分按 1:1 等价累计）
 }
 
 func (SectBeast) TableName() string {
