@@ -337,13 +337,14 @@ func PveFight(userID int64, chapterID, stageID int) (*PveFightResult, error) {
 
 	result := &PveFightResult{IsBoss: stageID == bossStageID}
 
-	err := db.Transaction(func(tx *gorm.DB) error {
-		// 1. 境界校验（不硬编码境界名）
-		cul := GetOrCreateCultivation(userID)
-		if cul == nil || cul.MajorRealm < zone.Tier {
-			return fmt.Errorf("境界不足，此章节需更高修为")
-		}
+	// 境界校验（事务外读取：GetOrCreateCultivation 走全局连接池，
+	// 在事务内调用会在小连接池下互等连接而死锁）
+	cul := GetOrCreateCultivation(userID)
+	if cul == nil || cul.MajorRealm < zone.Tier {
+		return nil, fmt.Errorf("境界不足，此章节需更高修为")
+	}
 
+	err := db.Transaction(func(tx *gorm.DB) error {
 		// 2. 关卡解锁：前关至少 1 星
 		if stageID > 1 {
 			var prev SpiritStageProgress

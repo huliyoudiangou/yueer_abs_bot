@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -54,10 +55,13 @@ func CatchSpiritServant(tx *gorm.DB, userID int64, zoneKey, ropeKey string) (*Ca
 	}
 
 	// 3. 境界校验（不硬编码境界名，通过 MajorRealm 数值比较）
-	cul := GetOrCreateCultivation(userID)
+	// 走 tx 读取（不查全局连接池：本函数在捕捉事务内运行，小连接池下全局查询会死等）
+	var cul Cultivation
 	majorRealm := 0
-	if cul != nil {
+	if err := tx.Where("user_id = ?", userID).First(&cul).Error; err == nil {
 		majorRealm = cul.MajorRealm
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
 	}
 	if majorRealm < zone.Tier {
 		return nil, fmt.Errorf("境界不足，需提升修为后方可进入此区域")
@@ -88,7 +92,9 @@ func CatchSpiritServant(tx *gorm.DB, userID int64, zoneKey, ropeKey string) (*Ca
 		result.Success = true
 		result.Servant = servant
 		result.Pity = pity
-		tx.Save(pity)
+		if err := tx.Save(pity).Error; err != nil {
+			return nil, fmt.Errorf("保底记录保存失败: %s", formatTelegramSendError(err))
+		}
 		return result, nil
 	}
 
@@ -104,7 +110,9 @@ func CatchSpiritServant(tx *gorm.DB, userID int64, zoneKey, ropeKey string) (*Ca
 		result.Success = true
 		result.Servant = servant
 		result.Pity = pity
-		tx.Save(pity)
+		if err := tx.Save(pity).Error; err != nil {
+			return nil, fmt.Errorf("保底记录保存失败: %s", formatTelegramSendError(err))
+		}
 		return result, nil
 	}
 
@@ -149,7 +157,9 @@ func CatchSpiritServant(tx *gorm.DB, userID int64, zoneKey, ropeKey string) (*Ca
 	}
 
 	result.Pity = pity
-	tx.Save(pity)
+	if err := tx.Save(pity).Error; err != nil {
+		return nil, fmt.Errorf("保底记录保存失败: %s", formatTelegramSendError(err))
+	}
 	log.Printf("[灵侍] 捕捉 user=%d zone=%s rope=%s encounter=%s success=%v tianPity=%d shengPity=%d",
 		userID, zone.Key, rope.Key, encounterQ, result.Success, pity.TianPity, pity.ShengPity)
 	return result, nil
@@ -177,13 +187,17 @@ func getOrCreateSpiritPity(tx *gorm.DB, userID int64, zoneKey string) *SpiritZon
 	err := tx.Where("user_id = ? AND zone_key = ?", userID, zoneKey).First(&pity).Error
 	if err == gorm.ErrRecordNotFound {
 		pity = SpiritZonePity{UserID: userID, ZoneKey: zoneKey}
-		tx.Create(&pity)
+		if e := tx.Create(&pity).Error; e != nil {
+			log.Printf("[灵侍] 保底记录创建失败 user=%d zone=%s err=%s", userID, zoneKey, formatTelegramSendError(e))
+		}
 		return &pity
 	}
 	if err != nil {
 		log.Printf("[灵侍] 保底查询失败 user=%d zone=%s err=%s", userID, zoneKey, formatTelegramSendError(err))
 		pity = SpiritZonePity{UserID: userID, ZoneKey: zoneKey}
-		tx.Create(&pity)
+		if e := tx.Create(&pity).Error; e != nil {
+			log.Printf("[灵侍] 保底记录创建失败 user=%d zone=%s err=%s", userID, zoneKey, formatTelegramSendError(e))
+		}
 		return &pity
 	}
 	return &pity

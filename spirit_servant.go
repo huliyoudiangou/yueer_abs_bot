@@ -38,9 +38,11 @@ func CreateSpiritServantWithTx(tx *gorm.DB, userID int64, quality string, zone S
 }
 
 // createServantRecord 通用创建逻辑：随机名+属性+基础属性，落库
+// 必须走传入的 tx 落库（调用方在捕捉/孵化事务内）：用全局 db 会让灵侍脱离调用方事务，
+// 外层回滚时灵侍残留（灵晶已退但灵侍白得），且小连接池下全局查询会死等。
 func createServantRecord(tx *gorm.DB, userID int64, chosenQuality string, zone SpiritZone) (*UserSpiritServant, error) {
 
-	// 同名重抽（默认最多 30 次）
+	// 同名重抽（默认最多 30 次）；重名检查走 tx（同上，不查全局连接池）
 	name := "灵侍"
 	for retry := 0; retry < 30; retry++ {
 		pool := ServantNamePool[chosenQuality]
@@ -48,7 +50,12 @@ func createServantRecord(tx *gorm.DB, userID int64, chosenQuality string, zone S
 			break
 		}
 		name = pool[rand.Intn(len(pool))].Name
-		if !CheckDuplicateName(userID, name) {
+		var dup int64
+		if err := tx.Model(&UserSpiritServant{}).
+			Where("user_id = ? AND name = ?", userID, name).Count(&dup).Error; err != nil {
+			return nil, err
+		}
+		if dup == 0 {
 			break
 		}
 	}
@@ -66,7 +73,7 @@ func createServantRecord(tx *gorm.DB, userID int64, chosenQuality string, zone S
 		SPD:       applyBaseStat(chosenQuality, 10),
 		MAG:       applyBaseStat(chosenQuality, 12),
 	}
-	if err := db.Create(ser).Error; err != nil {
+	if err := tx.Create(ser).Error; err != nil {
 		return nil, err
 	}
 	log.Printf("[灵侍] 生成 user=%d zone=%s quality=%s name=%s", userID, zone.Key, chosenQuality, name)

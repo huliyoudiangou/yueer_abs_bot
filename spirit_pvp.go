@@ -165,6 +165,12 @@ func runTeamBattle(teamA, teamB []*BattleFighter) *TeamBattleResult {
 // SetupMirror 上架/刷新镜像（出阵队伍快照，24 小时有效）
 func SetupMirror(userID int64) (int, error) {
 	var power int
+	// 境界读取放事务外（GetOrCreateCultivation 走全局连接池，事务内调用会死等连接）
+	cul := GetOrCreateCultivation(userID)
+	realm := 0
+	if cul != nil {
+		realm = cul.MajorRealm
+	}
 	err := db.Transaction(func(tx *gorm.DB) error {
 		team, err := pickDeployedTeamTx(tx, userID) // 战力高→低（快照含装备）
 		if err != nil {
@@ -178,11 +184,6 @@ func SetupMirror(userID int64) (int, error) {
 		b, err := json.Marshal(fighters)
 		if err != nil {
 			return fmt.Errorf("镜像生成失败: %s", formatTelegramSendError(err))
-		}
-		cul := GetOrCreateCultivation(userID)
-		realm := 0
-		if cul != nil {
-			realm = cul.MajorRealm
 		}
 		power = CalculateTeamPower(team, 0)
 		now := time.Now()
@@ -306,8 +307,8 @@ func PvpAttack(userID int64, defenderID int64) (*PvpAttackResult, error) {
 			target = *t
 		}
 		result.DefenderID = target.UserID
-		result.DefenderName = spiritPvpUserName(target.UserID)
 		result.DefenderPower = target.TeamPower
+		// 对手昵称仅展示用，放事务后查询（spiritPvpUserName 走全局连接池，事务内查询会死等连接）
 
 		// 4. 战斗（A=我方实时队伍，B=对方镜像快照）
 		var defenders []BattleFighter
@@ -350,6 +351,7 @@ func PvpAttack(userID int64, defenderID int64) (*PvpAttackResult, error) {
 		log.Printf("[灵侍] 镜场攻击 user=%d defender=%d err=%s", userID, defenderID, formatTelegramSendError(err))
 		return nil, err
 	}
+	result.DefenderName = spiritPvpUserName(result.DefenderID)
 	return result, nil
 }
 

@@ -156,6 +156,10 @@ func FeedSectBeast(userID int64) (*SectBeast, int, error) {
 				beast.Stage = newStage
 			}
 			if err := tx.Create(&beast).Error; err != nil {
+				if isUniqueConstraintError(err) {
+					// 并发首喂：同门已建行，本次回滚（声望同退）
+					return fmt.Errorf("神兽正被同门喂养，请稍后再试")
+				}
 				return err
 			}
 		} else {

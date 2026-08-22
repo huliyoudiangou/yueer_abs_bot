@@ -15,6 +15,7 @@ package main
 // ==========================================
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -1023,7 +1024,7 @@ func spiritPanelBeast(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 
 	var beast SectBeast
 	if err := db.Where("sect_id = ?", sect.ID).First(&beast).Error; err != nil {
-		if err != gorm.ErrRecordNotFound {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Printf("[灵侍] 神兽查询失败 user=%d sect=%d err=%s", userID, sect.ID, formatTelegramSendError(err))
 		}
 		beast = SectBeast{SectID: sect.ID}
@@ -1450,7 +1451,13 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		}
 		zoneKey := parts[0]
 		ropeKey := parts[1]
-		result, err := CatchSpiritServant(db, userID, zoneKey, ropeKey)
+		// 捕捉全程单事务：灵晶消耗/保底更新/灵侍落库同生共死，失败整体回滚
+		var result *CatchResult
+		err := db.Transaction(func(tx *gorm.DB) error {
+			var cerr error
+			result, cerr = CatchSpiritServant(tx, userID, zoneKey, ropeKey)
+			return cerr
+		})
 		if err != nil {
 			log.Printf("[灵侍] 捕捉失败 user=%d zone=%s rope=%s err=%s", userID, zoneKey, ropeKey, formatTelegramSendError(err))
 			ackText = fmt.Sprintf("%v", err)
