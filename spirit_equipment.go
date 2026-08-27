@@ -275,10 +275,11 @@ func getServantEquipBonus(q *gorm.DB, userID int64, servantID uint) (hp, atk, de
 // enhanceServantStats 返回并入装备加成后的灵侍副本（战斗/战力计算用，不改原对象）
 // q 为 DB 句柄（调用方在事务内必须传 tx）
 func enhanceServantStats(q *gorm.DB, userID int64, team []UserSpiritServant) []UserSpiritServant {
+	manual := servantManualBonusPctMap(q, userID)
 	out := make([]UserSpiritServant, 0, len(team))
 	for i := range team {
 		s := team[i]
-		// 先应用等级成长（数据库存一级基础值），再叠加装备加成
+		// 先应用等级成长（数据库存一级基础值），再叠加装备加成，最后叠加功法加成（乘法，唯一加法点）
 		s.HP = ScaledHP(&s)
 		s.ATK = ScaledATK(&s)
 		s.DEF = ScaledDEF(&s)
@@ -290,6 +291,14 @@ func enhanceServantStats(q *gorm.DB, userID int64, team []UserSpiritServant) []U
 		s.DEF += def
 		s.SPD += spd
 		s.MAG += mag
+		if pct := manual[s.ID]; pct > 0 {
+			mul := 1 + float64(pct)/100
+			s.HP = int(float64(s.HP) * mul)
+			s.ATK = int(float64(s.ATK) * mul)
+			s.DEF = int(float64(s.DEF) * mul)
+			s.SPD = int(float64(s.SPD) * mul)
+			s.MAG = int(float64(s.MAG) * mul)
+		}
 		out = append(out, s)
 	}
 	return out
@@ -328,19 +337,23 @@ func userEquipBonusMap(userID int64) map[uint]servantEquipBonus {
 	return equipBonusMap(db, userID)
 }
 
-// EnhancedBattlePower 含装备加成的战力（与战斗引擎 enhanceServantStats 后的口径一致）
-// 无装备时等于 GetBattlePower。
-func EnhancedBattlePower(bonusMap map[uint]servantEquipBonus, s *UserSpiritServant) int {
+// EnhancedBattlePower 含装备与功法的战力（与战斗引擎 enhanceServantStats 后的口径一致）
+// 无装备、无功法时等于 GetBattlePower。
+func EnhancedBattlePower(bonusMap map[uint]servantEquipBonus, manualMap map[uint]int, s *UserSpiritServant) int {
 	b := bonusMap[s.ID]
 	total := ScaledHP(s) + b.HP + ScaledATK(s) + b.ATK + ScaledDEF(s) + b.DEF + ScaledSPD(s) + b.SPD + ScaledMAG(s) + b.MAG
-	return int(float64(total) * QualityGrowth[s.Quality])
+	p := int(float64(total) * QualityGrowth[s.Quality])
+	if pct := manualMap[s.ID]; pct > 0 {
+		p = int(float64(p) * (1 + float64(pct)/100))
+	}
+	return p
 }
 
-// sortServantsWithBonus 按战力（含装备）高→低就地排序，同战力按 id 升序（稳定分页）
-func sortServantsWithBonus(bonusMap map[uint]servantEquipBonus, servants []UserSpiritServant) {
+// sortServantsWithBonus 按战力（含装备+功法）高→低就地排序，同战力按 id 升序（稳定分页）
+func sortServantsWithBonus(bonusMap map[uint]servantEquipBonus, manualMap map[uint]int, servants []UserSpiritServant) {
 	sort.SliceStable(servants, func(i, j int) bool {
-		pi := EnhancedBattlePower(bonusMap, &servants[i])
-		pj := EnhancedBattlePower(bonusMap, &servants[j])
+		pi := EnhancedBattlePower(bonusMap, manualMap, &servants[i])
+		pj := EnhancedBattlePower(bonusMap, manualMap, &servants[j])
 		if pi != pj {
 			return pi > pj
 		}
@@ -348,9 +361,9 @@ func sortServantsWithBonus(bonusMap map[uint]servantEquipBonus, servants []UserS
 	})
 }
 
-// SortServantsByPower 按战力（含装备）高→低就地排序（批量查装备 + sortServantsWithBonus）
+// SortServantsByPower 按战力（含装备+功法）高→低就地排序（批量查装备 + sortServantsWithBonus）
 func SortServantsByPower(userID int64, servants []UserSpiritServant) {
-	sortServantsWithBonus(userEquipBonusMap(userID), servants)
+	sortServantsWithBonus(userEquipBonusMap(userID), UserServantManualBonusPercent(userID), servants)
 }
 
 // ListEquipment 装备列表（装备中 + 仓库）

@@ -1028,6 +1028,8 @@ func pointTransactionTypeText(txType string) string {
 		return "突破失败惩罚"
 	case "breakthrough_splash_penalty":
 		return "雷劫外溢惩罚"
+	case "breakthrough_treasure_fee":
+		return "至宝突破渡劫费"
 	case "sect_create":
 		return "创建宗门"
 	case "sect_join":
@@ -1066,6 +1068,8 @@ func pointTransactionTypeText(txType string) string {
 		return "历史补偿"
 	case "world_boss_reward":
 		return "世界Boss奖励"
+	case "lingjing_exchange":
+		return "灵晶兑换"
 	case "lottery_reward":
 		return "积分抽奖奖励"
 	case "lottery_entry_cost":
@@ -4804,7 +4808,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		"创建宗门抽奖", "宗门抽奖", "参加宗门抽奖", "查看宗门抽奖", "重发宗门抽奖", "提醒宗门抽奖", "补发宗门抽奖提醒", "取消宗门抽奖",
 		"宗门秘境", "开启宗门秘境", "确认开启宗门秘境", "开启普通宗门秘境", "确认开启普通宗门秘境", "开启高阶宗门秘境", "确认开启高阶宗门秘境", "开启限时宗门秘境", "确认开启限时宗门秘境", "进入宗门秘境", "结算宗门秘境", "宗门秘境排行", "宗门秘境明细",
 		"宗门喇叭", "世界喇叭", "确认宗门喇叭", "确认世界喇叭",
-		"世界Boss", "Boss状态", "参加Boss", "Boss排行", "宗门科技", "护宗神兽", "升级科技", "确认升级科技",
+		"世界Boss", "Boss状态", "参加Boss", "Boss排行", "宗门科技", "护宗神兽", "升级科技", "确认升级科技", "藏经阁", "升级藏经阁", "解锁功法", "观法", "修习", "宗门运势", "开运",
 		"流水", "我的流水", "查流水",
 		"刷新我的今日净修为", "刷新宗门今日净修为", "刷新全服今日净修为", "查看每日净修为", "万灵阁",
 	}
@@ -4910,7 +4914,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 					log.Printf("⚠️ 我的信息今日净修为读取失败: user=%d err=%s", userID, formatPlainError(err))
 					todayEffectiveHoursText = "`读取失败`"
 				} else if ok {
-					todayEffectiveHours = todayStat.EffectiveHours + activeSectCaveRetreatBonusHours(userID, time.Now())
+					todayEffectiveHours = applySectFortuneNetCultivationBuff(userID, todayStat.EffectiveHours+activeSectCaveRetreatBonusHours(userID, time.Now()))
 					todayEffectiveHoursText = fmt.Sprintf("`%.2f`", todayEffectiveHours)
 				}
 

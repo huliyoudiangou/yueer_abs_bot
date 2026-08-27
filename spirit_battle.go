@@ -14,6 +14,7 @@ package main
 // ==========================================
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -42,6 +43,14 @@ var chapterBossNames = []string{
 	"罗刹夜魅",  // ch4 幽冥绝岭
 	"覆海蛟王",  // ch5 归墟海眼
 	"五爪金龙",  // ch6 不周山巅
+	"虚空螭龙",  // ch7 问道星海
+	"两仪道魇",  // ch8 两仪秘境
+	"归元古佛",  // ch9 归元天阙
+	"仙庭残魂",  // ch10 仙庭残迹
+	"赤金天蟒",  // ch11 赤金天池
+	"太一真灵",  // ch12 太一仙山
+	"大罗金魔",  // ch13 大罗天境
+	"混元祖灵",  // ch14 混元祖庭
 }
 
 // wuxingCounter 五行克制（攻方 → 所克）
@@ -118,9 +127,14 @@ func buildStageEnemy(chapterID, stageID int) *BattleFighter {
 	if isBoss {
 		atk += 30
 	}
+	// 品阶体系只有 凡/灵/玄/地/天/圣 六档；炼虚(tier6)起的大境界怪物全部按“圣”处理。
+	qualityIndex := tier
+	if qualityIndex >= len(SpiritQualityNames) {
+		qualityIndex = len(SpiritQualityNames) - 1
+	}
 	return &BattleFighter{
 		Name:    name,
-		Quality: SpiritQualityNames[tier],
+		Quality: SpiritQualityNames[qualityIndex],
 		Element: el,
 		MaxHP:   power * 2,
 		HP:      power * 2,
@@ -278,7 +292,7 @@ func getOrCreateStaminaTx(tx *gorm.DB, userID int64) (*SpiritBattleStamina, erro
 	today := time.Now().Format("20060102")
 	var s SpiritBattleStamina
 	err := tx.Where("user_id = ?", userID).First(&s).Error
-	if err == gorm.ErrRecordNotFound {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		s = SpiritBattleStamina{UserID: userID, DayKey: today, Stamina: divineTravelDailyCap}
 		if e := tx.Create(&s).Error; e != nil {
 			return nil, e
@@ -321,8 +335,10 @@ type PveFightResult struct {
 	TeamHPTotal  int
 	StaminaLeft  int
 	IsBoss       bool
-	DroppedEgg   *SpiritEgg // Boss 胜利掉蛋（可空）
+	DroppedEgg   *SpiritEgg // 胜利掉蛋（普通关/Boss，可空）
 	DroppedItems []string   // 掉落道具（灵魄/真身碎片）
+	// DroppedTreasure Boss 掉落的至宝名（可空）；化神及之后 Boss 概率掉下一境至宝，扫荡不掉。
+	DroppedTreasure string
 }
 
 // PveFight 执行一次推图挑战（全程事务：扣体力 → 战斗 → 记进度 → 发奖励）
@@ -395,7 +411,7 @@ func PveFight(userID int64, chapterID, stageID int) (*PveFightResult, error) {
 		oldStars := 0
 		if err := tx.Where("user_id = ? AND chapter_id = ? AND stage_id = ?", userID, chapterID, stageID).
 			First(&prog).Error; err != nil {
-			if !isUniqueConstraintError(err) && err != gorm.ErrRecordNotFound {
+			if !isUniqueConstraintError(err) && !errors.Is(err, gorm.ErrRecordNotFound) {
 				return err
 			}
 			prog = SpiritStageProgress{UserID: userID, ChapterID: chapterID, StageID: stageID}
@@ -435,9 +451,15 @@ func PveFight(userID int64, chapterID, stageID int) (*PveFightResult, error) {
 			}
 		}
 
-		// 7. Boss 掉蛋（每次胜利 30%，扫荡不掉）
+		// 7. 掉蛋（普通关 10% / Boss 30%，扫荡不掉）
 		if stageID == bossStageID {
 			egg, err := dropBossEgg(tx, userID, chapterID, zone)
+			if err != nil {
+				return err
+			}
+			result.DroppedEgg = egg
+		} else {
+			egg, err := dropNormalEgg(tx, userID, chapterID, zone)
 			if err != nil {
 				return err
 			}
@@ -452,6 +474,16 @@ func PveFight(userID int64, chapterID, stageID int) (*PveFightResult, error) {
 				}
 			}
 			result.DroppedItems = items
+		}
+
+		// 9. 至宝掉落（化神及之后的章节 Boss 概率掉“下一境界”至宝，扫荡不掉）。
+		if stageID == bossStageID {
+			if treasure := rollPveBossTreasureDrop(chapterID); treasure != "" {
+				if err := gardenGrantInventoryInTx(tx, userID, treasure, 1); err != nil {
+					return err
+				}
+				result.DroppedTreasure = treasure
+			}
 		}
 		return nil
 	})

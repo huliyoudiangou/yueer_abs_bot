@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/rand"
 	"sort"
 	"strings"
 	"time"
@@ -111,11 +112,14 @@ const (
 	worldBossValidDamage              = 3.0
 	worldBossCultivationBonusPerStage = 0.01
 	worldBossCultivationBonusCap      = 0.25
-	worldBossLiveRefreshInterval      = 2 * time.Minute
-	worldBossJoinCloseBeforeEnd       = 15 * time.Minute
-	worldBossSettlementStaleAfter     = 30 * time.Minute
-	worldBossRedPacketTotalPoints     = 30
-	worldBossRedPacketCount           = 10
+	// 藏经阁功法灵侍讨伐加成：Σ(出战且已修习功法战力增量)/1000，封顶 +20%
+	worldBossServantManualBonusDivisor = 1000.0
+	worldBossServantManualBonusCap     = 0.20
+	worldBossLiveRefreshInterval       = 2 * time.Minute
+	worldBossJoinCloseBeforeEnd        = 15 * time.Minute
+	worldBossSettlementStaleAfter      = 30 * time.Minute
+	worldBossRedPacketTotalPoints      = 30
+	worldBossRedPacketCount            = 10
 )
 
 func worldBossPointDescriptionName(name string) string {
@@ -221,7 +225,7 @@ func startWorldBossEvent(bot *tgbotapi.BotAPI, chatID int64, now time.Time) {
 			"血量：`%.2f/%d`（基础 `%d` + 每名参与者 `%d`，最低 `%d`，最高 `%d`）\n\n"+
 			"发送 `参加Boss` 记录当前实际听书时长。\n"+
 			"最后 `%d` 分钟停止新道友加入。\n"+
-			"结算伤害 = 参与后 Boss 时段实际听书小时 × `%.0f` ×（1 + 修为加成 + 宗门科技 + 护宗神兽）。\n"+
+			"结算伤害 = 参与后 Boss 时段实际听书小时 × `%.0f` ×（1 + 修为加成 + 宗门科技 + 护宗神兽 + 功法灵侍讨伐 + 当日卦象）。\n"+
 			"修为加成：炼气初期 `+1%%`，每小段 `+1%%`，最高 `+25%%`。\n\n"+
 			"发送 `Boss状态` 查看进度，`Boss排行` 查看伤害榜。",
 		escapeMarkdown(event.Name),
@@ -794,6 +798,12 @@ func grantWorldBossRewards(event WorldBossEvent, participants []WorldBossPartici
 				}
 			}
 
+			// 至宝掉落：化神及以上的参与者按当前大境界概率掉落“突破到下一境”的至宝。
+			// 道祖已封顶、凡人~元婴无至宝，rollWorldBossTreasureDropInTx 内部会直接跳过。
+			if err := rollWorldBossTreasureDropInTx(tx, p.UserID); err != nil {
+				return err
+			}
+
 			res := tx.Model(&WorldBossParticipant{}).
 				Where("id = ? AND is_rewarded = ?", p.ID, false).
 				Updates(map[string]interface{}{
@@ -837,6 +847,29 @@ func grantWorldBossRewards(event WorldBossEvent, participants []WorldBossPartici
 
 		return nil
 	})
+}
+
+// rollWorldBossTreasureDropInTx 世界Boss结算时，按参与者当前大境界概率掉落对应“突破到下一境”的至宝。
+// 无修仙档案、凡人~元婴（无至宝）、道祖（已封顶）均可直接跳过；掉落累加入 Inventory。
+func rollWorldBossTreasureDropInTx(tx *gorm.DB, userID int64) error {
+	if tx == nil || userID == 0 {
+		return nil
+	}
+	var cul Cultivation
+	if err := tx.Where("user_id = ?", userID).First(&cul).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	treasure := cultivationTreasureNameForRealm(cul.MajorRealm)
+	if treasure == "" {
+		return nil
+	}
+	if rand.Intn(100) < cultivationTreasureDropRatePercent() {
+		return gardenGrantInventoryInTx(tx, userID, treasure, 1)
+	}
+	return nil
 }
 
 func awardWorldBossSectRewardTx(tx *gorm.DB, userID int64, contribution int, prestige int, bossID string) error {
@@ -1027,7 +1060,7 @@ func handleWorldBossStatus(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	replyText(bot, msg.Chat.ID, fmt.Sprintf(
-		"🌑 **世界Boss状态**\n\nBoss：**%s**\n状态：`%s`\n血量：`%.2f/%d`\n有效门槛：最终伤害 `>= %.2f`\n参与人数：`%d`\n\n血量按实际参与人数动态调整：基础 `%d`，每人 `%d`，最低 `%d`，最高 `%d`。\n伤害 = 参与后 Boss 时段实际听书小时 × `%.0f` ×（1 + 修为加成 + 宗门科技 + 护宗神兽），不计算白天净修为，无单人伤害上限。\n修为加成：炼气初期 `+1%%`，每小段 `+1%%`，最高 `+25%%`。\n开放时间：每周六、周日 `21:00 - 22:00`，最后 `%d` 分钟停止新道友加入。\n发送 `参加Boss` 加入，`Boss排行` 查看榜单。",
+		"🌑 **世界Boss状态**\n\nBoss：**%s**\n状态：`%s`\n血量：`%.2f/%d`\n有效门槛：最终伤害 `>= %.2f`\n参与人数：`%d`\n\n血量按实际参与人数动态调整：基础 `%d`，每人 `%d`，最低 `%d`，最高 `%d`。\n伤害 = 参与后 Boss 时段实际听书小时 × `%.0f` ×（1 + 修为加成 + 宗门科技 + 护宗神兽 + 功法灵侍讨伐 + 当日卦象），不计算白天净修为，无单人伤害上限。\n修为加成：炼气初期 `+1%%`，每小段 `+1%%`，最高 `+25%%`。\n开放时间：每周六、周日 `21:00 - 22:00`，最后 `%d` 分钟停止新道友加入。\n发送 `参加Boss` 加入，`Boss排行` 查看榜单。",
 		escapeMarkdown(event.Name),
 		statusText,
 		event.CurrentHP,
@@ -1172,7 +1205,7 @@ func renderWorldBossLiveBoard(event WorldBossEvent) string {
 
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf(
-		"🌑 **世界Boss实时战榜**\n\nBoss：**%s**\n状态：`%s`\n血量：`%.2f/%d`\n参与人数：`%d`\n规则：实听小时 × `%.0f` ×（1 + 修为加成 + 宗门科技 + 护宗神兽），无单人伤害上限\n\n",
+		"🌑 **世界Boss实时战榜**\n\nBoss：**%s**\n状态：`%s`\n血量：`%.2f/%d`\n参与人数：`%d`\n规则：实听小时 × `%.0f` ×（1 + 修为加成 + 宗门科技 + 护宗神兽 + 功法灵侍讨伐 + 当日卦象），无单人伤害上限\n\n",
 		escapeMarkdown(event.Name),
 		statusText,
 		event.CurrentHP,
@@ -1419,6 +1452,49 @@ func getWorldBossSectDamageBonusChecked(userID int64) (float64, error) {
 	return float64(level) * 0.02, nil
 }
 
+// getWorldBossServantManualDamageBonusChecked 藏经阁功法灵侍讨伐加成：
+// Σ(出战且已修习功法的灵侍 · 功法战力增量) / 1000，封顶 +20%。
+// 读取失败（除「未入宗/无出战」外）返回错误，由加成链统一抛错，不得静默当 0。
+func getWorldBossServantManualDamageBonusChecked(userID int64) (float64, error) {
+	team, err := pickDeployedTeamTx(db, userID)
+	if err != nil {
+		return 0, err
+	}
+	if len(team) == 0 {
+		return 0, nil
+	}
+	equip := equipBonusMap(db, userID)
+	manual := servantManualBonusPctMap(db, userID)
+	var totalIncrement int64
+	for i := range team {
+		s := &team[i]
+		pct := manual[s.ID]
+		if pct <= 0 {
+			continue
+		}
+		base := EnhancedBattlePower(equip, map[uint]int{}, s) // 无功法战力
+		totalIncrement += int64(float64(base) * float64(pct) / 100)
+	}
+	bonus := float64(totalIncrement) / worldBossServantManualBonusDivisor
+	if bonus > worldBossServantManualBonusCap {
+		bonus = worldBossServantManualBonusCap
+	}
+	if bonus < 0 {
+		bonus = 0
+	}
+	return bonus, nil
+}
+
+// getWorldBossFortuneDamageBonusChecked 宗门运势「世界Boss 伤害 +2%」当日卦象加成。
+// 读取失败（非「未入宗/无卦象」）返回错误，由加成链统一抛错，不得静默当 0。
+func getWorldBossFortuneDamageBonusChecked(userID int64) (float64, error) {
+	pct, err := sectFortuneBuffPctForUserTx(db, userID, sectFortuneBuffWorldBoss)
+	if err != nil {
+		return 0, err
+	}
+	return pct, nil
+}
+
 func applyWorldBossDamageBonuses(userID int64, baseDamage float64) (float64, float64) {
 	damage, multiplier, err := applyWorldBossDamageBonusesChecked(userID, baseDamage)
 	if err != nil {
@@ -1440,7 +1516,15 @@ func applyWorldBossDamageBonusesChecked(userID int64, baseDamage float64) (float
 		return 0, 1, err
 	}
 	beastBonus := getSectBeastDamageBonus(userID)
-	multiplier := 1 + cultivationBonus + sectBonus + beastBonus
+	manualBonus, err := getWorldBossServantManualDamageBonusChecked(userID)
+	if err != nil {
+		return 0, 1, err
+	}
+	fortuneBonus, err := getWorldBossFortuneDamageBonusChecked(userID)
+	if err != nil {
+		return 0, 1, err
+	}
+	multiplier := 1 + cultivationBonus + sectBonus + beastBonus + manualBonus + fortuneBonus
 	damage := baseDamage * multiplier
 	if damage < 0 {
 		return 0, multiplier, nil

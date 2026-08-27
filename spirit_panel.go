@@ -42,6 +42,7 @@ const (
 	spCbBeast          = "sp:beast" // 兼容旧消息；新入口在宗门菜单（🏯 宗门 → 护宗神兽）
 	spCbHelp           = "sp:help"
 	spCbExPrefix       = "sp:ex:"         // sp:ex:100 / sp:ex:300 / sp:ex:500 / sp:ex:1000
+	spCbExToken        = "sp:ex:token"    // sp:ex:token 秘境信物兑换灵晶
 	spCbZonePrefix     = "sp:zone:"       // sp:zone:qingzhu
 	spPullPrefix       = "sp:pull:"       // sp:pull:qingzhu:fusu
 	spCbChapterPrefix  = "sp:chapter:"    // sp:chapter:1
@@ -122,7 +123,8 @@ func spiritPanelList(db *gorm.DB, userID int64, page int) (string, tgbotapi.Inli
 	}
 	total := int64(len(all))
 	bonusMap := userEquipBonusMap(userID)
-	sortServantsWithBonus(bonusMap, all)
+	manualMap := UserServantManualBonusPercent(userID)
+	sortServantsWithBonus(bonusMap, manualMap, all)
 	totalPages := int((total + spiritListPageSize - 1) / spiritListPageSize)
 	if totalPages < 1 {
 		totalPages = 1
@@ -160,7 +162,7 @@ func spiritPanelList(db *gorm.DB, userID int64, page int) (string, tgbotapi.Inli
 				capMark = "（满星）"
 			}
 			b.WriteString(fmt.Sprintf("· %s%s %s品·%s Lv.%d ⭐%d 战力%d%s\n",
-				s.Name, deploy, s.Quality, s.Attribute, s.Level, s.Star, EnhancedBattlePower(bonusMap, s), capMark))
+				s.Name, deploy, s.Quality, s.Attribute, s.Level, s.Star, EnhancedBattlePower(bonusMap, manualMap, s), capMark))
 		}
 		b.WriteString("点击下方灵侍进入升星。")
 	}
@@ -205,15 +207,25 @@ func spiritPanelBag(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboardM
 		remain = 0
 	}
 
+	// 秘境信物持有量
+	tokenCount := 0
+	var tokenInv Inventory
+	if err := db.Where("user_id = ? AND item_name = ? AND quantity > 0", userID, sectSecretRealmTokenItemName).First(&tokenInv).Error; err == nil {
+		tokenCount = tokenInv.Quantity
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		log.Printf("[灵侍] 查询秘境信物库存失败 user=%d err=%s", userID, formatTelegramSendError(err))
+	}
+
 	text := fmt.Sprintf(
 		"🪷 灵晶斋\n"+
 			"━━━━━━━━━━━━━━\n"+
 			"💎 灵晶：%d（灵尘 %d）\n"+
 			"📅 今日已兑换：%d 积分\n"+
 			"🧮 今日剩余额度：%d 积分\n"+
+			"🎫 秘境信物：%d 个（1 个 = %d 灵晶）\n"+
 			"━━━━━━━━━━━━━━\n"+
-			"选择下方档位，将积分单向兑换为灵晶：",
-		lingjing, LingchenFromLingjing(lingjing), spent, remain)
+			"选择下方档位，将积分单向兑换为灵晶；也可直接兑换秘境信物：",
+		lingjing, LingchenFromLingjing(lingjing), spent, remain, tokenCount, SectSecretRealmTokenLingjingAmount)
 
 	var rows [][]tgbotapi.InlineKeyboardButton
 	var tierRow []tgbotapi.InlineKeyboardButton
@@ -225,6 +237,10 @@ func spiritPanelBag(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboardM
 			tierRow = nil
 		}
 	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(
+			fmt.Sprintf("🎫 兑 秘境信物 x1 → %d 灵晶", SectSecretRealmTokenLingjingAmount),
+			spCbExToken)))
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
 	return text, tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
@@ -263,7 +279,7 @@ func spiritPanelCatch(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboar
 		label := z.Name
 		if !unlocked {
 			status = "🔒"
-			label = fmt.Sprintf("%s（需境界%d阶）", z.Name, z.Tier)
+			label = fmt.Sprintf("%s（需%s）", z.Name, cultivationRealmDisplayName(z.Tier))
 		}
 		pityStr := ""
 		if pity != nil && pity.TianPity > 0 {
@@ -415,7 +431,8 @@ func spiritPanelTeam(db *gorm.DB, userID int64, page int) (string, tgbotapi.Inli
 		return "出战队列查询失败，请稍后再试。", backKb
 	}
 	bonusMap := userEquipBonusMap(userID)
-	sortServantsWithBonus(bonusMap, all) // 战力（含装备）高→低
+	manualMap := UserServantManualBonusPercent(userID)
+	sortServantsWithBonus(bonusMap, manualMap, all) // 战力（含装备+功法）高→低
 	var deployed []UserSpiritServant
 	for i := range all {
 		if all[i].IsDeployed {
@@ -449,7 +466,7 @@ func spiritPanelTeam(db *gorm.DB, userID int64, page int) (string, tgbotapi.Inli
 		for i := range deployed {
 			s := &deployed[i]
 			b.WriteString(fmt.Sprintf("· %s %s品·%s Lv.%d ⭐%d 战力%d\n",
-				s.Name, s.Quality, s.Attribute, s.Level, s.Star, EnhancedBattlePower(bonusMap, s)))
+				s.Name, s.Quality, s.Attribute, s.Level, s.Star, EnhancedBattlePower(bonusMap, manualMap, s)))
 		}
 	}
 
@@ -492,9 +509,9 @@ func spiritPanelHelp() (string, tgbotapi.InlineKeyboardMarkup) {
 		"· 灵尘：1 灵晶 = 100 灵尘，为最小计量单位\n" +
 		"· 灵侍品阶：凡/灵/玄/地/天/圣，共六阶\n" +
 		"· 灵侍属性：金木水火土阴阳（阴阳仅地阶以上可得）\n" +
-		"· 捕捉：灵墟按境界开放六大区域，需消耗缚灵索\n" +
+		"· 捕捉：灵墟按境界逐级开放（凡人 → 道祖共十四域），需消耗缚灵索\n" +
 		"· 升星：星级上限 凡3/灵4/玄5/地6/天7/圣9；≤3★ 需同品同属性祭品，4-6★ 另需同星级，7-9★ 需同名同星级灵侍；段1-2 可消耗灵魄替代祭品，段3 可消耗万能真身碎片替代同名要求；升星后等级重置\n" +
-		"· 推图：六大章节各 10 关 + Boss，神行符 10/日，三星可扫荡\n" +
+		"· 推图：灵墟章节（随境界逐级开放）各 10 关 + Boss，神行符 10/日，三星可扫荡\n" +
 		"· 出战队列：上阵/下阵灵侍组成出战队伍（上限 5 只，出战顺序按含装备战力高→低），推图/镜场/PVP 需先上阵\n" +
 		"· 战力：图鉴/养成/出战队列/装备选择均按战力（含装备加成）高→低排列，分页展示\n" +
 		"· 镜场：上架镜像供道友挑战，胜 30 / 负 10 灵晶，10 次/日，24h 内可复仇\n" +
@@ -502,6 +519,7 @@ func spiritPanelHelp() (string, tgbotapi.InlineKeyboardMarkup) {
 		"· 护宗神兽：入口「🏯 宗门 → 护宗神兽」（宗门玩法），宗门声望 2000 解锁，喂养耗 20-50 声望或等量积分（1:1，随等级递增）；宗主/长老可用声望，普通成员仅积分；三阶为全宗提供 +1%/+2%/+3.5% 世界Boss伤害\n" +
 		"· 灵侍蛋：击败章节 Boss 每次 30% 概率掉蛋（地阶及以下），在灵侍蛋面板孵化为对应品阶灵侍\n" +
 		"· 道具：灵魄随推图胜利掉落（普通关 25%/章节 Boss 50%）；万能真身碎片随第 5/6 章 Boss 掉落（10%）；扫荡不掉道具\n" +
+		"· 至宝：化神及之后的章节 Boss 概率掉落“突破至下一境”的至宝（10%，扫荡不掉），世界 Boss 结算也可能掉落；至宝是化神后突破的必备材料，禁上架交易行\n" +
 		"· 养成：养成面板喂养灵侍升级（每级耗灵晶 凡30/灵50/玄80/地120/天200/圣300），每级 +2% 一级基础属性，等级上限 = 星级 × 10\n" +
 		"━━━━━━━━━━━━━━\n" +
 		"所有灵侍操作仅在私聊进行，请道友移步私聊。"
@@ -560,7 +578,7 @@ func spiritPanelPush(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboard
 		} else {
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData(
-					fmt.Sprintf("🔒 %s（需境界%d阶）", z.Name, z.Tier), "sp:chlocked")))
+					fmt.Sprintf("🔒 %s（需%s）", z.Name, cultivationRealmDisplayName(z.Tier)), "sp:chlocked")))
 		}
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
@@ -722,6 +740,8 @@ func spiritPanelMirror(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("🪞 上架/刷新镜像", "sp:mirror:set"),
 		tgbotapi.NewInlineKeyboardButtonData("⚔️ 攻击镜像", "sp:mirror:atk")))
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔍 对手列表", "sp:mirror:list")))
 	if len(revTargets) > 0 {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(
@@ -750,6 +770,31 @@ func spiritPanelMirrorRevenge(userID int64) (string, tgbotapi.InlineKeyboardMark
 			tgbotapi.NewInlineKeyboardButtonData(
 				fmt.Sprintf("😤 复仇：%s（战力 %d）", spiritPvpUserName(t.AttackerID), t.AttackerPower),
 				fmt.Sprintf("sp:mirror:rev:%d", t.AttackerID))))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔙 镜场", spCbMirror)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// spiritPanelMirrorTargets 镜场对手列表（可浏览、点选攻击）
+func spiritPanelMirrorTargets(userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
+	targets := findPvpTargetCandidates(userID, 10)
+	var b strings.Builder
+	b.WriteString("🔍 对手列表\n━━━━━━━━━━━━━━\n")
+	remaining := GetPvpDailyRemaining(userID)
+	b.WriteString(fmt.Sprintf("今日剩余攻击：%d/%d\n", remaining, pvpDailyLimit))
+	if len(targets) == 0 {
+		b.WriteString("暂无可挑战的镜像，稍后再来看看。")
+	} else {
+		b.WriteString("点击下方对手即可挑战（胜 30 / 负 10 灵晶）：\n")
+	}
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i := range targets {
+		t := &targets[i]
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("⚔️ %s（战力 %d）", spiritPvpUserName(t.UserID), t.TeamPower),
+				fmt.Sprintf("sp:mirror:list:%d", t.UserID))))
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("🔙 镜场", spCbMirror)))
@@ -953,7 +998,8 @@ func spiritPanelEquipPick(userID int64, equipmentID uint, page int) (string, tgb
 	var all []UserSpiritServant
 	db.Where("user_id = ?", userID).Order("id asc").Find(&all)
 	bonusMap := userEquipBonusMap(userID)
-	sortServantsWithBonus(bonusMap, all)
+	manualMap := UserServantManualBonusPercent(userID)
+	sortServantsWithBonus(bonusMap, manualMap, all)
 	total := len(all)
 	totalPages := (total + spiritListPageSize - 1) / spiritListPageSize
 	if totalPages < 1 {
@@ -1164,7 +1210,8 @@ func spiritPanelFeed(userID int64, page int) (string, tgbotapi.InlineKeyboardMar
 	}
 	total := int64(len(all))
 	bonusMap := userEquipBonusMap(userID)
-	sortServantsWithBonus(bonusMap, all)
+	manualMap := UserServantManualBonusPercent(userID)
+	sortServantsWithBonus(bonusMap, manualMap, all)
 	totalPages := int((total + spiritListPageSize - 1) / spiritListPageSize)
 	if totalPages < 1 {
 		totalPages = 1
@@ -1207,7 +1254,7 @@ func spiritPanelFeed(userID int64, page int) (string, tgbotapi.InlineKeyboardMar
 			capMark = "（满级）"
 		}
 		b.WriteString(fmt.Sprintf("· %s %s品·%s ⭐%d Lv.%d/%d 战力%d%s\n",
-			s.Name, s.Quality, s.Attribute, s.Star, s.Level, maxLv, EnhancedBattlePower(bonusMap, s), capMark))
+			s.Name, s.Quality, s.Attribute, s.Star, s.Level, maxLv, EnhancedBattlePower(bonusMap, manualMap, s), capMark))
 		if s.Level < maxLv {
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData(
@@ -1304,6 +1351,7 @@ func spiritPanelStarUp(userID int64, servantID uint, page int) (string, tgbotapi
 	pageCands := combined[offset:end]
 
 	bonusMap := userEquipBonusMap(userID)
+	manualMap := UserServantManualBonusPercent(userID)
 
 	if total == 0 {
 		b.WriteString("\n当前没有符合条件的祭品灵侍。\n可前往灵墟捕捉，或孵化灵侍蛋获得。")
@@ -1321,7 +1369,7 @@ func spiritPanelStarUp(userID int64, servantID uint, page int) (string, tgbotapi
 				shardHeaderShown = true
 			}
 			b.WriteString(fmt.Sprintf("· %s %s品·%s ⭐%d 战力%d\n",
-				c.s.Name, c.s.Quality, c.s.Attribute, c.s.Star, EnhancedBattlePower(bonusMap, &c.s)))
+				c.s.Name, c.s.Quality, c.s.Attribute, c.s.Star, EnhancedBattlePower(bonusMap, manualMap, &c.s)))
 		}
 	}
 
@@ -1470,6 +1518,15 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		text, kb = spiritPanelBeast(userID)
 	case cb.Data == spCbHelp:
 		text, kb = spiritPanelHelp()
+	case cb.Data == spCbExToken:
+		lingjing, err := ExchangeSectSecretRealmTokenToLingjing(db, userID)
+		if err != nil {
+			log.Printf("[灵侍] 秘境信物兑换失败 user=%d err=%s", userID, formatTelegramSendError(err))
+			ackText = fmt.Sprintf("兑换失败：%v", err)
+		} else {
+			ackText = fmt.Sprintf("🎫 兑换成功：秘境信物 x1 → %d 灵晶", lingjing)
+		}
+		text, kb = spiritPanelBag(db, userID)
 	case strings.HasPrefix(cb.Data, spCbExPrefix):
 		pointsStr := strings.TrimPrefix(cb.Data, spCbExPrefix)
 		points := 0
@@ -1561,10 +1618,13 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		if res.Win {
 			ackText = fmt.Sprintf("⚔️ 胜利！获得 %d 星，+%d 灵晶", res.Stars, res.Reward)
 			if res.DroppedEgg != nil {
-				ackText += fmt.Sprintf("\n🥚 Boss 掉落 %s 品灵侍蛋（可在灵侍蛋面板孵化）", res.DroppedEgg.Quality)
+				ackText += fmt.Sprintf("\n🥚 掉落 %s 品灵侍蛋（可在灵侍蛋面板孵化）", res.DroppedEgg.Quality)
 			}
 			for _, it := range res.DroppedItems {
 				ackText += fmt.Sprintf("\n🎁 获得 %s ×1（升星可用）", spiritItemNames[it])
+			}
+			if res.DroppedTreasure != "" {
+				ackText += fmt.Sprintf("\n🎫 至宝掉落【%s】×1！此至宝用于突破至更高境界。", res.DroppedTreasure)
 			}
 		} else {
 			ackText = fmt.Sprintf("💀 不敌 %s，稍作休整再战", res.EnemyName)
@@ -1615,6 +1675,27 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 		page := 0
 		fmt.Sscanf(strings.TrimPrefix(cb.Data, "sp:mirror:hist:page:"), "%d", &page)
 		text, kb = spiritPanelMirrorHistory(userID, page)
+	case cb.Data == "sp:mirror:list":
+		text, kb = spiritPanelMirrorTargets(userID)
+	case strings.HasPrefix(cb.Data, "sp:mirror:list:"):
+		targetID, err := strconv.ParseInt(strings.TrimPrefix(cb.Data, "sp:mirror:list:"), 10, 64)
+		if err != nil || targetID <= 0 {
+			ackText = "无效的挑战目标"
+			text, kb = spiritPanelMirrorTargets(userID)
+			break
+		}
+		res, err2 := PvpAttack(userID, targetID)
+		if err2 != nil {
+			ackText = fmt.Sprintf("挑战失败：%v", err2)
+			text, kb = spiritPanelMirrorTargets(userID)
+			break
+		}
+		if res.Win {
+			ackText = fmt.Sprintf("⚔️ 胜！+ %d 灵晶", res.Reward)
+		} else {
+			ackText = fmt.Sprintf("💀 败。+ %d 灵晶安慰", res.Reward)
+		}
+		text, kb = pvpAttackResultPanel(res)
 	case strings.HasPrefix(cb.Data, "sp:mirror:rev:"):
 		targetID, err := strconv.ParseInt(strings.TrimPrefix(cb.Data, "sp:mirror:rev:"), 10, 64)
 		if err != nil || targetID <= 0 {

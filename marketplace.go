@@ -288,6 +288,10 @@ func handleMarketplaceStep(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text str
 
 	case "WAITING_MARKET_INVENTORY_ITEM":
 		itemName := strings.TrimSpace(text)
+		if isCultivationTreasureItemName(itemName) {
+			sendPlainText(bot, chatID, "⛔ 至宝为突破高境的天地奇珍，仅能通过 Boss 掉落获得，严禁上架交易行。请发送其他物品名。")
+			return
+		}
 		if !validMarketplaceInventoryItemName(itemName) {
 			sendPlainText(bot, chatID, "物品名称需为 "+marketplaceInventoryItemNameRequirementText+"，请重新发送：")
 			return
@@ -852,6 +856,10 @@ func validMarketplaceInventoryItemName(name string) bool {
 	name = strings.TrimSpace(name)
 	nameLen := len([]rune(name))
 	if nameLen == 0 || nameLen > marketplaceMaxNameLen {
+		return false
+	}
+	// 至宝是突破高境的专属材料，只能由 Boss 掉落，严禁上架交易行变现。
+	if isCultivationTreasureItemName(name) {
 		return false
 	}
 	return !containsDisallowedControl(name, false)

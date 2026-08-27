@@ -101,3 +101,21 @@ func rollPveItemDrops(chapterID, stageID int) []string {
 	}
 	return drops
 }
+
+// rollPveBossTreasureDrop 章节 Boss 掉“下一境界”至宝的判定。
+// 至宝链按区域 tier（= MajorRealm）映射：仅化神(tier5)及之后的 Boss 会掉至宝。
+// 返回至宝名，无掉落返回空串。
+func rollPveBossTreasureDrop(chapterID int) string {
+	zone := chapterZone(chapterID)
+	if zone == nil {
+		return ""
+	}
+	treasure := cultivationTreasureNameForRealm(zone.Tier)
+	if treasure == "" {
+		return ""
+	}
+	if rand.Intn(100) < cultivationTreasureDropRatePercent() {
+		return treasure
+	}
+	return ""
+}

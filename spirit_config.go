@@ -40,11 +40,11 @@ var CultivationPowerWeight = map[int]float64{
 	0: 0.00, 1: 0.03, 2: 0.06, 3: 0.09, 4: 0.12, 5: 0.15,
 }
 
-// 灵墟区域设定（按修仙 MajorRealm 门槛 0-5 解锁；名称为展示名，运行时以修仙配置为准）
+// 灵墟区域设定（按修仙 MajorRealm 门槛 0-13 解锁；名称为展示名，运行时以修仙配置为准）
 type SpiritZone struct {
 	Key        string // 区域ID
 	Name       string // 名称
-	Tier       int    // MajorRealm 门槛（0-5）
+	Tier       int    // MajorRealm 门槛（0-13）
 	SpawnRates []int  // 各品阶出现概率（万分率，与 SpiritQualityNames 对齐：凡/灵/玄/地/天/圣）
 }
 
@@ -55,6 +55,14 @@ var SpiritZones = []SpiritZone{
 	{"youming", "幽冥绝岭", 3, []int{200, 2900, 4200, 2000, 50, 10}},
 	{"guixu", "归墟海眼", 4, []int{0, 600, 4100, 3650, 1400, 100}},
 	{"buzhou", "不周山巅", 5, []int{0, 100, 1400, 4550, 3600, 350}},
+	{"wendao", "问道星海", 6, []int{0, 0, 300, 3200, 5000, 1500}},
+	{"liangyi", "两仪秘境", 7, []int{0, 0, 100, 2200, 5600, 2100}},
+	{"guiyuan", "归元天阙", 8, []int{0, 0, 0, 1400, 6000, 2600}},
+	{"xianting", "仙庭残迹", 9, []int{0, 0, 0, 800, 6000, 3200}},
+	{"chijin", "赤金天池", 10, []int{0, 0, 0, 400, 5600, 4000}},
+	{"taiyi", "太一仙山", 11, []int{0, 0, 0, 100, 5000, 4900}},
+	{"daluo", "大罗天境", 12, []int{0, 0, 0, 0, 4000, 6000}},
+	{"hunyuan", "混元祖庭", 13, []int{0, 0, 0, 0, 2500, 7500}},
 }
 
 // 灵侍名录
@@ -169,10 +177,18 @@ var SpiritRopes = []SpiritRope{
 // 天品保底阈值
 const TianPityThreshold = 30
 
-// 圣品保底阈值（仅灵墟区域4-5生效）
+// 圣品保底阈值（灵墟区域4-5生效，高境区域继续递减）
 var ShengPityThreshold = map[string]int{
-	"guixu":  300,
-	"buzhou": 150,
+	"guixu":    300,
+	"buzhou":   150,
+	"wendao":   200,
+	"liangyi":  180,
+	"guiyuan":  160,
+	"xianting": 140,
+	"chijin":   120,
+	"taiyi":    100,
+	"daluo":    80,
+	"hunyuan":  60,
 }
 
 // 每日免费探索次数（区域通用）

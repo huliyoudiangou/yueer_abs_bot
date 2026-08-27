@@ -122,7 +122,7 @@ func GetRealmName(cul *Cultivation) string {
 
 	realmTitle := getCultivationRealmTitle(cul.MajorRealm)
 	if realmTitle == "" {
-		majors := []string{"一介凡人", "炼气", "筑基", "结丹", "元婴", "化神"}
+		majors := []string{"一介凡人", "炼气", "筑基", "结丹", "元婴", "化神", "炼虚", "合体", "大乘", "真仙", "金仙", "太乙", "大罗", "道祖"}
 		if cul.MajorRealm == 0 {
 			return "【平平无奇的凡人】"
 		}
@@ -453,6 +453,18 @@ func HandleBreakthroughRequest(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		session.SetStep("WAITING_CONFIRM_BREAKTHROUGH")
 		replyText(bot, chatID, "⚡️ 检测到您闭关苦修已感知天地灵气，是否立即【引灵入体】，正式踏上仙途？\n👉 请回复 `确认渡劫` 或 `取消`。")
 		UserSessions.Store(userID, session)
+	} else if isCultivationTreasureItemName(req.PillName) {
+		// 至宝突破：必须持有对应至宝 + 足够积分，不允许代购（至宝仅 Boss 掉落）。
+		if !hasPill {
+			replyText(bot, chatID, fmt.Sprintf("❌ 突破所需至宝**【%s】**不在乾坤袋中。此等天地至宝仅能从灵墟 Boss 与世界 Boss 处获得，无法购买，请道友继续历练。", inventoryItemMarkdownName(req.PillName)))
+		} else if u.Points < req.PointsCost {
+			replyText(bot, chatID, fmt.Sprintf("❌ 至宝虽已入手，但渡劫需缴纳 `%d` 积分祭炼费，您当前仅有 `%d` 积分。", req.PointsCost, u.Points))
+		} else {
+			session.SetTemp("bt_mode", "USE_INVENTORY")
+			session.SetStep("WAITING_CONFIRM_BREAKTHROUGH")
+			replyText(bot, chatID, fmt.Sprintf("⚡️ 乾坤袋中至宝**【%s】**已就位。是否献祭此宝并缴纳 `%d` 积分渡劫费，引动九重天劫？\n👉 请回复 `确认渡劫` 或 `取消`。", inventoryItemMarkdownName(req.PillName), req.PointsCost))
+			UserSessions.Store(userID, session)
+		}
 	} else if hasPill {
 		// 背包有药
 		session.SetTemp("bt_mode", "USE_INVENTORY")
@@ -663,6 +675,26 @@ func ExecuteBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 
 			pillConsumed = true
 
+			// 至宝突破：除消耗至宝外，每次尝试还需当场缴纳积分渡劫费（失败不退，成功另按 RefundRate 返还）。
+			if isCultivationTreasureItemName(req.PillName) {
+				if err := applyPointDeltaInTx(
+					tx,
+					userID,
+					-req.PointsCost,
+					"breakthrough_treasure_fee",
+					fmt.Sprintf("突破献祭【%s】，缴纳渡劫费 %d 积分", cultivationPointDescriptionName(req.PillName), req.PointsCost),
+					"breakthrough",
+					fmt.Sprintf("major:%d", cul.MajorRealm),
+				); err != nil {
+					if errors.Is(err, errPointsNotEnough) {
+						return errInsufficientPoints
+					}
+					return err
+				}
+
+				resourceCostPoints = req.PointsCost
+			}
+
 		} else if mode != "USE_INVENTORY" {
 			return errInvalidBreakthroughMode
 		}
@@ -822,8 +854,13 @@ func ExecuteBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 				candidateLimit = 200
 			}
 
-			if err := tx.Where("telegram_id != ? AND points >= ? AND role = ?", userID, req.SplashPenaltyPoints, "user").
-				Order("id DESC").
+			// 雷劫外溢只打击“真实修士”：正常用户、账号有效、未封禁、已绑定 ABS、且已有修仙档案并踏入仙途（major_realm >= 1）。
+			// 其余一律不列入候选，避免 @ 到非真人 / 凡人 / 幽灵账号。
+			if err := tx.Table("users").
+				Joins("JOIN cultivations ON cultivations.user_id = users.telegram_id AND cultivations.deleted_at IS NULL").
+				Where("users.telegram_id != ? AND users.deleted_at IS NULL AND users.points >= ? AND users.role = ? AND users.status = ? AND users.is_suspended = ? AND users.abs_user_id <> ? AND cultivations.major_realm >= ?",
+					userID, req.SplashPenaltyPoints, "user", "active", false, "", 1).
+				Order("users.id DESC").
 				Limit(candidateLimit).
 				Find(&victimCandidates).Error; err != nil {
 				return err
@@ -915,7 +952,7 @@ func ExecuteBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 		case "INSUFFICIENT_CULTIVATION":
 			replyText(bot, chatID, "❌ 当前总修为不足，无法突破。")
 		case "INSUFFICIENT_POINTS":
-			replyText(bot, chatID, "❌ 积分不足，无法自动代购突破丹药。")
+			replyText(bot, chatID, "❌ 积分不足，无法完成突破消耗（丹药代购或至宝渡劫费）。")
 		case "NO_PILL":
 			replyText(bot, chatID, "❌ 乾坤袋内突破丹药不足，无法渡劫。")
 		case "INVALID_BREAKTHROUGH_MODE":
@@ -963,15 +1000,20 @@ func ExecuteBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 		})
 		newRealmName = strings.TrimPrefix(strings.TrimSuffix(newRealmName, "】"), "【")
 
+		breakItemDesc := fmt.Sprintf("吞服【%s】", pillName)
+		if isCultivationTreasureItemName(pillName) {
+			breakItemDesc = fmt.Sprintf("献祭至宝【%s】", pillName)
+		}
+
 		announce := fmt.Sprintf(
 			"⚡️💥 **【诸天异象·白日飞升】** 💥⚡️\n\n"+
-				"恭喜道友 @%s 吞服【%s】，成功历经九重天劫！\n"+
+				"恭喜道友 @%s %s，成功历经九重天劫！\n"+
 				"✨ 恭迎阁下晋升至全新的 **【%s】** 境界！\n\n"+
 				"🎲 天机判定：成功率 `%.0f%%`，本次掷点 `%d/100`，保底：`%t`\n"+
 				"🧾 突破记录：`#%d`\n"+
 				"💰 **天道恩赐**：晋升成功，返还本人 `%d` 积分！%s",
 			safeName,
-			pillName,
+			breakItemDesc,
 			newRealmName,
 			successRate*100,
 			roll,

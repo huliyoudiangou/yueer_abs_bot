@@ -562,6 +562,31 @@ func HandleSectCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string)
 		run = func() { handleSectShop(bot, msg) }
 	case text == "洞府":
 		run = func() { handleSectCave(bot, msg) }
+	case text == "宗门运势":
+		run = func() { handleSectFortune(bot, msg) }
+	case text == "开运":
+		run = func() { handleOpenSectFortune(bot, msg) }
+	case text == "藏经阁":
+		run = func() { handleSectLibrary(bot, msg) }
+	case text == "升级藏经阁":
+		run = func() { handleUpgradeSectLibraryCmd(bot, msg) }
+	case strings.HasPrefix(text, "解锁功法 "):
+		code := strings.TrimSpace(strings.TrimPrefix(text, "解锁功法 "))
+		run = func() { handleUnlockSectManualCmd(bot, msg, code) }
+	case strings.HasPrefix(text, "观法 "):
+		args := strings.Fields(strings.TrimSpace(strings.TrimPrefix(text, "观法 ")))
+		sid, code := "", ""
+		if len(args) == 2 {
+			sid, code = args[0], args[1]
+		}
+		run = func() { handleStudySectManualCmd(bot, msg, sid, code) }
+	case strings.HasPrefix(text, "修习 "):
+		args := strings.Fields(strings.TrimSpace(strings.TrimPrefix(text, "修习 ")))
+		sid, code := "", ""
+		if len(args) == 2 {
+			sid, code = args[0], args[1]
+		}
+		run = func() { handleAdvanceSectManualCmd(bot, msg, sid, code) }
 	}
 
 	if run == nil {
@@ -731,6 +756,30 @@ func sectErrorCode(err error) string {
 		return "SECT_WEEKLY_TASK_NOT_ACHIEVED"
 	case errors.Is(err, errSectWeeklyTaskAlreadySettled):
 		return "SECT_WEEKLY_TASK_ALREADY_SETTLED"
+	case errors.Is(err, errSectManualNotFound):
+		return "SECT_MANUAL_NOT_FOUND"
+	case errors.Is(err, errSectManualAlreadyUnlocked):
+		return "SECT_MANUAL_ALREADY_UNLOCKED"
+	case errors.Is(err, errSectManualNotUnlocked):
+		return "SECT_MANUAL_NOT_UNLOCKED"
+	case errors.Is(err, errSectManualLibraryLevelLow):
+		return "SECT_MANUAL_LIBRARY_LEVEL_LOW"
+	case errors.Is(err, errSectManualServantQualityLow):
+		return "SECT_MANUAL_SERVANT_QUALITY_LOW"
+	case errors.Is(err, errSectManualAlreadyStudying):
+		return "SECT_MANUAL_ALREADY_STUDYING"
+	case errors.Is(err, errSectManualNotStudied):
+		return "SECT_MANUAL_NOT_STUDIED"
+	case errors.Is(err, errSectManualMaxDepth):
+		return "SECT_MANUAL_MAX_DEPTH"
+	case errors.Is(err, errSectManualDepthChanged):
+		return "SECT_MANUAL_DEPTH_CHANGED"
+	case errors.Is(err, errSectManualServantNotOwned):
+		return "SECT_MANUAL_SERVANT_NOT_OWNED"
+	case errors.Is(err, errSectFortuneDailyLimit):
+		return "SECT_FORTUNE_DAILY_LIMIT"
+	case errors.Is(err, errSectFortuneConcurrent):
+		return "SECT_FORTUNE_CONCURRENT"
 	case err != nil:
 		return fallbackBusinessErrorCode(err)
 	default:
@@ -1948,11 +1997,19 @@ func handleDonateSect(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawAmount str
 			return fmt.Errorf("SECT_DONATE_FUNDS_UPDATE_MISSED")
 		}
 
+		// 宗门运势「贡献 +10%」：当日卦象命中则捐献获得的贡献按比例提升（资金仍 1:1）。
+		contributionGain := amount
+		if pct, ferr := sectFortuneBuffPctForSectTx(tx, member.SectID, sectFortuneBuffContribution); ferr != nil {
+			log.Printf("[运势] 捐献贡献卦象加成读取失败，按基础发放 user=%d sect=%d err=%s", userID, member.SectID, formatPlainError(ferr))
+		} else if pct > 0 {
+			contributionGain = int(float64(amount) * (1 + pct))
+		}
+
 		memberRes := tx.Model(&SectMember{}).
 			Where("id = ?", member.ID).
 			Updates(map[string]interface{}{
-				"contribution":        gorm.Expr("contribution + ?", amount),
-				"weekly_contribution": gorm.Expr("weekly_contribution + ?", amount),
+				"contribution":        gorm.Expr("contribution + ?", contributionGain),
+				"weekly_contribution": gorm.Expr("weekly_contribution + ?", contributionGain),
 			})
 		if memberRes.Error != nil {
 			return memberRes.Error
@@ -1969,7 +2026,7 @@ func handleDonateSect(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawAmount str
 		if err := createSectContributionLogInTx(tx, &SectContributionLog{
 			SectID:       member.SectID,
 			UserID:       userID,
-			Delta:        amount,
+			Delta:        contributionGain,
 			Reason:       "宗门捐献",
 			RefType:      "sect_donate",
 			RefID:        time.Now().Format("20060102150405"),
@@ -3550,9 +3607,12 @@ func getTodaySectListeningHoursFromCache(userID int64, now time.Time) (float64, 
 	if !ok {
 		return 0, false
 	}
-	return stat.EffectiveHours + activeSectCaveRetreatBonusHours(userID, now), true
+	return applySectFortuneNetCultivationBuff(userID, stat.EffectiveHours+activeSectCaveRetreatBonusHours(userID, now)), true
 }
 
+// sumDailyListeningEffectiveHours 汇总累计净修为（跨日总和）。
+// 注意：卦象「今日净修为 +5%」只作用于当日值（getTodaySectListeningHoursFromCache），
+// 不得在此放大——该值桥接累计修仙时长同步与秘境基线，放大会污染累计口径/周目标/秘境奖励。
 func sumDailyListeningEffectiveHours(userID int64) (float64, bool) {
 	if DB == nil || userID == 0 {
 		return 0, false
@@ -3729,7 +3789,7 @@ func getTodaySectListeningHoursFromABS(userID int64, now time.Time) (float64, bo
 		effectiveHours,
 	)
 
-	return effectiveHours, true
+	return applySectFortuneNetCultivationBuff(userID, effectiveHours), true
 }
 
 func sectStartOfDay(t time.Time) time.Time {
@@ -3781,6 +3841,8 @@ func querySectWeeklyTaskStatsTx(tx *gorm.DB, sectID int64, now time.Time) (sectW
 		return sectWeeklyTaskStats{}, err
 	}
 
+	// 周目标净修为按原始 effective_hours 汇总（不含卦象「今日净修为 +5%」），
+	// 避免随机当日卦象影响每周宗门奖励（每周 200 小时目标与超额奖励口径保持稳定）。
 	if err := tx.Model(&DailyListeningStat{}).
 		Joins("JOIN sect_members ON sect_members.user_id = daily_listening_stats.user_id AND sect_members.deleted_at IS NULL").
 		Where("sect_members.sect_id = ? AND daily_listening_stats.day_key >= ? AND daily_listening_stats.day_key < ?", sectID, weekKey, weekEndDayKey).

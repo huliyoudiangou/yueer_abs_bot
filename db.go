@@ -1064,6 +1064,11 @@ func InitDB() {
 		&SectCaveRetreat{},
 		&SectTechnology{},
 		&SectTechnologyLog{},
+		&SectLibrary{},
+		&SectLibraryLog{},
+		&SectManualUnlock{},
+		&ServantManualStudy{},
+		&SectFortune{},
 		&SectSecretRealmEvent{},
 		&SectSecretRealmParticipant{},
 		&SectHornBroadcast{},
@@ -1099,6 +1104,11 @@ func InitDB() {
 	// 一次性迁移把已存在的生产配置行更新为 5，避免只改默认值对老库无效。
 	runOneTimeMigration("20260816_huashen_breakthrough_guarantee_five", func() error {
 		return migrateHuashenBreakthroughGuaranteeFive(DB)
+	})
+	// 道祖境界扩展：补齐炼虚~道祖的境界/小境界/突破默认行，并把化神从“最高境界”降为普通境界。
+	// 老库的 20260105 播种迁移已跑完、不会重跑，故必须由本迁移再次幂等播种并修正化神行。
+	runOneTimeMigration("20260818_cultivation_realm_extension", func() error {
+		return migrateCultivationRealmExtension(DB)
 	})
 	// 第二阶段：数据一致性迁移。
 	// 先清理历史重复数据，再创建唯一索引。

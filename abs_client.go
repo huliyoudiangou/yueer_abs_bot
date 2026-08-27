@@ -510,7 +510,7 @@ func (c *AbsClient) GetPersonalReport(absUserID string) string {
 				}
 				if todayStat, ok := getTodayDailyListeningStat(u.TelegramID, now); ok {
 					todayRawHours = positiveListeningSeconds(todayStat.RawSeconds) / 3600.0
-					todayEffectiveHours = todayStat.EffectiveHours + activeSectCaveRetreatBonusHours(u.TelegramID, now)
+					todayEffectiveHours = applySectFortuneNetCultivationBuff(u.TelegramID, todayStat.EffectiveHours+activeSectCaveRetreatBonusHours(u.TelegramID, now))
 				}
 			} else {
 				log.Printf("⚠️ 听书报告每日统计写入失败，使用本次 ABS 数据降级展示: user=%d abs=%s err=%s",

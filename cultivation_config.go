@@ -408,11 +408,17 @@ func buildDefaultCultivationRuleSet(source string) *CultivationRuleSet {
 }
 
 func seedDefaultCultivationConfigs() error {
-	if DB == nil {
+	return seedDefaultCultivationConfigsWithHandle(DB)
+}
+
+// seedDefaultCultivationConfigsWithHandle 幂等地补齐缺失的默认境界/小境界/突破配置行，
+// 已存在的行一律不覆盖（避免覆盖超管自定义值）。迁移与启动播种共用。
+func seedDefaultCultivationConfigsWithHandle(db *gorm.DB) error {
+	if db == nil {
 		return errors.New("database is not initialized")
 	}
 
-	return DB.Transaction(func(tx *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
 		if err := seedDefaultRealmConfigs(tx); err != nil {
 			return err
 		}
@@ -427,6 +433,63 @@ func seedDefaultCultivationConfigs() error {
 
 		return nil
 	})
+}
+
+// migrateCultivationRealmExtension 把道祖境界扩展落地到已存在的老库：
+//  1. 幂等补齐炼虚~道祖的境界/小境界/突破默认行；
+//  2. 把化神从“最高境界”降为普通境界（MaxTotalHours=1500, IsMaxRealm=false），
+//     只更新仍处于旧封顶状态的化神行，避免覆盖超管后续的自定义。
+//
+// 生产入口走一次性迁移 migrateCultivationRealmExtension（db.go 注册）。
+func migrateCultivationRealmExtension(db *gorm.DB) error {
+	if db == nil {
+		return fmt.Errorf("MIGRATION_NIL_DB")
+	}
+
+	if err := seedDefaultCultivationConfigsWithHandle(db); err != nil {
+		return err
+	}
+
+	res := db.Model(&CultivationRealmConfig{}).
+		Where("major_realm = ? AND is_max_realm = ?", 5, true).
+		Updates(map[string]interface{}{
+			"max_total_hours": 1500,
+			"is_max_realm":    false,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+
+	// 化神→道祖的 8 个突破：渡劫费统一 1500、冷却统一 168h（对齐运营口径，幂等）。
+	fee := db.Model(&BreakthroughConfig{}).
+		Where("from_major_realm IN ?", []int{5, 6, 7, 8, 9, 10, 11, 12}).
+		Updates(map[string]interface{}{
+			"points_cost":    1500,
+			"cooldown_hours": 168,
+		})
+	if fee.Error != nil {
+		return fee.Error
+	}
+
+	return nil
+}
+
+// cultivationRealmDisplayName 返回大境界展示名（优先配置 TitleName），配置缺失时回退“境界%d阶”。
+// 用于灵墟解锁提示等需要把 MajorRealm 数字转成人话的地方。
+func cultivationRealmDisplayName(major int) string {
+	rules := GetCultivationRules()
+	if rules != nil {
+		if realm, ok := rules.Realms[major]; ok {
+			name := strings.TrimSpace(realm.TitleName)
+			if name == "" {
+				name = strings.TrimSpace(realm.Name)
+			}
+			if name != "" {
+				return name
+			}
+		}
+	}
+	return fmt.Sprintf("境界%d阶", major)
 }
 
 func seedDefaultRealmConfigs(tx *gorm.DB) error {
@@ -474,7 +537,15 @@ func defaultCultivationRealmConfigs() []CultivationRealmConfig {
 		{MajorRealm: 2, Name: "筑基", TitleName: "筑基", MinTotalHours: 50, MaxTotalHours: 150, IsMaxRealm: false, Enabled: true},
 		{MajorRealm: 3, Name: "结丹", TitleName: "结丹", MinTotalHours: 150, MaxTotalHours: 350, IsMaxRealm: false, Enabled: true},
 		{MajorRealm: 4, Name: "元婴", TitleName: "元婴", MinTotalHours: 350, MaxTotalHours: 750, IsMaxRealm: false, Enabled: true},
-		{MajorRealm: 5, Name: "化神", TitleName: "化神", MinTotalHours: 750, MaxTotalHours: 0, IsMaxRealm: true, Enabled: true},
+		{MajorRealm: 5, Name: "化神", TitleName: "化神", MinTotalHours: 750, MaxTotalHours: 1500, IsMaxRealm: false, Enabled: true},
+		{MajorRealm: 6, Name: "炼虚", TitleName: "炼虚", MinTotalHours: 1500, MaxTotalHours: 2400, IsMaxRealm: false, Enabled: true},
+		{MajorRealm: 7, Name: "合体", TitleName: "合体", MinTotalHours: 2400, MaxTotalHours: 3700, IsMaxRealm: false, Enabled: true},
+		{MajorRealm: 8, Name: "大乘", TitleName: "大乘", MinTotalHours: 3700, MaxTotalHours: 5500, IsMaxRealm: false, Enabled: true},
+		{MajorRealm: 9, Name: "真仙", TitleName: "真仙", MinTotalHours: 5500, MaxTotalHours: 8100, IsMaxRealm: false, Enabled: true},
+		{MajorRealm: 10, Name: "金仙", TitleName: "金仙", MinTotalHours: 8100, MaxTotalHours: 11500, IsMaxRealm: false, Enabled: true},
+		{MajorRealm: 11, Name: "太乙", TitleName: "太乙", MinTotalHours: 11500, MaxTotalHours: 16100, IsMaxRealm: false, Enabled: true},
+		{MajorRealm: 12, Name: "大罗", TitleName: "大罗", MinTotalHours: 16100, MaxTotalHours: 22300, IsMaxRealm: false, Enabled: true},
+		{MajorRealm: 13, Name: "道祖", TitleName: "道祖", MinTotalHours: 22300, MaxTotalHours: 0, IsMaxRealm: true, Enabled: true},
 	}
 }
 
@@ -543,6 +614,46 @@ func defaultCultivationMinorRealmConfigs() []CultivationMinorRealmConfig {
 		{MajorRealm: 5, MinorRealm: 2, Name: "中期", RequiredHours: 900, Enabled: true},
 		{MajorRealm: 5, MinorRealm: 3, Name: "后期", RequiredHours: 1050, Enabled: true},
 		{MajorRealm: 5, MinorRealm: 4, Name: "圆满", RequiredHours: 1200, Enabled: true},
+
+		{MajorRealm: 6, MinorRealm: 1, Name: "初期", RequiredHours: 1500, Enabled: true},
+		{MajorRealm: 6, MinorRealm: 2, Name: "中期", RequiredHours: 1700, Enabled: true},
+		{MajorRealm: 6, MinorRealm: 3, Name: "后期", RequiredHours: 1900, Enabled: true},
+		{MajorRealm: 6, MinorRealm: 4, Name: "圆满", RequiredHours: 2100, Enabled: true},
+
+		{MajorRealm: 7, MinorRealm: 1, Name: "初期", RequiredHours: 2400, Enabled: true},
+		{MajorRealm: 7, MinorRealm: 2, Name: "中期", RequiredHours: 2700, Enabled: true},
+		{MajorRealm: 7, MinorRealm: 3, Name: "后期", RequiredHours: 3000, Enabled: true},
+		{MajorRealm: 7, MinorRealm: 4, Name: "圆满", RequiredHours: 3300, Enabled: true},
+
+		{MajorRealm: 8, MinorRealm: 1, Name: "初期", RequiredHours: 3700, Enabled: true},
+		{MajorRealm: 8, MinorRealm: 2, Name: "中期", RequiredHours: 4100, Enabled: true},
+		{MajorRealm: 8, MinorRealm: 3, Name: "后期", RequiredHours: 4500, Enabled: true},
+		{MajorRealm: 8, MinorRealm: 4, Name: "圆满", RequiredHours: 5000, Enabled: true},
+
+		{MajorRealm: 9, MinorRealm: 1, Name: "初期", RequiredHours: 5500, Enabled: true},
+		{MajorRealm: 9, MinorRealm: 2, Name: "中期", RequiredHours: 6100, Enabled: true},
+		{MajorRealm: 9, MinorRealm: 3, Name: "后期", RequiredHours: 6700, Enabled: true},
+		{MajorRealm: 9, MinorRealm: 4, Name: "圆满", RequiredHours: 7400, Enabled: true},
+
+		{MajorRealm: 10, MinorRealm: 1, Name: "初期", RequiredHours: 8100, Enabled: true},
+		{MajorRealm: 10, MinorRealm: 2, Name: "中期", RequiredHours: 8900, Enabled: true},
+		{MajorRealm: 10, MinorRealm: 3, Name: "后期", RequiredHours: 9700, Enabled: true},
+		{MajorRealm: 10, MinorRealm: 4, Name: "圆满", RequiredHours: 10600, Enabled: true},
+
+		{MajorRealm: 11, MinorRealm: 1, Name: "初期", RequiredHours: 11500, Enabled: true},
+		{MajorRealm: 11, MinorRealm: 2, Name: "中期", RequiredHours: 12600, Enabled: true},
+		{MajorRealm: 11, MinorRealm: 3, Name: "后期", RequiredHours: 13700, Enabled: true},
+		{MajorRealm: 11, MinorRealm: 4, Name: "圆满", RequiredHours: 14900, Enabled: true},
+
+		{MajorRealm: 12, MinorRealm: 1, Name: "初期", RequiredHours: 16100, Enabled: true},
+		{MajorRealm: 12, MinorRealm: 2, Name: "中期", RequiredHours: 17500, Enabled: true},
+		{MajorRealm: 12, MinorRealm: 3, Name: "后期", RequiredHours: 19000, Enabled: true},
+		{MajorRealm: 12, MinorRealm: 4, Name: "圆满", RequiredHours: 20600, Enabled: true},
+
+		{MajorRealm: 13, MinorRealm: 1, Name: "初期", RequiredHours: 22300, Enabled: true},
+		{MajorRealm: 13, MinorRealm: 2, Name: "中期", RequiredHours: 24400, Enabled: true},
+		{MajorRealm: 13, MinorRealm: 3, Name: "后期", RequiredHours: 27800, Enabled: true},
+		{MajorRealm: 13, MinorRealm: 4, Name: "圆满", RequiredHours: 31700, Enabled: true},
 	}
 }
 
@@ -660,6 +771,137 @@ func defaultBreakthroughConfigs() []BreakthroughConfig {
 			SuccessRate:         0.20,
 			CooldownHours:       168,
 			GuaranteeFailCount:  5,
+			RefundRate:          0.2,
+			FailPenaltyPoints:   50,
+			SplashMinMajorRealm: 2,
+			SplashVictimCount:   3,
+			SplashPenaltyPoints: 10,
+			Enabled:             true,
+		},
+		// —— 化神之后：废除丹药代购，改为“至宝 + 积分”突破 ——
+		// 成功率统一 10%，新境界保证连续失败 10 次后下次必过（GuaranteeFailCount=10）。
+		// 至宝由前一境灵墟 Boss / 世界 Boss 掉落，禁止上架交易行；积分渡劫费统一 1500、冷却统一 168h。
+		{
+			FromMajorRealm:      5,
+			ToMajorRealm:        6,
+			PillName:            "虚空真髓",
+			PointsCost:          1500,
+			MinTotalHours:       1500,
+			SuccessRate:         0.10,
+			CooldownHours:       168,
+			GuaranteeFailCount:  10,
+			RefundRate:          0.2,
+			FailPenaltyPoints:   50,
+			SplashMinMajorRealm: 2,
+			SplashVictimCount:   3,
+			SplashPenaltyPoints: 10,
+			Enabled:             true,
+		},
+		{
+			FromMajorRealm:      6,
+			ToMajorRealm:        7,
+			PillName:            "合道天珠",
+			PointsCost:          1500,
+			MinTotalHours:       2400,
+			SuccessRate:         0.10,
+			CooldownHours:       168,
+			GuaranteeFailCount:  10,
+			RefundRate:          0.2,
+			FailPenaltyPoints:   50,
+			SplashMinMajorRealm: 2,
+			SplashVictimCount:   3,
+			SplashPenaltyPoints: 10,
+			Enabled:             true,
+		},
+		{
+			FromMajorRealm:      7,
+			ToMajorRealm:        8,
+			PillName:            "混元一气",
+			PointsCost:          1500,
+			MinTotalHours:       3700,
+			SuccessRate:         0.10,
+			CooldownHours:       168,
+			GuaranteeFailCount:  10,
+			RefundRate:          0.2,
+			FailPenaltyPoints:   50,
+			SplashMinMajorRealm: 2,
+			SplashVictimCount:   3,
+			SplashPenaltyPoints: 10,
+			Enabled:             true,
+		},
+		{
+			FromMajorRealm:      8,
+			ToMajorRealm:        9,
+			PillName:            "渡厄仙引",
+			PointsCost:          1500,
+			MinTotalHours:       5500,
+			SuccessRate:         0.10,
+			CooldownHours:       168,
+			GuaranteeFailCount:  10,
+			RefundRate:          0.2,
+			FailPenaltyPoints:   50,
+			SplashMinMajorRealm: 2,
+			SplashVictimCount:   3,
+			SplashPenaltyPoints: 10,
+			Enabled:             true,
+		},
+		{
+			FromMajorRealm:      9,
+			ToMajorRealm:        10,
+			PillName:            "赤金仙露",
+			PointsCost:          1500,
+			MinTotalHours:       8100,
+			SuccessRate:         0.10,
+			CooldownHours:       168,
+			GuaranteeFailCount:  10,
+			RefundRate:          0.2,
+			FailPenaltyPoints:   50,
+			SplashMinMajorRealm: 2,
+			SplashVictimCount:   3,
+			SplashPenaltyPoints: 10,
+			Enabled:             true,
+		},
+		{
+			FromMajorRealm:      10,
+			ToMajorRealm:        11,
+			PillName:            "太乙玄黄",
+			PointsCost:          1500,
+			MinTotalHours:       11500,
+			SuccessRate:         0.10,
+			CooldownHours:       168,
+			GuaranteeFailCount:  10,
+			RefundRate:          0.2,
+			FailPenaltyPoints:   50,
+			SplashMinMajorRealm: 2,
+			SplashVictimCount:   3,
+			SplashPenaltyPoints: 10,
+			Enabled:             true,
+		},
+		{
+			FromMajorRealm:      11,
+			ToMajorRealm:        12,
+			PillName:            "大罗道果",
+			PointsCost:          1500,
+			MinTotalHours:       16100,
+			SuccessRate:         0.10,
+			CooldownHours:       168,
+			GuaranteeFailCount:  10,
+			RefundRate:          0.2,
+			FailPenaltyPoints:   50,
+			SplashMinMajorRealm: 2,
+			SplashVictimCount:   3,
+			SplashPenaltyPoints: 10,
+			Enabled:             true,
+		},
+		{
+			FromMajorRealm:      12,
+			ToMajorRealm:        13,
+			PillName:            "混沌道种",
+			PointsCost:          1500,
+			MinTotalHours:       22300,
+			SuccessRate:         0.10,
+			CooldownHours:       168,
+			GuaranteeFailCount:  10,
 			RefundRate:          0.2,
 			FailPenaltyPoints:   50,
 			SplashMinMajorRealm: 2,

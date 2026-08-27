@@ -185,7 +185,7 @@ func rollZoneQuality(zone SpiritZone) string {
 func getOrCreateSpiritPity(tx *gorm.DB, userID int64, zoneKey string) *SpiritZonePity {
 	var pity SpiritZonePity
 	err := tx.Where("user_id = ? AND zone_key = ?", userID, zoneKey).First(&pity).Error
-	if err == gorm.ErrRecordNotFound {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		pity = SpiritZonePity{UserID: userID, ZoneKey: zoneKey}
 		if e := tx.Create(&pity).Error; e != nil {
 			log.Printf("[灵侍] 保底记录创建失败 user=%d zone=%s err=%s", userID, zoneKey, formatTelegramSendError(e))

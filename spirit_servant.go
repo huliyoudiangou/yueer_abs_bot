@@ -76,7 +76,7 @@ func createServantRecord(tx *gorm.DB, userID int64, chosenQuality string, zone S
 	if err := tx.Create(ser).Error; err != nil {
 		return nil, err
 	}
-	log.Printf("[灵侍] 生成 user=%d zone=%s quality=%s name=%s", userID, zone.Key, chosenQuality, name)
+	log.Printf("[灵侍] 生成 user=%d zone=%s quality=%s name=%s", userID, formatPlainValue(zone.Key), formatPlainValue(chosenQuality), formatPlainValue(name))
 	return ser, nil
 }
 
@@ -316,7 +316,7 @@ func StarUpgrade(tx *gorm.DB, userID int64, targetServantID uint, sacrificeIDs [
 		return fmt.Errorf("升星保存失败")
 	}
 	log.Printf("[灵侍] 升星成功 user=%d name=%s new_star=%d sacrifices=%d item=%s",
-		userID, target.Name, nextStar, len(sacrificeIDs), useItem)
+		userID, formatPlainValue(target.Name), nextStar, len(sacrificeIDs), formatPlainValue(useItem))
 	return nil
 }
 
@@ -413,7 +413,7 @@ func pickDeployedTeamTx(tx *gorm.DB, userID int64) ([]UserSpiritServant, error) 
 		Find(&team).Error; err != nil {
 		return nil, err
 	}
-	sortServantsWithBonus(equipBonusMap(tx, userID), team) // 装备加成走 tx，不占独立连接
+	sortServantsWithBonus(equipBonusMap(tx, userID), servantManualBonusPctMap(tx, userID), team) // 装备/功法加成走 tx，不占独立连接
 	if len(team) > maxTeamSize {
 		team = team[:maxTeamSize]
 	}

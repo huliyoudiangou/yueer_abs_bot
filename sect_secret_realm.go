@@ -714,6 +714,7 @@ func refreshSectSecretRealmLiveProgress(event SectSecretRealmEvent) (SectSecretR
 		p.ContributionBonusPercent = multiplier.ContributionPercent - 100
 		p.PrestigeBonusPercent = multiplier.PrestigePercent - 100
 		p.RewardPoints, p.RewardContribution, p.RewardPrestige = calculateSectSecretRealmRewardsForProfile(p.DeltaHours, p.MajorRealm, profile)
+		p.RewardPoints, p.RewardContribution, p.RewardPrestige = sectSecretRealmRewardWithFortuneBuff(event.SectID, p.RewardPoints, p.RewardContribution, p.RewardPrestige)
 		p.RewardDropItem, p.RewardDropQuantity = sectSecretRealmDropForParticipantWithProfile(event.RealmID, p.UserID, p.MajorRealm, p.DeltaHours, profile)
 
 		res := DB.Model(&SectSecretRealmParticipant{}).
@@ -1597,6 +1598,7 @@ func settleSectSecretRealm(bot *tgbotapi.BotAPI, realmID string, fallbackChatID 
 		p.ContributionBonusPercent = multiplier.ContributionPercent - 100
 		p.PrestigeBonusPercent = multiplier.PrestigePercent - 100
 		p.RewardPoints, p.RewardContribution, p.RewardPrestige = calculateSectSecretRealmRewardsForProfile(p.DeltaHours, p.MajorRealm, profile)
+		p.RewardPoints, p.RewardContribution, p.RewardPrestige = sectSecretRealmRewardWithFortuneBuff(event.SectID, p.RewardPoints, p.RewardContribution, p.RewardPrestige)
 		p.RewardDropItem, p.RewardDropQuantity = sectSecretRealmDropForParticipantWithProfile(event.RealmID, p.UserID, p.MajorRealm, p.DeltaHours, profile)
 
 		res := DB.Model(&SectSecretRealmParticipant{}).
@@ -1783,6 +1785,21 @@ func calculateSectSecretRealmRewardsForProfile(deltaHours float64, majorRealm in
 	}
 
 	return points, contribution, prestige
+}
+
+// sectSecretRealmRewardWithFortuneBuff 在秘境基础奖励上应用宗门运势「宗门秘境奖励 +5%」。
+// 封顶（MaxPoints/MaxContribution/MaxPrestige）已在基础奖励内生效，此处加成为额外增益。
+func sectSecretRealmRewardWithFortuneBuff(sectID int64, points, contribution, prestige int) (int, int, int) {
+	pct, err := sectFortuneBuffPctForSectTx(db, sectID, sectFortuneBuffSecretRealm)
+	if err != nil {
+		log.Printf("[运势] 宗门秘境奖励卦象加成读取失败，按基础发放 sect=%d err=%s", sectID, formatPlainError(err))
+		return points, contribution, prestige
+	}
+	if pct <= 0 {
+		return points, contribution, prestige
+	}
+	mul := 1 + pct
+	return int(float64(points) * mul), int(float64(contribution) * mul), int(float64(prestige) * mul)
 }
 
 func grantSectSecretRealmRewards(event SectSecretRealmEvent, participants []SectSecretRealmParticipant) error {
@@ -2342,6 +2359,8 @@ func getSectSecretRealmListeningSnapshot(absUserID string) (sectSecretRealmListe
 		readErr := DB.Select("telegram_id", "abs_user_id").Where("abs_user_id = ?", absUserID).First(&u).Error
 		if readErr == nil {
 			if err := recordDailyListeningStatsFromABSDays(u.TelegramID, absUserID, stats.Days, time.Now()); err == nil {
+				// 秘境基线用累计净修为（不按卦象 «今日净修为 +5%» 放大）；
+				// 卦象的秘境收益已统一在奖励快照层 sectSecretRealmRewardWithFortuneBuff 处理，基线不得二次放大。
 				if syncedEffectiveHours, ok := sumDailyListeningEffectiveHours(u.TelegramID); ok {
 					effectiveHours = syncedEffectiveHours
 				}

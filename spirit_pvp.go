@@ -17,6 +17,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -189,7 +190,7 @@ func SetupMirror(userID int64) (int, error) {
 		now := time.Now()
 
 		var mirror SpiritMirror
-		if err := tx.Where("user_id = ?", userID).First(&mirror).Error; err != nil && err != gorm.ErrRecordNotFound {
+		if err := tx.Where("user_id = ?", userID).First(&mirror).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 		mirror.UserID = userID
@@ -219,6 +220,22 @@ func GetMyMirror(userID int64) *SpiritMirror {
 		return nil
 	}
 	return &m
+}
+
+// findPvpTargetCandidates 镜场对手列表候选：有效、非本人的镜像，按战力从高到低，最多 limit 个。
+// 面板展示用，不涉及资产变动；是否可挑战由 PvpAttack 事务内复核（镜像可能已过期/下架）。
+func findPvpTargetCandidates(userID int64, limit int) []SpiritMirror {
+	if limit <= 0 {
+		limit = 10
+	}
+	now := time.Now()
+	var list []SpiritMirror
+	if err := db.Where("user_id <> ? AND expires_at > ?", userID, now).
+		Order("team_power DESC").Limit(limit).Find(&list).Error; err != nil {
+		log.Printf("[灵侍] 镜场对手列表查询失败 user=%d err=%s", userID, formatTelegramSendError(err))
+		return nil
+	}
+	return list
 }
 
 // findPvpTarget 查找可攻击镜像：优先战力 ±50% 区间随机，兜底全量随机
