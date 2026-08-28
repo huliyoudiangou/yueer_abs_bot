@@ -653,8 +653,12 @@ func adminAdjustDailyLimitExceeded(todayTotal int, delta int) bool {
 	return todayTotal+absInt(delta) > 20000
 }
 
+// ghostWalletUsernamePrefix 钱包占位用户名前缀（用户没有 Telegram 用户名时）。
+// 该前缀的 username 是内部占位，不得出现在对外公告里（见 splashVictimDisplayName）。
+const ghostWalletUsernamePrefix = "ghost_tg_"
+
 func ghostWalletUsername(userID int64) string {
-	return fmt.Sprintf("ghost_tg_%d", userID)
+	return fmt.Sprintf("%s%d", ghostWalletUsernamePrefix, userID)
 }
 
 func ensureUserWalletInTx(tx *gorm.DB, tgUser *tgbotapi.User) (User, string, error) {
@@ -666,6 +670,7 @@ func ensureUserWalletInTx(tx *gorm.DB, tgUser *tgbotapi.User) (User, string, err
 	var u User
 	err := tx.Where("telegram_id = ?", tgUser.ID).First(&u).Error
 	if err == nil {
+		syncUserDisplayNameTx(tx, &u, displayName)
 		return u, displayName, nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -673,14 +678,16 @@ func ensureUserWalletInTx(tx *gorm.DB, tgUser *tgbotapi.User) (User, string, err
 	}
 
 	u = User{
-		TelegramID: tgUser.ID,
-		Username:   ghostWalletUsername(tgUser.ID),
-		Points:     0,
+		TelegramID:  tgUser.ID,
+		Username:    ghostWalletUsername(tgUser.ID),
+		DisplayName: strings.TrimSpace(strings.TrimPrefix(displayName, "@")),
+		Points:      0,
 	}
 	res := tx.Create(&u)
 	if res.Error != nil {
 		if isUniqueConstraintError(res.Error) {
 			if retryErr := tx.Where("telegram_id = ?", tgUser.ID).First(&u).Error; retryErr == nil {
+				syncUserDisplayNameTx(tx, &u, displayName)
 				return u, displayName, nil
 			}
 		}
@@ -691,6 +698,24 @@ func ensureUserWalletInTx(tx *gorm.DB, tgUser *tgbotapi.User) (User, string, err
 	}
 
 	return u, displayName, nil
+}
+
+// syncUserDisplayNameTx 钱包事务内顺带刷新显示名缓存（尽力而为：失败仅记日志，不影响钱包主流程）。
+// 群公告（雷劫外溢等）按 DB 选人，靠这份缓存按真人称呼，替代 ghost_tg_* 占位用户名。
+// 仅在值变化时写入，避免热路径写放大。
+func syncUserDisplayNameTx(tx *gorm.DB, u *User, displayName string) {
+	if tx == nil || u == nil {
+		return
+	}
+	fresh := strings.TrimSpace(strings.TrimPrefix(displayName, "@"))
+	if fresh == "" || strings.TrimSpace(u.DisplayName) == fresh {
+		return
+	}
+	if err := tx.Model(&User{}).Where("id = ?", u.ID).Update("display_name", fresh).Error; err != nil {
+		log.Printf("⚠️ 用户显示名缓存刷新失败: user=%d err=%s", u.ID, formatPlainError(err))
+		return
+	}
+	u.DisplayName = fresh
 }
 
 func ensureUserWallet(tgUser *tgbotapi.User) (User, string, error) {

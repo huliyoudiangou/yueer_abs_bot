@@ -20,6 +20,7 @@ type User struct {
 	gorm.Model
 	TelegramID      int64  `gorm:"uniqueIndex;not null"`
 	Username        string `gorm:"uniqueIndex;not null"`
+	DisplayName     string // 显示名缓存（Telegram @用户名>首名>ID，每次钱包事务尽力刷新），供群公告按真人称呼；非唯一
 	AbsUserID       string `gorm:"not null"`
 	SecurityCode    string `gorm:"not null"`
 	Status          string `gorm:"default:'active'"`

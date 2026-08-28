@@ -565,6 +565,74 @@ func applyPointDeltaInTx(
 	return nil
 }
 
+// resolveSplashVictimLabels 雷劫外溢公告的受害者称呼（按 ABS 用户名为准，不带 @）：
+// 本地 users.username 即 ABS 用户名（注册/改名双端同步），非 ghost 行直接展示；
+// 仍为 ghost_tg_* 占位的存量行，按需回源一次 ABS 用户列表（GetAllUsers）取权威用户名，
+// 并顺手把本地占位行升级为 ABS 用户名（自愈，下次起零成本）；
+// 回源失败再退显示名缓存（Telegram 名）与 Telegram ID 兜底。返回值已转义，可直接拼接。
+func resolveSplashVictimLabels(localNames, absUserIDs, displayNames []string, telegramIDs []int64) []string {
+	labels := make([]string, len(localNames))
+	needAbsLookup := false
+	for i, name := range localNames {
+		if u := strings.TrimSpace(name); u != "" && !strings.HasPrefix(u, ghostWalletUsernamePrefix) {
+			labels[i] = escapeMarkdown(u)
+			continue
+		}
+		if absUserIDs[i] != "" {
+			needAbsLookup = true
+		}
+	}
+	absNames := map[string]string{}
+	if needAbsLookup && absClient != nil {
+		absUsers, err := absClient.GetAllUsers()
+		if err != nil {
+			log.Printf("⚠️ 雷劫外溢回源 ABS 用户名失败（降级显示名缓存）: err=%s", formatPlainError(err))
+		} else {
+			absNames = make(map[string]string, len(absUsers))
+			for _, a := range absUsers {
+				if a.ID != "" {
+					absNames[a.ID] = a.Username
+				}
+			}
+		}
+	}
+	for i := range localNames {
+		if labels[i] != "" {
+			continue
+		}
+		if name, ok := absNames[absUserIDs[i]]; ok && strings.TrimSpace(name) != "" {
+			labels[i] = escapeMarkdown(name)
+			backfillGhostUsername(telegramIDs[i], name)
+			continue
+		}
+		if d := strings.TrimSpace(displayNames[i]); d != "" {
+			labels[i] = escapeMarkdown(d)
+			continue
+		}
+		labels[i] = escapeMarkdown(fmt.Sprintf("%d", telegramIDs[i]))
+	}
+	return labels
+}
+
+// backfillGhostUsername 本地 username 仍为 ghost 占位时，用 ABS 权威用户名回写。
+// 只改占位行（WHERE 限定 ghost 前缀），不覆盖真实名；唯一索引冲突等失败只记日志跳过。
+func backfillGhostUsername(telegramID int64, absUsername string) {
+	name := strings.TrimSpace(absUsername)
+	if name == "" || strings.HasPrefix(name, ghostWalletUsernamePrefix) {
+		return
+	}
+	res := DB.Model(&User{}).
+		Where("telegram_id = ? AND username LIKE ?", telegramID, ghostWalletUsernamePrefix+"%").
+		Update("username", name)
+	if res.Error != nil {
+		log.Printf("⚠️ 雷劫外溢回源回填用户名跳过: tg=%d err=%s", telegramID, formatPlainError(res.Error))
+		return
+	}
+	if res.RowsAffected > 0 {
+		log.Printf("📌 雷劫外溢回源自愈: 本地占位用户名升级 tg=%d -> %s", telegramID, name)
+	}
+}
+
 // 2. 渡劫底层处决引擎
 func ExecuteBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode string) {
 	if msg == nil || msg.From == nil {
@@ -595,8 +663,10 @@ func ExecuteBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 		guaranteeFailCount  int
 		splashPenaltyPoints int
 		attemptID           uint
-		victimNames         []string
+		victimNames         []string // 本地 username（可能为 ghost 占位），事务后统一解析展示名
 		victimIDs           []int64
+		victimAbsIDs        []string
+		victimDisplayNames  []string
 	)
 
 	err := DB.Transaction(func(tx *gorm.DB) error {
@@ -906,7 +976,9 @@ func ExecuteBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 				}
 
 				victimIDs = append(victimIDs, v.TelegramID)
-				victimNames = append(victimNames, escapeMarkdown(v.Username))
+				victimNames = append(victimNames, v.Username)
+				victimAbsIDs = append(victimAbsIDs, v.AbsUserID)
+				victimDisplayNames = append(victimDisplayNames, v.DisplayName)
 			}
 		}
 
@@ -1076,12 +1148,12 @@ func ExecuteBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 	)
 
 	if len(victimNames) > 0 {
-		failText += "\n\n🌩 **【雷劫外溢·天道无常】** 🌩\n可怕的雷劫余波震荡了整个修仙界！以下无辜路人被雷劈中，强制扣除 `10` 积分医疗费："
-		for _, name := range victimNames {
+		failText += fmt.Sprintf("\n\n🌩 **【雷劫外溢·天道无常】** 🌩\n可怕的雷劫余波震荡了整个修仙界！以下无辜路人被雷劈中，强制扣除 `%d` 积分医疗费：", splashPenaltyPoints)
+		for _, name := range resolveSplashVictimLabels(victimNames, victimAbsIDs, victimDisplayNames, victimIDs) {
 			if name == "" {
 				name = "神秘道友"
 			}
-			failText += fmt.Sprintf("\n💥 @%s 痛失 %d 积分", name, splashPenaltyPoints)
+			failText += fmt.Sprintf("\n💥 %s 痛失 %d 积分", name, splashPenaltyPoints)
 		}
 	}
 
@@ -1097,9 +1169,6 @@ func ExecuteBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 			log.Printf("发送修仙突破失败公告失败: chat=%d user=%d attempt=%d err=%s", chatID, userID, attemptID, formatTelegramSendError(err))
 		}
 	}()
-
-	// 避免编译器认为 victimIDs 未使用。保留该变量是为了后续需要私聊通知受害者时可直接使用。
-	_ = victimIDs
 }
 
 func handleCultivationRank(bot *tgbotapi.BotAPI, chatID int64) {
