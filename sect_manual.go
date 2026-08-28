@@ -107,7 +107,7 @@ var sectManualCatalog = []sectManualConfig{
 	{manualCodeYellow, "黄阶·引气诀", "黄", 1, 100, 3, 3, 2, ""},
 	{manualCodeXuan, "玄阶·观澜诀", "玄", 2, 300, 8, 5, 3, "灵"},
 	{manualCodeEarth, "地阶·撼岳诀", "地", 3, 800, 20, 7, 4, "地"},
-	{manualCodeHeaven, "天阶·天罡诀", "天", 4, 2000, 50, 9, 5, "天"},
+	{manualCodeHeaven, "天阶·天罡诀", "天", 4, 2000, 100, 9, 5, "天"},
 }
 
 func sectManualConfigByCode(code string) (sectManualConfig, bool) {

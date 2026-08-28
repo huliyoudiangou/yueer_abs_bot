@@ -1946,6 +1946,79 @@ func runConsistencyMigrations() {
 		log.Fatalf("marketplace purchase secret unique index migration failed; startup blocked: %s", formatPlainError(err))
 	}
 
+	// sect_manual_unlocks(sect_id, manual_code) 唯一：
+	// 解锁功法的并发防线是「唯一约束兜底」（unlockSectManual 里 isUniqueConstraintError
+	// 回退依赖它），但历史上模型 tag 只有普通索引，两个宗主/长老并发解锁同一功法时
+	// 可能重复插行、重复扣宗门声望。迁移步骤：
+	// 1) 先把每宗被多扣的宗门声望退还（资产安全，审计留痕）；
+	// 2) 每组保留最早一条，清理其余重复行（自愈）；
+	// 3) 建 partial 唯一索引（deleted_at IS NULL，与软删除表惯例一致）。
+	// 若清理后仍有重复（说明出现了未预期的写入路径），断言阻断启动，人工排查：
+	//   SELECT sect_id, manual_code, COUNT(*) FROM sect_manual_unlocks GROUP BY 1,2 HAVING COUNT(*)>1;
+	runOneTimeMigration("20260828_sect_manual_unlock_unique", func() error {
+		dupRowFilter := `
+			deleted_at IS NULL
+			AND id NOT IN (
+				SELECT MIN(id) FROM sect_manual_unlocks
+				WHERE deleted_at IS NULL
+				GROUP BY sect_id, manual_code
+			)`
+
+		// 1) 退还 + 2) 清理在同一事务内完成（崩溃安全：任一步失败整体回滚，重启后从头再来，
+		//    重复行仍在则只退一次；已清理则退还查询为空，幂等）。
+		err := DB.Transaction(func(tx *gorm.DB) error {
+			// 退还：每宗被多扣的声望 = 将被删除的重复行的解锁成本之和
+			type unlockRefund struct {
+				SectID int64
+				Refund int
+			}
+			var refunds []unlockRefund
+			if err := tx.Raw(fmt.Sprintf(`
+				SELECT sect_id, SUM(unlock_prestige_cost) AS refund
+				FROM sect_manual_unlocks
+				WHERE %s
+				GROUP BY sect_id;
+			`, dupRowFilter)).Scan(&refunds).Error; err != nil {
+				return err
+			}
+			for _, r := range refunds {
+				log.Printf("📌 藏经阁重复解锁清理: 退还宗门 %d 被多扣的宗门声望 %d", r.SectID, r.Refund)
+				if res := tx.Model(&Sect{}).
+					Where("id = ?", r.SectID).
+					UpdateColumn("prestige", gorm.Expr("prestige + ?", r.Refund)); res.Error != nil {
+					return res.Error
+				} else if res.RowsAffected == 0 {
+					log.Printf("⚠️ 重复解锁退还: 宗门 %d 无对应行，未入账 %d（见审计 SECT_MANUAL_UNLOCK_DUP_REFUND）", r.SectID, r.Refund)
+				}
+				if err := writeAuditLogInTx(tx, 0, "SECT_MANUAL_UNLOCK_DUP_REFUND", "sect_manual_unlocks", r.Refund,
+					fmt.Sprintf("重复解锁行清理，退还宗门 %d 被多扣的宗门声望 %d", r.SectID, r.Refund)); err != nil {
+					log.Printf("⚠️ 重复解锁退还审计写入失败: sect=%d err=%s", r.SectID, formatPlainError(err))
+				}
+			}
+			// 清理重复行（保留每组最早一条）
+			return tx.Exec(fmt.Sprintf(`
+				DELETE FROM sect_manual_unlocks
+				WHERE %s;
+			`, dupRowFilter)).Error
+		})
+		if err != nil {
+			return err
+		}
+		assertNoDuplicateGroups("sect_manual_unlocks(sect_id, manual_code)", `
+			SELECT CAST(sect_id AS TEXT) || ':' || manual_code AS key, COUNT(*) AS count
+			FROM sect_manual_unlocks
+			WHERE deleted_at IS NULL
+			GROUP BY sect_id, manual_code
+			HAVING COUNT(*) > 1;
+		`)
+		// 3) partial 唯一索引
+		return ensureSoftDeletePartialUniqueIndex(DB, "idx_sect_manual_unlocks_sect_code_unique", `
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_sect_manual_unlocks_sect_code_unique
+			ON sect_manual_unlocks(sect_id, manual_code)
+			WHERE deleted_at IS NULL;
+		`)
+	})
+
 	markMigrationAppliedIfMissing("20260101_consistency_indexes")
 	log.Println("consistency migration completed")
 }

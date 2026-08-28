@@ -161,8 +161,8 @@ func spiritPanelList(db *gorm.DB, userID int64, page int) (string, tgbotapi.Inli
 			if s.Star >= QualityMaxStar[s.Quality] {
 				capMark = "（满星）"
 			}
-			b.WriteString(fmt.Sprintf("· %s%s %s品·%s Lv.%d ⭐%d 战力%d%s\n",
-				s.Name, deploy, s.Quality, s.Attribute, s.Level, s.Star, EnhancedBattlePower(bonusMap, manualMap, s), capMark))
+			b.WriteString(fmt.Sprintf("· ID %d %s%s %s品·%s Lv.%d ⭐%d 战力%d%s\n",
+				s.ID, s.Name, deploy, s.Quality, s.Attribute, s.Level, s.Star, EnhancedBattlePower(bonusMap, manualMap, s), capMark))
 		}
 		b.WriteString("点击下方灵侍进入升星。")
 	}
@@ -1253,8 +1253,8 @@ func spiritPanelFeed(userID int64, page int) (string, tgbotapi.InlineKeyboardMar
 		if s.Level >= maxLv {
 			capMark = "（满级）"
 		}
-		b.WriteString(fmt.Sprintf("· %s %s品·%s ⭐%d Lv.%d/%d 战力%d%s\n",
-			s.Name, s.Quality, s.Attribute, s.Star, s.Level, maxLv, EnhancedBattlePower(bonusMap, manualMap, s), capMark))
+		b.WriteString(fmt.Sprintf("· ID %d %s %s品·%s ⭐%d Lv.%d/%d 战力%d%s\n",
+			s.ID, s.Name, s.Quality, s.Attribute, s.Star, s.Level, maxLv, EnhancedBattlePower(bonusMap, manualMap, s), capMark))
 		if s.Level < maxLv {
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData(

@@ -587,6 +587,18 @@ func HandleSectCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text string)
 			sid, code = args[0], args[1]
 		}
 		run = func() { handleAdvanceSectManualCmd(bot, msg, sid, code) }
+	case text == "观法", text == "修习":
+		cmd := text
+		run = func() {
+			// 与其余藏经阁命令一致：群聊提示转私聊；私聊回显用法
+			if !msg.Chat.IsPrivate() {
+				replyText(bot, msg.Chat.ID, fmt.Sprintf("📚 %s仅在私聊开放，请私聊我使用。", cmd))
+				return
+			}
+			replyText(bot, msg.Chat.ID, fmt.Sprintf("❌ 缺少参数。\n用法：`%s <灵侍编号> <黄|玄|地|天>`\n示例：`%s 12 天`（灵侍编号见「藏经阁」面板或「灵侍图鉴」）", cmd, cmd))
+		}
+	case text == "确认观法兑换":
+		run = func() { handleConfirmStudyManualExchange(bot, msg) }
 	}
 
 	if run == nil {
@@ -726,6 +738,8 @@ func sectErrorCode(err error) string {
 		return "SECT_CAVE_ALREADY_UNLOCKED"
 	case errors.Is(err, errSectPersonalPrestigeNotEnough):
 		return "PERSONAL_PRESTIGE_NOT_ENOUGH"
+	case errors.Is(err, errSectContributionNotEnough):
+		return "CONTRIBUTION_NOT_ENOUGH"
 	case errors.Is(err, errSectRetreatActive):
 		return "SECT_RETREAT_ACTIVE"
 	case errors.Is(err, errSectRetreatNoEligibleMembers):
@@ -2243,21 +2257,13 @@ func handleDisabledSectContributionForPoints(bot *tgbotapi.BotAPI, msg *tgbotapi
 	replyText(bot, msg.Chat.ID, "贡献换积分已关闭。当前可使用 `贡献换声望 数量`，每 3 点贡献兑换 1 点宗门声望。")
 }
 
-func handleExchangeSectContributionForPrestige(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawAmount string) {
-	userID := msg.From.ID
-	chatID := msg.Chat.ID
-
-	rewardPrestige, err := parseSectShopRewardAmount(rawAmount)
-	if err != nil {
-		replyText(bot, chatID, fmt.Sprintf("兑换数量格式错误。\n示例：`贡献换声望 10`\n%s", formatMarkdownError(err)))
-		return
-	}
-
+// exchangeSectContributionForPrestige 贡献→声望兑换核心事务：
+// 消耗 rewardPrestige*sectContributionToPrestigeCost 贡献，宗门声望与个人声望各 +rewardPrestige
+// （含 SectContributionLog 流水与 SectShopPurchase 记录）。
+// 错误原样返回（NOT_IN_SECT / CONTRIBUTION_NOT_ENOUGH 等），调用方用 sectErrorCode 映射文案。
+// 手动「贡献换声望」与「观法声望不足自动兑换」共用本路径，保证资产口径一致。
+func exchangeSectContributionForPrestige(userID int64, rewardPrestige int) (sectName string, contributionAfter int, personalPrestigeAfter int, err error) {
 	costContribution := rewardPrestige * sectContributionToPrestigeCost
-
-	var sectName string
-	var contributionAfter int
-	var personalPrestigeAfter int
 
 	err = DB.Transaction(func(tx *gorm.DB) error {
 		var member SectMember
@@ -2280,7 +2286,7 @@ func handleExchangeSectContributionForPrestige(bot *tgbotapi.BotAPI, msg *tgbota
 			return res.Error
 		}
 		if res.RowsAffected == 0 {
-			return fmt.Errorf("CONTRIBUTION_NOT_ENOUGH")
+			return errSectContributionNotEnough
 		}
 
 		sectPrestigeRes := tx.Model(&Sect{}).
@@ -2303,9 +2309,9 @@ func handleExchangeSectContributionForPrestige(bot *tgbotapi.BotAPI, msg *tgbota
 			return fmt.Errorf("SECT_SHOP_PRESTIGE_MEMBER_UPDATE_MISSED")
 		}
 
-		prestigeAfter, err := readSectPrestigeInTx(tx, member.SectID)
-		if err != nil {
-			return err
+		prestigeAfter, rerr := readSectPrestigeInTx(tx, member.SectID)
+		if rerr != nil {
+			return rerr
 		}
 
 		if err := createSectContributionLogInTx(tx, &SectContributionLog{
@@ -2331,9 +2337,9 @@ func handleExchangeSectContributionForPrestige(bot *tgbotapi.BotAPI, msg *tgbota
 			return err
 		}
 
-		contributionAfter, err = readSectMemberContributionInTx(tx, member.ID)
-		if err != nil {
-			return err
+		contributionAfter, rerr = readSectMemberContributionInTx(tx, member.ID)
+		if rerr != nil {
+			return rerr
 		}
 		if err := tx.Select("personal_prestige").Where("id = ?", member.ID).First(&member).Error; err != nil {
 			return err
@@ -2341,6 +2347,21 @@ func handleExchangeSectContributionForPrestige(bot *tgbotapi.BotAPI, msg *tgbota
 		personalPrestigeAfter = member.PersonalPrestige
 		return nil
 	})
+	return
+}
+
+func handleExchangeSectContributionForPrestige(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawAmount string) {
+	userID := msg.From.ID
+	chatID := msg.Chat.ID
+
+	rewardPrestige, err := parseSectShopRewardAmount(rawAmount)
+	if err != nil {
+		replyText(bot, chatID, fmt.Sprintf("兑换数量格式错误。\n示例：`贡献换声望 10`\n%s", formatMarkdownError(err)))
+		return
+	}
+
+	costContribution := rewardPrestige * sectContributionToPrestigeCost
+	sectName, contributionAfter, personalPrestigeAfter, err := exchangeSectContributionForPrestige(userID, rewardPrestige)
 
 	if err != nil {
 		switch sectErrorCode(err) {
@@ -2503,7 +2524,7 @@ func handleExchangeSectRenew(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, confir
 			return res.Error
 		}
 		if res.RowsAffected == 0 {
-			return fmt.Errorf("CONTRIBUTION_NOT_ENOUGH")
+			return errSectContributionNotEnough
 		}
 
 		newExpireAt = sectShopRenewNextExpireAt(lockedUser.ExpireAt, now)
@@ -2810,7 +2831,7 @@ func handleUnlockSectCave(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, confirmed
 			return res.Error
 		}
 		if res.RowsAffected == 0 {
-			return fmt.Errorf("CONTRIBUTION_NOT_ENOUGH")
+			return errSectContributionNotEnough
 		}
 		var readErr error
 		contributionAfter, readErr = readSectMemberContributionInTx(tx, lockedMember.ID)

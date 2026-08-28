@@ -59,6 +59,7 @@ var (
 	errSectCaveLocked                 = errors.New("SECT_CAVE_LOCKED")
 	errSectCaveAlreadyUnlocked        = errors.New("SECT_CAVE_ALREADY_UNLOCKED")
 	errSectPersonalPrestigeNotEnough  = errors.New("PERSONAL_PRESTIGE_NOT_ENOUGH")
+	errSectContributionNotEnough      = errors.New("CONTRIBUTION_NOT_ENOUGH")
 	errSectRetreatActive              = errors.New("SECT_RETREAT_ACTIVE")
 	errSectRetreatNoEligibleMembers   = errors.New("SECT_RETREAT_NO_ELIGIBLE_MEMBERS")
 	errSectShopRenewMonthlyLimit      = errors.New("SECT_SHOP_RENEW_MONTHLY_LIMIT")
@@ -198,6 +199,7 @@ func isKnownBusinessErrorCode(code string) bool {
 		errSectCaveLocked.Error(),
 		errSectCaveAlreadyUnlocked.Error(),
 		errSectPersonalPrestigeNotEnough.Error(),
+		errSectContributionNotEnough.Error(),
 		errSectRetreatActive.Error(),
 		errSectRetreatNoEligibleMembers.Error(),
 		errSectShopRenewMonthlyLimit.Error(),
