@@ -9,6 +9,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -170,6 +171,12 @@ const (
 )
 
 var sectSecretRealmRankOrder = "delta_hours DESC, raw_delta_seconds DESC, created_at ASC"
+
+// sectSecretRealmLiveRefreshMu 防止调度器、状态/排行查询和进入后展示并发触发整轮 ABS 拉取。
+// 单轮刷新按参与者逐个请求 ABS（1 次统计 + 最多 5 页会话），ABS 变慢时单轮可能超过
+// UpdatedAt 的 2 分钟跳过窗口；不加保护会让刷新 goroutine 逐分钟叠加，把 ABS 打垮并
+// 连带拖死用户进入秘境时的实时统计读取。
+var sectSecretRealmLiveRefreshMu sync.Mutex
 
 type sectSecretRealmListeningSnapshot struct {
 	EffectiveHours float64
@@ -604,6 +611,17 @@ func applySectSecretRealmRewardMultiplier(base int, percent int) int {
 	return int(math.Floor(float64(base) * float64(percent) / 100.0))
 }
 
+// tryRefreshSectSecretRealmLiveProgress 在上一轮实时刷新未结束时跳过本次刷新。
+// 刷新只更新实时榜展示数据，不发放资产，跳过永远安全；返回 ran=false 表示跳过。
+func tryRefreshSectSecretRealmLiveProgress(event SectSecretRealmEvent) (refreshed SectSecretRealmEvent, ran bool, err error) {
+	if !sectSecretRealmLiveRefreshMu.TryLock() {
+		return event, false, nil
+	}
+	defer sectSecretRealmLiveRefreshMu.Unlock()
+	refreshed, err = refreshSectSecretRealmLiveProgress(event)
+	return refreshed, true, err
+}
+
 func refreshSectSecretRealmLiveProgress(event SectSecretRealmEvent) (SectSecretRealmEvent, error) {
 	if event.RealmID == "" || event.Status != "active" {
 		return event, nil
@@ -909,7 +927,10 @@ func refreshActiveSectSecretRealms(bot *tgbotapi.BotAPI, now time.Time) {
 		if time.Since(event.UpdatedAt) < sectSecretRealmLiveRefreshInterval {
 			continue
 		}
-		refreshed, err := refreshSectSecretRealmLiveProgress(event)
+		refreshed, ran, err := tryRefreshSectSecretRealmLiveProgress(event)
+		if !ran {
+			continue
+		}
 		if err != nil {
 			log.Printf("⚠️ 宗门秘境实时刷新失败: realm=%s err=%s", formatPlainValue(event.RealmID), formatPlainError(err))
 			continue
@@ -988,10 +1009,10 @@ func handleSectSecretRealmStatus(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	if event.Status == "active" {
-		if refreshed, err := refreshSectSecretRealmLiveProgress(event); err == nil {
+		if refreshed, ran, err := tryRefreshSectSecretRealmLiveProgress(event); ran && err == nil {
 			event = refreshed
 			ensureSectSecretRealmLiveBoard(bot, event)
-		} else {
+		} else if ran && err != nil {
 			log.Printf("⚠️ 宗门秘境状态实时刷新失败: realm=%s err=%s", formatPlainValue(event.RealmID), formatPlainError(err))
 		}
 	}
@@ -1399,9 +1420,9 @@ func handleJoinSectSecretRealm(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		profile.PressureFullHours,
 	))
 
-	if refreshed, err := refreshSectSecretRealmLiveProgress(event); err == nil {
+	if refreshed, ran, err := tryRefreshSectSecretRealmLiveProgress(event); ran && err == nil {
 		ensureSectSecretRealmLiveBoard(bot, refreshed)
-	} else {
+	} else if ran && err != nil {
 		log.Printf("⚠️ 宗门秘境进入后实时刷新失败: realm=%s user=%d err=%s", formatPlainValue(event.RealmID), userID, formatPlainError(err))
 	}
 }
@@ -1534,7 +1555,8 @@ func settleSectSecretRealm(bot *tgbotapi.BotAPI, realmID string, fallbackChatID 
 			continue
 		}
 
-		finalSnapshot, err := getSectSecretRealmListeningSnapshot(u.AbsUserID)
+		// 结算走 ABS 直读、不用新鲜本地兜底：ABS 失败时按进入基线结算（增量为 0），资产口径保持严格。
+		finalSnapshot, err := fetchSectSecretRealmListeningSnapshotFromABS(u.AbsUserID)
 		if err != nil {
 			log.Printf("⚠️ 宗门秘境结算读取 ABS 失败: realm=%s user=%d err=%s", formatPlainValue(realmID), p.UserID, formatPlainError(err))
 			finalSnapshot = sectSecretRealmListeningSnapshot{
@@ -2193,10 +2215,10 @@ func handleSectSecretRealmRank(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	if event.Status == "active" {
-		if refreshed, err := refreshSectSecretRealmLiveProgress(event); err == nil {
+		if refreshed, ran, err := tryRefreshSectSecretRealmLiveProgress(event); ran && err == nil {
 			event = refreshed
 			ensureSectSecretRealmLiveBoard(bot, event)
-		} else {
+		} else if ran && err != nil {
 			log.Printf("⚠️ 宗门秘境排行实时刷新失败: realm=%s err=%s", formatPlainValue(event.RealmID), formatPlainError(err))
 		}
 	}
@@ -2337,6 +2359,52 @@ func getSectSecretRealmListeningSnapshot(absUserID string) (sectSecretRealmListe
 		return sectSecretRealmListeningSnapshot{}, errAbsUserIDEmpty
 	}
 
+	snapshot, err := fetchSectSecretRealmListeningSnapshotFromABS(absUserID)
+	if err == nil {
+		return snapshot, nil
+	}
+
+	// ABS 重启/闪断时进入和实时刷新不应硬失败：本地每日统计仍是 5 分钟内官方数据时降级使用，
+	// 避免把 ABS 短暂抖动放大成用户无法进入秘境。结算路径不走本兜底（结算自身按进入基线降级，
+	// 资产口径保持严格）；超过 5 分钟或本地无数据时维持原报错。
+	if degraded, ok := freshSectSecretRealmSnapshotFromLocalDailyStats(absUserID); ok {
+		log.Printf("⚠️ 宗门秘境读取 ABS 失败，降级使用本地每日统计: abs=%s err=%s", formatPlainValue(absUserID), formatPlainError(err))
+		return degraded, nil
+	}
+	return sectSecretRealmListeningSnapshot{}, err
+}
+
+// freshSectSecretRealmSnapshotFromLocalDailyStats 复用宗门任务路径的 5 分钟新鲜度口径
+// （dailyListeningABSFetchMinInterval），用本地每日统计汇总出与 ABS 直读同语义的快照。
+func freshSectSecretRealmSnapshotFromLocalDailyStats(absUserID string) (sectSecretRealmListeningSnapshot, bool) {
+	if DB == nil || strings.TrimSpace(absUserID) == "" {
+		return sectSecretRealmListeningSnapshot{}, false
+	}
+	var u User
+	if err := DB.Select("telegram_id", "abs_user_id").Where("abs_user_id = ?", absUserID).First(&u).Error; err != nil {
+		return sectSecretRealmListeningSnapshot{}, false
+	}
+	var stat DailyListeningStat
+	if err := DB.Where("user_id = ?", u.TelegramID).
+		Order("last_official_fetched_at DESC").
+		First(&stat).Error; err != nil {
+		return sectSecretRealmListeningSnapshot{}, false
+	}
+	if stat.LastOfficialFetchedAt.IsZero() || time.Since(stat.LastOfficialFetchedAt) >= dailyListeningABSFetchMinInterval {
+		return sectSecretRealmListeningSnapshot{}, false
+	}
+	effectiveHours, okHours := sumDailyListeningEffectiveHours(u.TelegramID)
+	rawSeconds, okRaw := sumDailyListeningRawSeconds(u.TelegramID)
+	if !okHours || !okRaw {
+		return sectSecretRealmListeningSnapshot{}, false
+	}
+	return sectSecretRealmListeningSnapshot{
+		EffectiveHours: effectiveHours,
+		RawSeconds:     rawSeconds,
+	}, true
+}
+
+func fetchSectSecretRealmListeningSnapshotFromABS(absUserID string) (sectSecretRealmListeningSnapshot, error) {
 	body, code, err := absClient.sendRequest("GET", absUserListeningStatsPath(absUserID), nil)
 	if err != nil {
 		return sectSecretRealmListeningSnapshot{}, err
