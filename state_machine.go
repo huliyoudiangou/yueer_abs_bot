@@ -2196,6 +2196,16 @@ const (
 	bookRequestNoteMaxLen = 300
 	bookRequestLinkMaxLen = 500
 
+	// 滞留工单巡检阈值（业务决策：pending 24h / claimed 48h / need_info 24h 提醒 + 24h 宽限）。
+	// pending 与 claimed 只提醒不自动收尾；need_info 提醒一次后超时自动取消并退积分。
+	bookRequestPendingRemindAfter    = 24 * time.Hour
+	bookRequestPendingRemindMaxCount = 2
+	bookRequestClaimedRemindAfter    = 48 * time.Hour
+	bookRequestClaimedRemindMaxCount = 2
+	bookRequestNeedInfoRemindAfter   = 24 * time.Hour
+	bookRequestNeedInfoCancelAfter   = 48 * time.Hour
+	bookRequestStalePatrolInterval   = time.Hour
+
 	bookRequestLinkRequirementText = "必须以 https:// 开头，仅支持 ximalaya.com / www.ximalaya.com / m.ximalaya.com / xima.tv，路径不能为首页，且不能包含空格、换行、制表符、URL 账号密码信息或其他控制/分隔字符"
 	bookRequestNoteInvalidText     = "内容不符合要求，请输入最多 300 字、可换行且不含制表符或其他控制字符的说明。"
 )
@@ -2463,6 +2473,7 @@ func markBookRequestUserReplied(db *gorm.DB, req BookRequest, actorName string, 
 				"status":         bookRequestStatusClaimed,
 				"user_note":      newNote,
 				"last_action_at": &now,
+				"remind_count":   0,
 			})
 		if res.Error != nil {
 			return fmt.Errorf("book request user reply update failed: %s", formatPlainError(res.Error))
@@ -2474,6 +2485,79 @@ func markBookRequestUserReplied(db *gorm.DB, req BookRequest, actorName string, 
 		return createBookRequestLogInTx(tx, req.ID, req.UserID, actorName, "user_reply", req.Status, bookRequestStatusClaimed, replyNote)
 	})
 	return updated, err
+}
+
+// refundBookRequestInTx 在事务内退还工单积分（业务规则：cancelled / rejected 退还，uploaded 不退）。
+// 已退还（RefundedAt 非空）或无扣费记录（CostPaid<=0）时跳过并返回 0。
+// 幂等由 refunded_at IS NULL 条件保证；调用方负责在同一事务内完成状态变更与审计。
+func refundBookRequestInTx(tx *gorm.DB, req *BookRequest, actorID int64, actorName string, reason string, now time.Time) (int, error) {
+	if tx == nil || req == nil || req.ID == 0 {
+		return 0, fmt.Errorf("BOOK_REQUEST_REFUND_INVALID")
+	}
+	if req.RefundedAt != nil || req.CostPaid <= 0 {
+		return 0, nil
+	}
+
+	res := tx.Model(&BookRequest{}).
+		Where("id = ? AND refunded_at IS NULL", req.ID).
+		Update("refunded_at", now)
+	if res.Error != nil {
+		return 0, fmt.Errorf("book request refund update failed: %s", formatPlainError(res.Error))
+	}
+	if res.RowsAffected == 0 {
+		// 已被并发操作退还，不重复退款。
+		return 0, nil
+	}
+	req.RefundedAt = &now
+
+	if err := applyPointDeltaInTx(
+		tx,
+		req.UserID,
+		req.CostPaid,
+		"book_request_refund",
+		fmt.Sprintf("求书工单 #%d 取消，退还 %d 积分", req.ID, req.CostPaid),
+		"book_request",
+		fmt.Sprintf("%d", req.ID),
+	); err != nil {
+		// 用户行缺失（已注销）时无法入账：跳过退款并保留工单取消流程，其余错误回滚整个事务。
+		if errors.Is(err, errUserNotFound) {
+			log.Printf("⚠️ 求书工单退款跳过（用户不存在）: req=%d user=%d amount=%d", req.ID, req.UserID, req.CostPaid)
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	if err := createBookRequestLogInTx(tx, req.ID, actorID, actorName, "refund", req.Status, req.Status,
+		fmt.Sprintf("refund %d points; reason=%s", req.CostPaid, reason)); err != nil {
+		return 0, err
+	}
+	if err := writeAuditLogInTx(tx, actorID, "REFUND_BOOK_REQUEST", fmt.Sprintf("%d", req.ID), req.CostPaid,
+		fmt.Sprintf("book request refund %d points; reason=%s", req.CostPaid, reason)); err != nil {
+		return 0, err
+	}
+	return req.CostPaid, nil
+}
+
+// collectBookRequestAdminIDs 汇总应收到求书工单通知的管理员（环境配置 + 角色管理员）。
+func collectBookRequestAdminIDs() map[int64]bool {
+	adminIDs := make(map[int64]bool)
+
+	if AppConfig != nil {
+		for id := range AppConfig.AdminIDs {
+			adminIDs[id] = true
+		}
+	}
+
+	var dbAdmins []User
+	if err := DB.Where("role IN ?", []string{"admin", "super_admin"}).Find(&dbAdmins).Error; err != nil {
+		log.Printf("⚠️ 求书工单通知管理员列表读取失败: err=%s", formatPlainError(err))
+	} else {
+		for _, admin := range dbAdmins {
+			adminIDs[admin.TelegramID] = true
+		}
+	}
+
+	return adminIDs
 }
 
 func reloadBookRequestAfterClaim(db *gorm.DB, req *BookRequest, reqID uint, adminID int64, adminName string, now time.Time) error {
@@ -2512,6 +2596,8 @@ func reloadBookRequestAfterNeedInfo(db *gorm.DB, req *BookRequest, reqID uint, n
 		req.AdminNote = note
 		req.AdminID = adminID
 		req.AdminName = adminName
+		req.AssigneeID = adminID
+		req.AssigneeName = adminName
 		req.LastActionAt = &now
 	}
 	if db == nil {
@@ -2653,6 +2739,43 @@ func bookRequestStatusText(status string) string {
 	}
 }
 
+// isBookRequestClosedStatus 返回工单是否已终结（不再接受接单、备注、要求补充等操作）。
+// completed 为历史遗留状态，与 uploaded 同义。
+func isBookRequestClosedStatus(status string) bool {
+	switch status {
+	case bookRequestStatusUploaded, bookRequestStatusCompleted,
+		bookRequestStatusRejected, bookRequestStatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+// isBookRequestOperableStatus 返回工单是否处于管理员可操作状态（已接单/需补充信息）。
+func isBookRequestOperableStatus(status string) bool {
+	switch status {
+	case bookRequestStatusClaimed, bookRequestStatusNeedInfo:
+		return true
+	default:
+		return false
+	}
+}
+
+// isBookRequestUploadedStatus 返回工单是否已上传（含历史遗留 completed 状态）。
+func isBookRequestUploadedStatus(status string) bool {
+	switch status {
+	case bookRequestStatusUploaded, bookRequestStatusCompleted:
+		return true
+	default:
+		return false
+	}
+}
+
+// bookRequestOperableStatuses 返回管理员可操作状态集合，供 SQL IN 查询复用。
+func bookRequestOperableStatuses() []string {
+	return []string{bookRequestStatusClaimed, bookRequestStatusNeedInfo}
+}
+
 func formatBookRequestTime(t *time.Time) string {
 	if t == nil {
 		return "未处理"
@@ -2733,7 +2856,7 @@ func bookRequestLimitMessageFromCounts(weeklyCount int64, monthlyCount int64, pe
 	}
 
 	if pendingCount >= bookRequestPendingLimit {
-		return fmt.Sprintf("你当前已有 %d 条待处理求书，请等待管理员处理后再提交新的求书。", bookRequestPendingLimit)
+		return fmt.Sprintf("你当前已有 %d 条待处理求书（含需补充信息未回复的），请处理完成后再提交新的求书。", bookRequestPendingLimit)
 	}
 
 	return ""
@@ -2763,7 +2886,7 @@ func queryBookRequestLimitCounts(db *gorm.DB, userID int64, now time.Time) (int6
 
 	var pendingCount int64
 	if err := db.Model(&BookRequest{}).
-		Where("user_id = ? AND status = ?", userID, bookRequestStatusPending).
+		Where("user_id = ? AND status IN ?", userID, []string{bookRequestStatusPending, bookRequestStatusNeedInfo}).
 		Count(&pendingCount).Error; err != nil {
 		return 0, 0, 0, err
 	}
@@ -2818,6 +2941,9 @@ func createBookRequestWithinLimits(req *BookRequest, now time.Time) (string, err
 			limitMsg = msg
 			return nil
 		}
+
+		// 记录创建时的实际扣费金额，作为取消/拒绝时退款的唯一依据（不按当前档位重算）。
+		req.CostPaid = plan.Cost
 
 		res := tx.Create(req)
 		if res.Error != nil {
@@ -2883,10 +3009,7 @@ func formatBookRequestAdminText(req BookRequest) string {
 		displayBookRequestText(req.AdminNote, "无"),
 	)
 
-	if req.Status == bookRequestStatusUploaded ||
-		req.Status == bookRequestStatusCompleted ||
-		req.Status == bookRequestStatusRejected ||
-		req.Status == bookRequestStatusCancelled {
+	if isBookRequestClosedStatus(req.Status) {
 		text += fmt.Sprintf(
 			"\n\n处理人：%s\n处理时间：%s",
 			displayBookRequestText(req.AdminName, "未知管理员"),
@@ -2915,7 +3038,7 @@ func editBookRequestAdminMessage(bot *tgbotapi.BotAPI, chatID int64, messageID i
 					tgbotapi.NewInlineKeyboardButtonData("🤝 接单", fmt.Sprintf("br_claim_%d", req.ID)),
 				),
 			)
-		} else if req.Status == bookRequestStatusClaimed || req.Status == bookRequestStatusNeedInfo {
+		} else if isBookRequestOperableStatus(req.Status) {
 			keyboard = tgbotapi.NewInlineKeyboardMarkup(
 				tgbotapi.NewInlineKeyboardRow(
 					tgbotapi.NewInlineKeyboardButtonData("✅ 已上传", fmt.Sprintf("br_done_%d", req.ID)),
@@ -2924,6 +3047,9 @@ func editBookRequestAdminMessage(bot *tgbotapi.BotAPI, chatID int64, messageID i
 				tgbotapi.NewInlineKeyboardRow(
 					tgbotapi.NewInlineKeyboardButtonData("📝 管理员备注", fmt.Sprintf("br_note_%d", req.ID)),
 					tgbotapi.NewInlineKeyboardButtonData("❓ 需补充信息", fmt.Sprintf("br_need_info_%d", req.ID)),
+				),
+				tgbotapi.NewInlineKeyboardRow(
+					tgbotapi.NewInlineKeyboardButtonData("🚫 取消工单", fmt.Sprintf("br_cancel_%d", req.ID)),
 				),
 			)
 		}
@@ -2951,7 +3077,7 @@ func refreshStoredBookRequestAdminMessage(bot *tgbotapi.BotAPI, req BookRequest,
 }
 
 func formatBookRequestUserResultText(req BookRequest) string {
-	if req.Status == bookRequestStatusUploaded || req.Status == bookRequestStatusCompleted {
+	if isBookRequestUploadedStatus(req.Status) {
 		return fmt.Sprintf(
 			"✅ 你提交的求书已处理完成。\n\n"+
 				"喜马拉雅链接：\n%s\n\n"+
@@ -2971,13 +3097,17 @@ func formatBookRequestUserResultText(req BookRequest) string {
 	}
 
 	if req.Status == bookRequestStatusRejected {
-		return fmt.Sprintf(
+		rejectText := fmt.Sprintf(
 			"📚 你提交的求书暂时无法处理。\n\n"+
 				"喜马拉雅链接：\n%s\n\n"+
 				"管理员备注：\n%s",
 			req.XmlyLink,
 			displayBookRequestText(req.AdminNote, "无"),
 		)
+		if req.RefundedAt != nil && req.CostPaid > 0 {
+			rejectText += fmt.Sprintf("\n\n已退还 %d 积分。", req.CostPaid)
+		}
+		return rejectText
 	}
 
 	return fmt.Sprintf(
@@ -2992,20 +3122,7 @@ func formatBookRequestUserResultText(req BookRequest) string {
 }
 
 func notifyBookRequestAdmins(bot *tgbotapi.BotAPI, req BookRequest) {
-	adminIDs := make(map[int64]bool)
-
-	for id := range AppConfig.AdminIDs {
-		adminIDs[id] = true
-	}
-
-	var dbAdmins []User
-	if err := DB.Where("role IN ?", []string{"admin", "super_admin"}).Find(&dbAdmins).Error; err != nil {
-		log.Printf("⚠️ 求书工单通知管理员列表读取失败: req=%d err=%s", req.ID, formatPlainError(err))
-	} else {
-		for _, admin := range dbAdmins {
-			adminIDs[admin.TelegramID] = true
-		}
-	}
+	adminIDs := collectBookRequestAdminIDs()
 
 	if len(adminIDs) == 0 {
 		log.Printf("⚠️ 新求书工单 #%d 创建成功，但没有找到可通知的管理员", req.ID)
@@ -3127,7 +3244,16 @@ func showMyBookRequests(bot *tgbotapi.BotAPI, chatID int64, userID int64) {
 		b.WriteString("\n\n")
 	}
 
-	sendPlainText(bot, chatID, b.String())
+	msg := tgbotapi.NewMessage(chatID, b.String())
+
+	// 待接单的工单提供取消入口（二次点击确认，确认后退还创建时扣除的积分）。
+	if cancelRows := buildBookRequestUserCancelRows(userID); len(cancelRows) > 0 {
+		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(cancelRows...)
+	}
+
+	if _, err := sendAutoDelete(bot, msg); err != nil {
+		log.Printf("⚠️ 发送我的求书记录失败: user=%d err=%s", userID, formatTelegramSendError(err))
+	}
 }
 
 func showPendingBookRequests(bot *tgbotapi.BotAPI, chatID int64) {
@@ -3182,10 +3308,7 @@ func showMyClaimedBookRequests(bot *tgbotapi.BotAPI, chatID int64, adminID int64
 	var reqs []BookRequest
 
 	if err := DB.
-		Where("assignee_id = ? AND status IN ?", adminID, []string{
-			bookRequestStatusClaimed,
-			bookRequestStatusNeedInfo,
-		}).
+		Where("assignee_id = ? AND status IN ?", adminID, bookRequestOperableStatuses()).
 		Order("last_action_at DESC").
 		Limit(20).
 		Find(&reqs).Error; err != nil {
@@ -3242,7 +3365,7 @@ func sendBookRequestDetail(bot *tgbotapi.BotAPI, chatID int64, req BookRequest) 
 				tgbotapi.NewInlineKeyboardButtonData("🤝 接单", fmt.Sprintf("br_claim_%d", req.ID)),
 			),
 		)
-	} else if req.Status == bookRequestStatusClaimed || req.Status == bookRequestStatusNeedInfo {
+	} else if isBookRequestOperableStatus(req.Status) {
 		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 			tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData("✅ 已上传", fmt.Sprintf("br_done_%d", req.ID)),
@@ -3251,6 +3374,9 @@ func sendBookRequestDetail(bot *tgbotapi.BotAPI, chatID int64, req BookRequest) 
 			tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData("📝 管理员备注", fmt.Sprintf("br_note_%d", req.ID)),
 				tgbotapi.NewInlineKeyboardButtonData("❓ 需补充信息", fmt.Sprintf("br_need_info_%d", req.ID)),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("🚫 取消工单", fmt.Sprintf("br_cancel_%d", req.ID)),
 			),
 		)
 	}
@@ -3433,6 +3559,153 @@ func isOldTelegramCallbackError(err error) bool {
 		strings.Contains(text, "query id is invalid")
 }
 
+// buildBookRequestUserCancelRows 查询用户当前待接单工单，生成取消按钮行（无则返回 nil）。
+func buildBookRequestUserCancelRows(userID int64) [][]tgbotapi.InlineKeyboardButton {
+	var reqs []BookRequest
+	if err := DB.Where("user_id = ? AND status = ?", userID, bookRequestStatusPending).
+		Order("created_at DESC").
+		Limit(5).
+		Find(&reqs).Error; err != nil {
+		log.Printf("⚠️ 求书取消按钮列表读取失败: user=%d err=%s", userID, formatPlainError(err))
+		return nil
+	}
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, req := range reqs {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("❌ 取消求书 #%d", req.ID),
+				fmt.Sprintf("br_ucancel_%d", req.ID),
+			),
+		))
+	}
+	return rows
+}
+
+// handleBookRequestUserCancel 用户取消自己的待接单工单（confirmed=false 时先做二次点击确认）。
+// 取消后按创建时扣费金额退还积分（CostPaid<=0 或已退还则跳过）。
+func handleBookRequestUserCancel(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery, reqID uint, confirmed bool) {
+	if bot == nil || cb == nil || cb.From == nil || reqID == 0 {
+		return
+	}
+
+	req, found, err := loadBookRequestByID(DB, reqID, "user cancel")
+	if err != nil {
+		answerCallback(bot, cb.ID, "查询工单失败，请稍后重试")
+		return
+	}
+	if !found {
+		answerCallback(bot, cb.ID, "工单不存在")
+		return
+	}
+
+	if req.UserID != cb.From.ID {
+		answerCallback(bot, cb.ID, "只能取消自己的求书工单")
+		return
+	}
+
+	if req.Status != bookRequestStatusPending {
+		answerCallback(bot, cb.ID, "该工单已被接单或已处理，无法自行取消")
+		return
+	}
+
+	if !confirmed {
+		// 第一次点击：把按钮换成确认按钮，避免误触。
+		if cb.Message != nil {
+			confirmText := fmt.Sprintf("⚠️ 确认取消求书 #%d", req.ID)
+			if req.CostPaid > 0 {
+				confirmText = fmt.Sprintf("⚠️ 确认取消求书 #%d（退还 %d 积分）", req.ID, req.CostPaid)
+			}
+			edit := tgbotapi.NewEditMessageReplyMarkup(cb.Message.Chat.ID, cb.Message.MessageID,
+				tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(
+					tgbotapi.NewInlineKeyboardButtonData(confirmText, fmt.Sprintf("br_ucancel_ok_%d", req.ID)),
+				)))
+			if _, err := bot.Request(edit); err != nil {
+				log.Printf("⚠️ 求书用户取消确认按钮刷新失败: req=%d chat=%d msg=%d err=%s", req.ID, cb.Message.Chat.ID, cb.Message.MessageID, formatTelegramSendError(err))
+			}
+		}
+		answerCallback(bot, cb.ID, "请再次点击确认取消")
+		return
+	}
+
+	now := time.Now()
+	cancelled := false
+	refunded := 0
+	err = DB.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&BookRequest{}).
+			Where("id = ? AND user_id = ? AND status = ?", reqID, cb.From.ID, bookRequestStatusPending).
+			Updates(map[string]interface{}{
+				"status": bookRequestStatusCancelled,
+				// admin_name 仅作展示（无逻辑依赖）：无管理员参与的取消记录取消来源，
+				// 避免管理端详情显示“未知管理员”；真实操作者仍在 book_request_logs 中。
+				"admin_name":     "用户取消",
+				"last_action_at": &now,
+				"completed_at":   &now,
+			})
+		if res.Error != nil {
+			return fmt.Errorf("book request user cancel update failed: %s", formatPlainError(res.Error))
+		}
+		if res.RowsAffected == 0 {
+			return nil
+		}
+		cancelled = true
+
+		amount, err := refundBookRequestInTx(tx, &req, req.UserID, req.UserName, "cancelled by user", now)
+		if err != nil {
+			return err
+		}
+		refunded = amount
+
+		if err := createBookRequestLogInTx(tx, reqID, req.UserID, req.UserName, "user_cancel", bookRequestStatusPending, bookRequestStatusCancelled, "user cancelled own pending request"); err != nil {
+			return err
+		}
+		return writeAuditLogInTx(tx, req.UserID, "USER_CANCEL_BOOK_REQUEST", fmt.Sprintf("%d", reqID), 0, "user cancelled own pending book request")
+	})
+	if err != nil {
+		log.Printf("book request user cancel failed: req=%d user=%d err=%s", reqID, cb.From.ID, formatPlainError(err))
+		answerCallback(bot, cb.ID, "取消失败，请稍后再试")
+		return
+	}
+
+	if !cancelled {
+		answerCallback(bot, cb.ID, "该工单状态已变化，无法取消")
+		return
+	}
+
+	var updatedReq BookRequest
+	if err := DB.Where("id = ?", reqID).First(&updatedReq).Error; err != nil {
+		log.Printf("⚠️ 求书用户取消后读取失败: req=%d err=%s", reqID, formatPlainError(err))
+		updatedReq = req
+		updatedReq.Status = bookRequestStatusCancelled
+	}
+
+	// 刷新管理端消息（创建/操作时记录的第一条管理员消息），移除接单按钮。
+	refreshStoredBookRequestAdminMessage(bot, updatedReq, true, 0, 0)
+
+	// 用户列表消息：取消完成后重建剩余待接单工单的取消按钮（无则清空），避免误触已取消工单。
+	if cb.Message != nil {
+		remainingRows := buildBookRequestUserCancelRows(cb.From.ID)
+		markup := tgbotapi.NewInlineKeyboardMarkup(remainingRows...)
+		edit := tgbotapi.NewEditMessageReplyMarkup(cb.Message.Chat.ID, cb.Message.MessageID, markup)
+		if _, err := bot.Request(edit); err != nil && !isTelegramMessageNotModifiedError(err) {
+			log.Printf("⚠️ 求书用户取消后按钮刷新失败: req=%d chat=%d msg=%d err=%s", reqID, cb.Message.Chat.ID, cb.Message.MessageID, formatTelegramSendError(err))
+		}
+	}
+
+	callbackText := "已取消"
+	if refunded > 0 {
+		callbackText = fmt.Sprintf("已取消，退还 %d 积分", refunded)
+	}
+	answerCallback(bot, cb.ID, callbackText)
+
+	msgText := fmt.Sprintf("📚 你的求书 #%d 已取消。\n", reqID)
+	if refunded > 0 {
+		msgText += fmt.Sprintf("\n已退还 %d 积分。", refunded)
+	}
+	msgText += "\n如仍需要该书，可重新提交求书工单。"
+	sendPlainText(bot, cb.From.ID, msgText)
+}
+
 func handleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) {
 	if cb == nil || cb.From == nil {
 		return
@@ -3441,6 +3714,16 @@ func handleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 	data := cb.Data
 	if !strings.HasPrefix(data, "br_") {
 		answerCallback(bot, cb.ID, "未知操作")
+		return
+	}
+
+	// 用户取消自己的待接单工单：不要求管理员权限，但要校验工单归属。
+	if reqID, ok := parseBookRequestCallbackID(data, "br_ucancel_ok_"); ok {
+		handleBookRequestUserCancel(bot, cb, reqID, true)
+		return
+	}
+	if reqID, ok := parseBookRequestCallbackID(data, "br_ucancel_"); ok {
+		handleBookRequestUserCancel(bot, cb, reqID, false)
 		return
 	}
 
@@ -3506,6 +3789,7 @@ func handleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 					"admin_name":     adminName,
 					"claimed_at":     &now,
 					"last_action_at": &now,
+					"remind_count":   0,
 				})
 			if res.Error != nil {
 				return fmt.Errorf("book request claim update failed: %s", formatPlainError(res.Error))
@@ -3564,7 +3848,7 @@ func handleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 			return
 		}
 
-		if req.Status != bookRequestStatusClaimed && req.Status != bookRequestStatusNeedInfo {
+		if !isBookRequestOperableStatus(req.Status) {
 			answerCallback(bot, cb.ID, "该工单当前不能要求补充信息")
 			return
 		}
@@ -3600,7 +3884,7 @@ func handleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 			answerCallback(bot, cb.ID, "工单不存在")
 			return
 		}
-		if req.Status != bookRequestStatusClaimed && req.Status != bookRequestStatusNeedInfo {
+		if !isBookRequestOperableStatus(req.Status) {
 			if cb.Message != nil {
 				if req.AdminChatID == 0 || req.AdminMessageID == 0 {
 					if err := recordBookRequestAdminMessageID(DB, &req, cb.Message.Chat.ID, cb.Message.MessageID); err != nil {
@@ -3640,6 +3924,54 @@ func handleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 		return
 	}
 
+	if reqID, ok := parseBookRequestCallbackID(data, "br_cancel_"); ok {
+		req, found, err := loadBookRequestByID(DB, reqID, "callback cancel")
+		if err != nil {
+			answerCallback(bot, cb.ID, "查询工单失败，请稍后重试")
+			return
+		}
+		if !found {
+			answerCallback(bot, cb.ID, "工单不存在")
+			return
+		}
+
+		if !isBookRequestOperableStatus(req.Status) {
+			if cb.Message != nil {
+				editBookRequestAdminMessage(bot, cb.Message.Chat.ID, cb.Message.MessageID, req, true)
+			}
+			answerCallback(bot, cb.ID, "该工单已处理，已刷新状态")
+			return
+		}
+		if !canOperateBookRequest(req, cb.From.ID) {
+			answerCallback(bot, cb.ID, "只有接单人或超级管理员可以取消")
+			return
+		}
+
+		session := getSession(cb.From.ID)
+		session.SetStep("WAITING_BOOK_CANCEL_REASON")
+		session.SetTemp("book_cancel_req_id", fmt.Sprintf("%d", reqID))
+
+		if cb.Message != nil {
+			session.SetTemp("book_cancel_chat_id", fmt.Sprintf("%d", cb.Message.Chat.ID))
+			session.SetTemp("book_cancel_message_id", fmt.Sprintf("%d", cb.Message.MessageID))
+		}
+
+		UserSessions.Store(cb.From.ID, session)
+
+		refundHint := "本次取消不退还积分（无扣费记录）。"
+		if req.CostPaid > 0 {
+			refundHint = fmt.Sprintf("取消后将退还用户 %d 积分。", req.CostPaid)
+		}
+		answerCallback(bot, cb.ID, "请发送取消原因")
+		sendPlainText(bot, cb.From.ID, fmt.Sprintf(
+			"🚫 请发送求书工单 #%d 的取消原因。\n\n%s\n%s\n发送“取消”可退出。",
+			reqID,
+			adminReasonRequirementText,
+			refundHint,
+		))
+		return
+	}
+
 	status := ""
 
 	if reqID, ok := parseBookRequestCallbackID(data, "br_done_"); ok {
@@ -3670,7 +4002,7 @@ func handleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 		return
 	}
 
-	if req.Status != bookRequestStatusClaimed && req.Status != bookRequestStatusNeedInfo {
+	if !isBookRequestOperableStatus(req.Status) {
 		if cb.Message != nil {
 			if req.AdminChatID == 0 || req.AdminMessageID == 0 {
 				if err := recordBookRequestAdminMessageID(DB, &req, cb.Message.Chat.ID, cb.Message.MessageID); err != nil {
@@ -3693,9 +4025,10 @@ func handleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 	adminName := getTelegramDisplayName(cb.From)
 
 	finished := false
+	refunded := 0
 	err = DB.Transaction(func(tx *gorm.DB) error {
 		res := tx.Model(&BookRequest{}).
-			Where("id = ? AND status IN ?", reqID, []string{bookRequestStatusClaimed, bookRequestStatusNeedInfo}).
+			Where("id = ? AND status IN ?", reqID, bookRequestOperableStatuses()).
 			Updates(map[string]interface{}{
 				"status":         status,
 				"admin_id":       cb.From.ID,
@@ -3710,6 +4043,16 @@ func handleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 			return nil
 		}
 		finished = true
+
+		// 业务规则：暂无资源（rejected）同样退还创建时扣除的积分；已上传不退。
+		if status == bookRequestStatusRejected {
+			amount, err := refundBookRequestInTx(tx, &req, cb.From.ID, adminName, "rejected by admin", now)
+			if err != nil {
+				return err
+			}
+			refunded = amount
+		}
+
 		note := fmt.Sprintf("admin finished book request; status=%s", status)
 		if err := createBookRequestLogInTx(tx, reqID, cb.From.ID, adminName, "finish", oldStatus, status, note); err != nil {
 			return err
@@ -3731,10 +4074,14 @@ func handleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 		log.Printf("book request finish reload failed: req=%d err=%s", reqID, formatPlainError(err))
 	}
 
+	log.Printf("✅ 求书工单处理完成: req=%d status=%s admin=%d refunded=%d", reqID, status, cb.From.ID, refunded)
+
 	sendPlainText(bot, req.UserID, formatBookRequestUserResultText(req))
 	callbackText := "已处理"
 	if status == bookRequestStatusUploaded {
 		callbackText = maybePromptBookRequestGroupAnnouncement(bot, cb.From.ID, req)
+	} else if refunded > 0 {
+		callbackText = fmt.Sprintf("已处理，退还 %d 积分", refunded)
 	}
 
 	currentChatID := int64(0)
@@ -4686,6 +5033,12 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 					))
 				}
 
+				// 刷新管理端工单消息文本，避免停留在旧的“需补充信息”状态。
+				var refreshedReq BookRequest
+				if err := DB.Where("id = ?", needInfoReq.ID).First(&refreshedReq).Error; err == nil {
+					refreshStoredBookRequestAdminMessage(bot, refreshedReq, false, 0, 0)
+				}
+
 				return
 			}
 		}
@@ -5569,6 +5922,132 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 		sendPlainText(bot, chatID, "请回复：确认提交、重新填写，或取消。")
 
+	case "WAITING_BOOK_CANCEL_REASON":
+		if !isBookRequestAdmin(userID) {
+			sendPlainText(bot, chatID, "❌ 权限不足。")
+			clearSession(userID)
+			return
+		}
+
+		cancelReason, ok := validateAdminReason(text)
+		if !ok {
+			sendPlainText(bot, chatID, "❌ "+adminReasonInvalidText)
+			return
+		}
+
+		reqIDRaw := session.GetTemp("book_cancel_req_id")
+		reqID64, err := strconv.ParseUint(reqIDRaw, 10, 64)
+		if err != nil || reqID64 == 0 {
+			sendPlainText(bot, chatID, "❌ 工单编号异常，请重新操作。")
+			clearSession(userID)
+			return
+		}
+
+		reqID := uint(reqID64)
+		adminName := getTelegramDisplayName(msg.From)
+
+		currentReq, found, err := loadBookRequestByID(DB, reqID, "cancel reason input")
+		if err != nil {
+			sendPlainText(bot, chatID, "❌ 查询工单失败，请稍后再试。")
+			return
+		}
+		if !found {
+			sendPlainText(bot, chatID, "❌ 工单不存在，请重新操作。")
+			clearSession(userID)
+			return
+		}
+
+		if !isBookRequestOperableStatus(currentReq.Status) {
+			sendPlainText(bot, chatID, "⚠️ 该工单当前不能取消。")
+			clearSession(userID)
+			return
+		}
+
+		if !canOperateBookRequest(currentReq, userID) {
+			sendPlainText(bot, chatID, "❌ 只有接单人或超级管理员可以取消该工单。")
+			clearSession(userID)
+			return
+		}
+
+		now := time.Now()
+		oldStatus := currentReq.Status
+
+		cancelled := false
+		refunded := 0
+		err = DB.Transaction(func(tx *gorm.DB) error {
+			res := tx.Model(&BookRequest{}).
+				Where("id = ? AND status IN ?", reqID, bookRequestOperableStatuses()).
+				Updates(map[string]interface{}{
+					"status":         bookRequestStatusCancelled,
+					"admin_id":       userID,
+					"admin_name":     adminName,
+					"last_action_at": &now,
+					"completed_at":   &now,
+				})
+			if res.Error != nil {
+				return fmt.Errorf("book request cancel update failed: %s", formatPlainError(res.Error))
+			}
+			if res.RowsAffected == 0 {
+				return nil
+			}
+			cancelled = true
+
+			amount, err := refundBookRequestInTx(tx, &currentReq, userID, adminName, "cancelled by admin: "+cancelReason, now)
+			if err != nil {
+				return err
+			}
+			refunded = amount
+
+			if err := createBookRequestLogInTx(tx, reqID, userID, adminName, "cancel", oldStatus, bookRequestStatusCancelled, cancelReason); err != nil {
+				return err
+			}
+			return writeAuditLogInTx(tx, userID, "CANCEL_BOOK_REQUEST", fmt.Sprintf("%d", reqID), 0, "admin cancelled book request; reason="+cancelReason)
+		})
+		if err != nil {
+			log.Printf("book request cancel failed: req=%d admin=%d err=%s", reqID, userID, formatPlainError(err))
+			sendPlainText(bot, chatID, "❌ 取消工单失败，请稍后再试。")
+			return
+		}
+
+		if !cancelled {
+			sendPlainText(bot, chatID, "⚠️ 该工单状态已变化，无法取消，请查看最新状态。")
+			clearSession(userID)
+			return
+		}
+
+		var updatedReq BookRequest
+		adminMsgChatID := int64(0)
+		adminMsgID := 0
+		if err := reloadBookRequestAfterFinish(DB, &updatedReq, reqID, bookRequestStatusCancelled, userID, adminName, now); err == nil {
+			chatIDRaw := session.GetTemp("book_cancel_chat_id")
+			msgIDRaw := session.GetTemp("book_cancel_message_id")
+
+			chatID64, chatParseErr := strconv.ParseInt(chatIDRaw, 10, 64)
+			msgID64, msgParseErr := strconv.ParseInt(msgIDRaw, 10, 64)
+			if chatParseErr == nil && msgParseErr == nil {
+				adminMsgChatID = chatID64
+				adminMsgID = int(msgID64)
+			}
+
+			if adminMsgChatID != 0 && adminMsgID != 0 {
+				editBookRequestAdminMessage(bot, adminMsgChatID, adminMsgID, updatedReq, true)
+			}
+			refreshStoredBookRequestAdminMessage(bot, updatedReq, true, adminMsgChatID, adminMsgID)
+		}
+
+		refundText := "本次取消未产生积分退还。"
+		if refunded > 0 {
+			refundText = fmt.Sprintf("已退还 %d 积分。", refunded)
+		}
+		sendPlainText(bot, chatID, fmt.Sprintf("✅ 已取消求书工单 #%d，%s", reqID, refundText))
+		sendPlainText(bot, updatedReq.UserID, fmt.Sprintf(
+			"📚 你的求书 #%d 已被管理员取消。\n\n原因：%s\n\n%s",
+			reqID,
+			cancelReason,
+			refundText,
+		))
+		clearSession(userID)
+
 	case "WAITING_BOOK_ADMIN_NOTE":
 		if !isBookRequestAdmin(userID) {
 			sendPlainText(bot, chatID, "❌ 权限不足。")
@@ -5608,7 +6087,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		if currentReq.Status != bookRequestStatusClaimed && currentReq.Status != bookRequestStatusNeedInfo {
+		if !isBookRequestOperableStatus(currentReq.Status) {
 			sendPlainText(bot, chatID, "⚠️ 该工单当前不能添加备注。")
 			clearSession(userID)
 			return
@@ -5625,7 +6104,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		noteSaved := false
 		err = DB.Transaction(func(tx *gorm.DB) error {
 			res := tx.Model(&BookRequest{}).
-				Where("id = ? AND status IN ?", reqID, []string{bookRequestStatusClaimed, bookRequestStatusNeedInfo}).
+				Where("id = ? AND status IN ?", reqID, bookRequestOperableStatuses()).
 				Updates(map[string]interface{}{
 					"admin_note":     adminNote,
 					"admin_id":       userID,
@@ -5717,7 +6196,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		if currentReq.Status != bookRequestStatusClaimed && currentReq.Status != bookRequestStatusNeedInfo {
+		if !isBookRequestOperableStatus(currentReq.Status) {
 			sendPlainText(bot, chatID, "⚠️ 该工单当前不能要求补充信息。")
 			clearSession(userID)
 			return
@@ -5734,13 +6213,18 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		needInfoSaved := false
 		err = DB.Transaction(func(tx *gorm.DB) error {
 			res := tx.Model(&BookRequest{}).
-				Where("id = ? AND status IN ?", reqID, []string{bookRequestStatusClaimed, bookRequestStatusNeedInfo}).
+				Where("id = ? AND status IN ?", reqID, bookRequestOperableStatuses()).
 				Updates(map[string]interface{}{
-					"status":         bookRequestStatusNeedInfo,
-					"admin_note":     needInfoNote,
-					"admin_id":       userID,
-					"admin_name":     adminName,
+					"status":     bookRequestStatusNeedInfo,
+					"admin_note": needInfoNote,
+					"admin_id":   userID,
+					"admin_name": adminName,
+					// 接管语义：要求补充信息的管理员成为当前接单人，
+					// 保证用户补充后通知发到实际跟进人（canOperateBookRequest 同样按 assignee 判定）。
+					"assignee_id":    userID,
+					"assignee_name":  adminName,
 					"last_action_at": &now,
+					"remind_count":   0,
 				})
 			if res.Error != nil {
 				return fmt.Errorf("book request need info update failed: %s", formatPlainError(res.Error))

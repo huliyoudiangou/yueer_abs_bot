@@ -82,6 +82,10 @@ func runBackgroundSchedulerTickSafely(bot *tgbotapi.BotAPI) {
 	}
 
 	now := time.Now()
+
+	// 求书工单滞留巡检：自带 1 小时节流，不依赖每日运营窗口（超时阈值需要小时级精度）。
+	runBookRequestStalePatrolIfNeeded(bot, now)
+
 	if !isDailyOperationsWindowOpen(now) {
 		return
 	}

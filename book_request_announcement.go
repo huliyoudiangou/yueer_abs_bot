@@ -457,7 +457,7 @@ func maybePromptBookRequestGroupAnnouncement(bot *tgbotapi.BotAPI, adminID int64
 	if bot == nil || absClient == nil || AppConfig == nil || AppConfig.NoticeGroupID == 0 {
 		return "已处理，未配置大群公告"
 	}
-	if req.Status != bookRequestStatusUploaded && req.Status != bookRequestStatusCompleted {
+	if !isBookRequestUploadedStatus(req.Status) {
 		return "已处理"
 	}
 
@@ -1012,7 +1012,7 @@ func loadOperableBookRequestAnnouncement(bot *tgbotapi.BotAPI, cb *tgbotapi.Call
 		answerCallback(bot, cb.ID, "工单不存在")
 		return BookRequest{}, false
 	}
-	if req.Status != bookRequestStatusUploaded && req.Status != bookRequestStatusCompleted {
+	if !isBookRequestUploadedStatus(req.Status) {
 		answerCallback(bot, cb.ID, "该工单尚未标记已上传")
 		return BookRequest{}, false
 	}

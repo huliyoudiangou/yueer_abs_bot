@@ -901,7 +901,13 @@ func (PaiGowBet) TableName() string {
 // need_info = 需要用户补充信息
 // uploaded  = 已上传
 // rejected  = 暂无资源
-// cancelled = 已取消
+// cancelled = 已取消（用户撤回 / 管理员取消 / need_info 超时自动取消）
+//
+// 退款规则：
+// cancelled 与 rejected 均按 CostPaid 退还积分；uploaded 不退。
+// CostPaid 为创建工单时实际扣除的积分（按用户当时档位记录，退款时不按当前档位重算）。
+// RefundedAt 非空表示已退还，防止重复退款。
+// RemindCount 为当前阶段的滞留提醒次数，状态发生转移时重置为 0。
 type BookRequest struct {
 	gorm.Model
 
@@ -914,6 +920,8 @@ type BookRequest struct {
 
 	Status string `gorm:"index;not null;default:'pending'"`
 
+	// AdminID/AdminName：处理该工单的管理员。对无管理员参与的取消（用户自行取消 /
+	// 超时自动取消），AdminName 记录取消来源文案（“用户取消”/“系统超时取消”），仅用于展示。
 	AdminID   int64
 	AdminName string
 
@@ -926,6 +934,11 @@ type BookRequest struct {
 	AdminMessageID int
 
 	CompletedAt *time.Time
+
+	CostPaid     int        `gorm:"not null;default:0"`
+	RefundedAt   *time.Time `gorm:"index"`
+	RemindCount  int        `gorm:"not null;default:0"`
+	LastRemindAt *time.Time
 }
 
 func (BookRequest) TableName() string {
@@ -1827,6 +1840,25 @@ func runConsistencyMigrations() {
 	mustExecMigration(`
 		CREATE INDEX IF NOT EXISTS idx_book_requests_assignee_status
 		ON book_requests(assignee_id, status);
+	`)
+
+	// 存量工单回填创建时的实际扣费金额：从积分流水取创建时的扣费记录。
+	// 回填不中的（流水缺失/被删）保持 0，退款逻辑对 0 金额跳过并记录日志，不猜测金额。
+	// 该语句幂等：只更新 cost_paid = 0 的行，可在每次启动时安全执行。
+	mustExecMigration(`
+		UPDATE book_requests
+		SET cost_paid = COALESCE((
+			SELECT -pt.delta
+			FROM point_transactions pt
+			WHERE pt.ref_type = 'book_request'
+			  AND pt.ref_id = CAST(book_requests.id AS TEXT)
+			  AND pt.type = 'book_request_cost'
+			  AND pt.deleted_at IS NULL
+			ORDER BY pt.id
+			LIMIT 1
+		), 0)
+		WHERE cost_paid = 0
+		  AND deleted_at IS NULL;
 	`)
 
 	mustExecMigration(`
