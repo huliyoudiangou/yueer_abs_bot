@@ -10122,20 +10122,9 @@ func loadActiveRaceBetsSnapshot(raceID string) (map[int64]*PlayerBet, int, error
 	return snapshot, totalPool, nil
 }
 
-func calculateHorseRaceBetRange(avgPoints float64) (int, int) {
-	minBet := int(avgPoints * 0.03)
-	maxBet := int(avgPoints * 0.15)
-
-	if minBet < 3 {
-		minBet = 3
-	}
-	if maxBet < 15 {
-		maxBet = 15
-	}
-	if maxBet > 500 {
-		maxBet = 500
-	}
-	return minBet, maxBet
+func calculateHorseRaceBetRange(_ float64) (int, int) {
+	// 赛马下注限额固定为 3-15 积分，不随全服平均积分变化。
+	return 3, 15
 }
 
 // ==========================================
@@ -10986,14 +10975,7 @@ func handleHorseRace(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 
-		var avgPoints float64
-		if err := DB.Model(&User{}).Where("points > 0").Select("avg(points)").Scan(&avgPoints).Error; err != nil {
-			globalRace.Mu.Unlock()
-			log.Printf("⚠️ 赛马平均积分查询失败: chat=%d err=%s", chatID, formatPlainError(err))
-			sendGroupAutoDeleteMessage(bot, chatID, "❌ 赛马场暂时无法计算下注范围，请稍后重试。")
-			return
-		}
-		minBet, maxBet := calculateHorseRaceBetRange(avgPoints)
+		minBet, maxBet := calculateHorseRaceBetRange(0)
 
 		globalRace.RaceID = fmt.Sprintf("RACE-%d-%s", chatID, generateRandomCode(8))
 		globalRace.IsActive = true
@@ -11049,7 +11031,7 @@ func handleHorseRace(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			return
 		}
 		if points < minBet {
-			sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("❌ @%s 根据汇率，最低下注额为 **%d** 积分哦！", safeName, minBet))
+			sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("❌ @%s 本局最低下注额为 **%d** 积分！", safeName, minBet))
 			return
 		}
 		if points > maxBet {
