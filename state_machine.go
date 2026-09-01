@@ -10179,17 +10179,13 @@ func isDiceBetCommand(text string) bool {
 }
 
 func isDiceOpenTime(now time.Time) bool {
-	loc := time.FixedZone("CST", 8*3600)
-	local := now.In(loc)
-	minutes := local.Hour()*60 + local.Minute()
-	return minutes < 17*60+55 || (minutes >= 22*60+5 && minutes < 24*60)
+	// 三界骰局已改为全天开放。
+	return true
 }
 
 func isRaceOpenTime(now time.Time) bool {
-	loc := time.FixedZone("CST", 8*3600)
-	local := now.In(loc)
-	minutes := local.Hour()*60 + local.Minute()
-	return minutes >= 18*60 && minutes < 19*60+55
+	// 赛马已改为全天开放。
+	return true
 }
 
 func diceDayKey(t time.Time) string {
@@ -10371,7 +10367,14 @@ func handleDiceGame(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 	if text == "发起骰子" {
 		if !isDiceOpenTime(time.Now()) {
-			sendGroupAutoDeleteMessage(bot, chatID, "⏳ **三界骰局尚未开放！**\n\n开放时间为 **22:05 - 次日 17:55**，18:00-19:55 为赛马时段，20:00-22:00 为推牌九时段。")
+			sendGroupAutoDeleteMessage(bot, chatID, "⏳ **三界骰局尚未开放！**\n\n三界骰局现已全天开放，请稍后重试。")
+			return
+		}
+
+		casualUnlock := lockCasualGameChat(chatID)
+		defer casualUnlock()
+		if other, ok := casualGameActiveInChat(chatID, casualGameDice); ok {
+			sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("⚠️ 当前已有 **%s** 正在进行，请等它结束后再发起三界骰局！", casualGameDisplayName(other)))
 			return
 		}
 
@@ -10416,7 +10419,7 @@ func handleDiceGame(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		globalDice.Mu.Lock()
 		if !globalDice.IsActive {
 			globalDice.Mu.Unlock()
-			sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("✋ @%s 当前没有开放中的骰局，请发送 `发起骰子` 开启新一局！", safeName))
+			sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("✋ @%s 当前没有进行中的骰局，全天开放，请发送 `发起骰子` 开启新一局！", safeName))
 			return
 		}
 		if globalDice.IsRolling {
@@ -10958,7 +10961,14 @@ func handleHorseRace(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	// 发起赛马
 	if text == "发起赛马" {
 		if !isRaceOpenTime(time.Now()) {
-			sendGroupAutoDeleteMessage(bot, chatID, "⏳ **赛马场关门啦！**\n\n营业时间为每日 **18:00 - 19:55**，推牌九黄金档前预留 5 分钟缓冲。")
+			sendGroupAutoDeleteMessage(bot, chatID, "⏳ **赛马场关门啦！**\n\n赛马现已全天开放，请稍后重试。")
+			return
+		}
+
+		casualUnlock := lockCasualGameChat(chatID)
+		defer casualUnlock()
+		if other, ok := casualGameActiveInChat(chatID, casualGameRace); ok {
+			sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("⚠️ 当前已有 **%s** 正在进行，请等它结束后再发起赛马！", casualGameDisplayName(other)))
 			return
 		}
 
@@ -11006,7 +11016,7 @@ func handleHorseRace(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		globalRace.Mu.Lock()
 		if !globalRace.IsActive {
 			globalRace.Mu.Unlock()
-			sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("✋ @%s 赛马场当前未开放，请发送 `发起赛马` 开启新一局！", safeName))
+			sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("✋ @%s 当前没有进行中的赛马，全天开放，请发送 `发起赛马` 开启新一局！", safeName))
 			return
 		}
 		if globalRace.IsRacing {

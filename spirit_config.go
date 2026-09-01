@@ -35,6 +35,30 @@ var QualitySuppressRate = map[string]float64{
 	"凡": 0.00, "灵": 0.03, "玄": 0.06, "地": 0.09, "天": 0.12, "圣": 0.16,
 }
 
+// ==========================================
+// 吞噬配置（2026-09 新增）
+// 宿主吞噬其他灵侍换取属性点：单只按被吞品阶取点数，星级每 +1 额外 +1；
+// 属性点按宿主五维一级基础值比例分配，直接并入基础属性（随等级/星级成长放大）。
+// 点数表为设计推断项，待运营调参。
+// ==========================================
+
+// DevourPointsByQuality 单只被吞灵侍的属性点预算（按品阶）
+var DevourPointsByQuality = map[string]int{
+	"凡": 2, "灵": 4, "玄": 8, "地": 16, "天": 32, "圣": 64,
+}
+
+// DevourPointsFor 被吞灵侍（品阶+星级）折算的属性点预算
+func DevourPointsFor(quality string, star int) int {
+	base, ok := DevourPointsByQuality[quality]
+	if !ok || base < 1 {
+		base = DevourPointsByQuality["凡"]
+	}
+	if star < 1 {
+		star = 1
+	}
+	return base + star - 1
+}
+
 // 境界加权：修为境界对灵侍能力加成
 var CultivationPowerWeight = map[int]float64{
 	0: 0.00, 1: 0.03, 2: 0.06, 3: 0.09, 4: 0.12, 5: 0.15,

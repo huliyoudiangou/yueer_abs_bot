@@ -77,10 +77,8 @@ func isPaiGowBetCommand(text string) bool {
 }
 
 func isPaiGowOpenTime(now time.Time) bool {
-	loc := time.FixedZone("CST", 8*3600)
-	local := now.In(loc)
-	minutes := local.Hour()*60 + local.Minute()
-	return minutes >= 20*60 && minutes < 22*60
+	// 推牌九已改为全天开放。
+	return true
 }
 
 func createPaiGowBetInTx(tx *gorm.DB, bet *PaiGowBet) error {
@@ -244,7 +242,14 @@ func handlePaiGowGame(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 func handlePaiGowStart(bot *tgbotapi.BotAPI, chatID int64, state *PaiGowState) {
 	if !isPaiGowOpenTime(time.Now()) {
-		sendGroupAutoDeleteMessage(bot, chatID, "⏳ **推牌九尚未开放！**\n\n开放时间为每晚 **20:00 - 22:00**，请在黄金档再来哦！")
+		sendGroupAutoDeleteMessage(bot, chatID, "⏳ **推牌九尚未开放！**\n\n推牌九现已全天开放，请稍后重试。")
+		return
+	}
+
+	casualUnlock := lockCasualGameChat(chatID)
+	defer casualUnlock()
+	if other, ok := casualGameActiveInChat(chatID, casualGamePaiGow); ok {
+		sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("⚠️ 当前已有 **%s** 正在进行，请等它结束后再发起推牌九！", casualGameDisplayName(other)))
 		return
 	}
 
@@ -273,7 +278,7 @@ func handlePaiGowStart(bot *tgbotapi.BotAPI, chatID int64, state *PaiGowState) {
 		"庄家：天机阁坐庄\n" +
 		"下注期：60 秒，买定离手\n" +
 		"下注范围：`1` - `5` 积分\n" +
-		"开放时段：20:00 - 22:00\n" +
+		"开放时段：全天开放\n" +
 		"下注格式：`押 3`\n\n" +
 		"牌规：52 张扑克牌，无大小王；A=1，2-9 按牌面，10/J/Q/K=0。\n" +
 		"计点：每人两张牌相加取个位，9 点最大，不存在 9 点半。\n" +
@@ -288,7 +293,7 @@ func handlePaiGowStatus(bot *tgbotapi.BotAPI, chatID int64, state *PaiGowState) 
 	state.Mu.Lock()
 	defer state.Mu.Unlock()
 	if !state.IsActive {
-		sendGroupAutoDeleteMessage(bot, chatID, "🃏 当前没有进行中的推牌九。开放时间：每晚 **20:00 - 22:00**。")
+		sendGroupAutoDeleteMessage(bot, chatID, "🃏 当前没有进行中的推牌九。全天开放，随时可发送 `发起牌九` 开启新一局！")
 		return
 	}
 	status := "下注中"
@@ -355,7 +360,7 @@ func handlePaiGowBet(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, chatID int64, 
 	state.Mu.Lock()
 	if !state.IsActive {
 		state.Mu.Unlock()
-		sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("✋ @%s 当前没有开放中的推牌九，请在 20:00-22:00 发送 `发起牌九` 开启新一局！", safeName))
+		sendGroupAutoDeleteMessage(bot, chatID, fmt.Sprintf("✋ @%s 当前没有进行中的推牌九，全天开放，请发送 `发起牌九` 开启新一局！", safeName))
 		return
 	}
 	if state.IsDealing {

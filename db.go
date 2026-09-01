@@ -543,6 +543,26 @@ func (ServantStarUpLog) TableName() string {
 	return "servant_starup_logs"
 }
 
+// 灵侍吞噬记录（宿主吞噬其他灵侍的属性转化审计）
+type ServantDevourLog struct {
+	gorm.Model
+	UserID        int64  `gorm:"index;not null"`
+	HostID        uint   `gorm:"index;not null"` // 宿主灵侍ID
+	HostName      string // 宿主名
+	DevouredCount int    `gorm:"not null"` // 被吞噬数量
+	Points        int    // 属性点总量
+	HPGain        int    // 气血增量
+	ATKGain       int    // 攻击增量
+	DEFGain       int    // 防御增量
+	SPDGain       int    // 速度增量
+	MAGGain       int    // 灵识增量
+	Remark        string // 备注（品阶分布，如"吞噬15只[凡×8 灵×5 玄×2]"）
+}
+
+func (ServantDevourLog) TableName() string {
+	return "servant_devour_logs"
+}
+
 // 灵侍装备（Phase 1仅2槽：兵甲/魂魄）
 type ServantEquipment struct {
 	gorm.Model
@@ -1097,6 +1117,7 @@ func InitDB() {
 		&UserLingjingBalance{},
 		&LingjingTransaction{},
 		&ServantStarUpLog{},
+		&ServantDevourLog{},
 		&ServantEquipment{},
 		&DailyLingjingQuota{},
 		&SectBeastContribution{},
@@ -1123,6 +1144,19 @@ func InitDB() {
 	// 老库的 20260105 播种迁移已跑完、不会重跑，故必须由本迁移再次幂等播种并修正化神行。
 	runOneTimeMigration("20260818_cultivation_realm_extension", func() error {
 		return migrateCultivationRealmExtension(DB)
+	})
+	// 灵侍星级成长倍率上线（2026-09）：旧口径（星级不参与属性/战力缩放）上架的镜场镜像快照
+	// 一次性置为过期，消除过渡期（≤24h）攻防战力口径偏差；镜像本为 24h 临时快照，
+	// 失效后用户重新「上架镜像」即可，无资产损失。
+	runOneTimeMigration("20260901_spirit_star_growth_expire_mirrors", func() error {
+		res := DB.Model(&SpiritMirror{}).
+			Where("expires_at > ?", time.Now()).
+			Update("expires_at", time.Now())
+		if res.Error != nil {
+			return res.Error
+		}
+		log.Printf("[灵侍] 星级成长上线：旧口径镜场镜像已全部置为过期 rows=%d", res.RowsAffected)
+		return nil
 	})
 	// 第二阶段：数据一致性迁移。
 	// 先清理历史重复数据，再创建唯一索引。

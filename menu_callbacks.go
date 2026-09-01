@@ -132,9 +132,9 @@ func handleMenuCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool {
 		answerCallback(bot, cb.ID, "请前往群内操作")
 		tip := "请前往官方群内发送对应指令。"
 		if parts[2] == "race" {
-			tip = "🏇 赛马需在群内进行，请在开放时间发送 `发起赛马`。"
+			tip = "🏇 赛马需在群内进行，全天开放，请发送 `发起赛马`。"
 		} else if parts[2] == "dice" {
-			tip = "🎲 骰子需在群内进行，请在群内发送 `发起骰子`。"
+			tip = "🎲 骰子需在群内进行，全天开放，请在群内发送 `发起骰子`。"
 		}
 		sendPlainText(bot, cb.Message.Chat.ID, tip)
 	default:

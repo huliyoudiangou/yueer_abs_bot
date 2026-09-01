@@ -389,6 +389,23 @@ func getServantNameByID(userID int64, servantID uint) string {
 	return s.Name
 }
 
+// equippedServantIDSet 已穿戴装备的灵侍ID集合（吞噬/升星等消耗类操作需排除，防装备随灵侍一起消失）
+// q 为 DB 句柄：面板传 db，事务内传 tx。
+// 查询失败必须返回 error：消耗类操作调用方收到错误后中止（fail-closed），
+// 不得按空集合继续销毁，防止装备随灵侍静默丢失。
+func equippedServantIDSet(q *gorm.DB, userID int64) (map[uint]bool, error) {
+	var eqs []ServantEquipment
+	if err := q.Select("servant_id").
+		Where("user_id = ? AND servant_id <> 0", userID).Find(&eqs).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[uint]bool, len(eqs))
+	for i := range eqs {
+		out[eqs[i].ServantID] = true
+	}
+	return out, nil
+}
+
 // equipmentStatLine 装备属性展示行
 func equipmentStatLine(eq *ServantEquipment) string {
 	parts := []string{}

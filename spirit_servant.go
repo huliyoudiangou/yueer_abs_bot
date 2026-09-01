@@ -3,7 +3,10 @@ package main
 import (
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
+	"sort"
+	"strings"
 
 	"gorm.io/gorm"
 )
@@ -98,6 +101,11 @@ func applyBaseStat(quality string, base int) int {
 // 数据库存储的 HP/ATK/DEF/SPD/MAG 恒为一级基础值，战斗/战力走缩放函数
 const levelGrowthPerLevel = 0.02
 
+// starGrowthPerStar 星级成长：每星 +5% 一级基础值（线性累计，不叠加）
+// 与等级倍率在缩放函数中相乘（唯一缩放点），保证升星对战力/战斗的实际感知；
+// 数值为设计推断项，待运营调参。
+const starGrowthPerStar = 0.05
+
 // LevelGrowthMult 指定等级的属性倍率（Lv.1 = 1.0，Lv.11 = 1.20，Lv.91 = 2.80）
 func LevelGrowthMult(level int) float64 {
 	if level < 1 {
@@ -106,12 +114,30 @@ func LevelGrowthMult(level int) float64 {
 	return 1 + levelGrowthPerLevel*float64(level-1)
 }
 
-// 等级缩放属性（战力/战斗引擎共享口径）
-func ScaledHP(s *UserSpiritServant) int  { return int(float64(s.HP) * LevelGrowthMult(s.Level)) }
-func ScaledATK(s *UserSpiritServant) int { return int(float64(s.ATK) * LevelGrowthMult(s.Level)) }
-func ScaledDEF(s *UserSpiritServant) int { return int(float64(s.DEF) * LevelGrowthMult(s.Level)) }
-func ScaledSPD(s *UserSpiritServant) int { return int(float64(s.SPD) * LevelGrowthMult(s.Level)) }
-func ScaledMAG(s *UserSpiritServant) int { return int(float64(s.MAG) * LevelGrowthMult(s.Level)) }
+// StarGrowthMult 指定星级的属性倍率（1星 = 1.0，3星 = 1.10，9星 = 1.40）
+func StarGrowthMult(star int) float64 {
+	if star < 1 {
+		star = 1
+	}
+	return 1 + starGrowthPerStar*float64(star-1)
+}
+
+// 等级+星级缩放属性（战力/战斗引擎共享口径）：DB 存一级基础值，缩放 = 基础 × 等级倍率 × 星级倍率
+func ScaledHP(s *UserSpiritServant) int {
+	return int(float64(s.HP) * LevelGrowthMult(s.Level) * StarGrowthMult(s.Star))
+}
+func ScaledATK(s *UserSpiritServant) int {
+	return int(float64(s.ATK) * LevelGrowthMult(s.Level) * StarGrowthMult(s.Star))
+}
+func ScaledDEF(s *UserSpiritServant) int {
+	return int(float64(s.DEF) * LevelGrowthMult(s.Level) * StarGrowthMult(s.Star))
+}
+func ScaledSPD(s *UserSpiritServant) int {
+	return int(float64(s.SPD) * LevelGrowthMult(s.Level) * StarGrowthMult(s.Star))
+}
+func ScaledMAG(s *UserSpiritServant) int {
+	return int(float64(s.MAG) * LevelGrowthMult(s.Level) * StarGrowthMult(s.Star))
+}
 
 func GetBattlePower(s *UserSpiritServant) int {
 	total := ScaledHP(s) + ScaledATK(s) + ScaledDEF(s) + ScaledSPD(s) + ScaledMAG(s)
@@ -169,7 +195,7 @@ func FeedSpirit(tx *gorm.DB, userID int64, servantID uint, amount int) (int, err
 //   - 万能真身碎片（useItem=itemTypeShard）：段3，替代「同名」要求——
 //     祭品仅需同品质 + 同星级（不限属性/名称），消耗 1 碎片
 //
-// 祭品不能是自己/已锁定/出战中；成功后等级重置为 1，祭品被消耗（软删除）
+// 祭品不能是自己/已锁定/出战中/穿戴装备；成功后等级重置为 1，祭品被消耗（软删除，其功法修习一并清理）
 func StarUpgrade(tx *gorm.DB, userID int64, targetServantID uint, sacrificeIDs []uint, useItem string) error {
 	var target UserSpiritServant
 	if err := tx.Where("id = ? AND user_id = ?", targetServantID, userID).First(&target).Error; err != nil {
@@ -224,6 +250,12 @@ func StarUpgrade(tx *gorm.DB, userID int64, targetServantID uint, sacrificeIDs [
 			}
 			seen[sid] = true
 		}
+		// 已穿戴装备的灵侍不能作祭品（防装备随祭品一起消失，与吞噬口径一致）
+		// fail-closed：装备状态查询失败时中止升星，不得按无装备继续销毁
+		equipped, eqErr := equippedServantIDSet(tx, userID)
+		if eqErr != nil {
+			return fmt.Errorf("装备状态查询失败，已中止升星")
+		}
 
 		for _, sid := range sacrificeIDs {
 			if sid == targetServantID {
@@ -233,11 +265,8 @@ func StarUpgrade(tx *gorm.DB, userID int64, targetServantID uint, sacrificeIDs [
 			if err := tx.Where("id = ? AND user_id = ?", sid, userID).First(&sacrifice).Error; err != nil {
 				return fmt.Errorf("祭品无效：%d", sid)
 			}
-			if sacrifice.IsLocked {
-				return fmt.Errorf("祭品已锁定不能消耗")
-			}
-			if sacrifice.IsDeployed {
-				return fmt.Errorf("出战中的祭品不能消耗")
+			if reason := servantConsumeBlockReason(&sacrifice, equipped); reason != "" {
+				return fmt.Errorf("祭品不可消耗：%s", reason)
 			}
 			if useItem == itemTypeShard {
 				// 碎片路径：同品质 + 同星级（不限属性/名称）
@@ -277,11 +306,15 @@ func StarUpgrade(tx *gorm.DB, userID int64, targetServantID uint, sacrificeIDs [
 			}
 		}
 
-		// 消耗祭品
-		for _, sid := range sacrificeIDs {
-			if err := tx.Where("id = ? AND user_id = ?", sid, userID).Delete(&UserSpiritServant{}).Error; err != nil {
-				return fmt.Errorf("删除祭品失败")
-			}
+		// 消耗祭品（批量软删除；前述校验已确认全部有效）
+		del := tx.Where("user_id = ? AND id IN ?", userID, sacrificeIDs).Delete(&UserSpiritServant{})
+		if del.Error != nil || int(del.RowsAffected) != len(sacrificeIDs) {
+			return fmt.Errorf("删除祭品失败")
+		}
+		// 清理祭品的功法修习（软删除保留审计；装备已前置排除，不会随祭品消失）
+		if err := tx.Where("user_id = ? AND servant_id IN ?", userID, sacrificeIDs).
+			Delete(&ServantManualStudy{}).Error; err != nil {
+			return fmt.Errorf("祭品功法清理失败")
 		}
 	}
 
@@ -327,9 +360,14 @@ func ListShardSacrifices(userID int64, target *UserSpiritServant) []UserSpiritSe
 		Order("id asc").Find(&cands).Error; err != nil {
 		return nil
 	}
+	equipped, err := equippedServantIDSet(db, userID)
+	if err != nil {
+		log.Printf("[灵侍] 碎片祭品装备状态查询失败 user=%d err=%s", userID, formatTelegramSendError(err))
+		return nil
+	}
 	var out []UserSpiritServant
 	for _, c := range cands {
-		if c.ID == target.ID || c.IsLocked || c.IsDeployed {
+		if c.ID == target.ID || c.IsLocked || c.IsDeployed || equipped[c.ID] {
 			continue
 		}
 		if c.Quality == target.Quality && c.Star == target.Star {
@@ -352,17 +390,36 @@ func StarUpStage(nextStar int) int {
 	}
 }
 
-// StarUpRequirementText 下一次升星的祭品需求说明
+// StarUpRequirementText 下一次升星的需求说明（明确当前星级 → 目标星级，以及祭品星级要求）
 func StarUpRequirementText(t *UserSpiritServant) string {
 	nextStar := t.Star + 1
 	switch {
 	case nextStar <= 3:
-		return fmt.Sprintf("祭品：1 只同品阶（%s）、同属性（%s）灵侍，不限星级", t.Quality, t.Attribute)
+		return fmt.Sprintf("本次升星：⭐%d → ⭐%d（需 1 只祭品）\n祭品要求：同品阶（%s）+ 同属性（%s），祭品星级不限",
+			t.Star, nextStar, t.Quality, t.Attribute)
 	case nextStar <= 6:
-		return fmt.Sprintf("祭品：1 只同品阶（%s）、同属性（%s）、同星级（%d星）灵侍", t.Quality, t.Attribute, t.Star)
+		return fmt.Sprintf("本次升星：⭐%d → ⭐%d（需 1 只祭品）\n祭品要求：同品阶（%s）+ 同属性（%s）+ 祭品星级必须为 %d 星（与当前星级相同）",
+			t.Star, nextStar, t.Quality, t.Attribute, t.Star)
 	default:
-		return fmt.Sprintf("祭品：1 只同名（%s）、同星级（%d星）灵侍", t.Name, t.Star)
+		return fmt.Sprintf("本次升星：⭐%d → ⭐%d（需 1 只祭品）\n祭品要求：同名（%s）+ 祭品星级必须为 %d 星（与当前星级相同，属性不限）",
+			t.Star, nextStar, t.Name, t.Star)
 	}
+}
+
+// StarUpBreakEvenLevel 升星后（等级重置为 1）重新喂养至该等级，
+// 战力（不含装备/功法口径）即可超越升星前；升星必获星级倍率，故回本等级恒 ≤ 升星前等级
+func StarUpBreakEvenLevel(oldLevel, oldStar, newStar int) int {
+	oldMult := LevelGrowthMult(oldLevel) * StarGrowthMult(oldStar)
+	newMult := StarGrowthMult(newStar)
+	if newMult <= 0 {
+		return 1
+	}
+	need := oldMult / newMult
+	lv := int(math.Ceil(1 + (need-1)/levelGrowthPerLevel))
+	if lv < 1 {
+		lv = 1
+	}
+	return lv
 }
 
 // ListStarUpSacrifices 列出下一星可用的祭品（排除自己/锁定/出战中，按段规则过滤，战力高→低）
@@ -373,9 +430,14 @@ func ListStarUpSacrifices(userID int64, target *UserSpiritServant) []UserSpiritS
 		return nil
 	}
 	nextStar := target.Star + 1
+	equipped, err := equippedServantIDSet(db, userID)
+	if err != nil {
+		log.Printf("[灵侍] 升星候选装备状态查询失败 user=%d err=%s", userID, formatTelegramSendError(err))
+		return nil
+	}
 	var out []UserSpiritServant
 	for _, c := range cands {
-		if c.ID == target.ID || c.IsLocked || c.IsDeployed {
+		if c.ID == target.ID || c.IsLocked || c.IsDeployed || equipped[c.ID] {
 			continue
 		}
 		var ok bool
@@ -447,4 +509,242 @@ func toggleTeamDeploy(q *gorm.DB, userID int64, servantID uint) (string, error) 
 		return "", err
 	}
 	return fmt.Sprintf("⚔️ %s 已上阵", target.Name), nil
+}
+
+// servantConsumeBlockReason 灵侍能否被消耗（升星祭品 / 吞噬 等销毁性操作共用口径）。
+// 返回空串表示可消耗；否则返回用户可读的拒绝原因。
+// equipped 必须来自 equippedServantIDSet（fail-closed，查询失败调用方须中止）。
+// 未来若开放灵侍交易/转移，必须在此单点追加「上架中不可消耗」互斥，避免各消耗路径遗漏。
+func servantConsumeBlockReason(s *UserSpiritServant, equipped map[uint]bool) string {
+	switch {
+	case s == nil:
+		return "灵侍不存在"
+	case s.IsLocked:
+		return s.Name + " 已锁定"
+	case s.IsDeployed:
+		return s.Name + " 出战中"
+	case equipped[s.ID]:
+		return s.Name + " 穿戴着装备（需先卸下）"
+	}
+	return ""
+}
+
+// ==========================================
+// 吞噬（2026-09 新增）：宿主吞噬其他灵侍换取属性点
+// 规则：
+//   - 任意品阶/属性的灵侍均可被吞噬；出战中、已锁定、宿主自身、穿戴装备的不可被吞噬
+//   - 每只被吞灵侍按品阶+星级折算属性点（DevourPointsFor，spirit_config.go）
+//   - 属性点按宿主五维一级基础值比例分配（最大余数法），并入基础属性（随等级/星级成长放大）
+//   - 全程事务 + 写 ServantDevourLog 审计；调用方需持有用户锁（回调链约定）
+// ==========================================
+
+// distributeDevourPoints 将属性点按宿主五维一级基础值比例分配（最大余数法，保持属性结构不失真）
+func distributeDevourPoints(host *UserSpiritServant, points int) (hp, atk, def, spd, mag int) {
+	if host == nil || points <= 0 {
+		return 0, 0, 0, 0, 0
+	}
+	base := [5]int{host.HP, host.ATK, host.DEF, host.SPD, host.MAG}
+	total := 0
+	for _, v := range base {
+		if v > 0 {
+			total += v
+		}
+	}
+	floors := [5]int{}
+	remain := points
+	if total <= 0 {
+		// 异常兜底：宿主无基础值时五维轮流平分（必须把 points 全部分完，不得静默丢失）
+		for i := 0; remain > 0; i = (i + 1) % 5 {
+			floors[i]++
+			remain--
+		}
+	} else {
+		exact := [5]float64{}
+		for i, v := range base {
+			if v <= 0 {
+				continue
+			}
+			exact[i] = float64(points) * float64(v) / float64(total)
+			floors[i] = int(exact[i])
+			remain -= floors[i]
+		}
+		order := []int{0, 1, 2, 3, 4}
+		sort.SliceStable(order, func(i, j int) bool {
+			return exact[order[i]]-float64(floors[order[i]]) > exact[order[j]]-float64(floors[order[j]])
+		})
+		for i := 0; remain > 0 && i < 5; i++ { // 小数部分大者优先补 1（余数最多 4）
+			floors[order[i]]++
+			remain--
+		}
+		for i := 0; remain > 0; i = (i + 1) % 5 { // 防御式兜底（理论不可达）
+			floors[i]++
+			remain--
+		}
+	}
+	return floors[0], floors[1], floors[2], floors[3], floors[4]
+}
+
+// DevourOutcome 吞噬结果（ack/面板展示用）
+type DevourOutcome struct {
+	Count                  int
+	Points                 int
+	HP, ATK, DEF, SPD, MAG int
+	PowerBefore            int
+	PowerAfter             int
+	QualityBreakdown       string // 品阶分布，如 "凡×10 灵×8 玄×5"
+}
+
+// listDevourCandidatesQ 可被宿主吞噬的灵侍列表。
+// qualityIdx：0-4 = 品阶及以下（凡/灵/玄/地/天），-1 = 不限品阶。
+// 排除：宿主自身、已锁定、出战中、穿戴装备的灵侍；按战力（含装备/功法）高→低。
+// q 为 DB 句柄：面板/预览传 db，事务执行传 tx（小连接池下不占独立连接）。
+func listDevourCandidatesQ(q *gorm.DB, userID int64, host *UserSpiritServant, qualityIdx int) []UserSpiritServant {
+	var cands []UserSpiritServant
+	if err := q.Where("user_id = ?", userID).Order("id asc").Find(&cands).Error; err != nil {
+		return nil
+	}
+	equipped, err := equippedServantIDSet(q, userID)
+	if err != nil {
+		log.Printf("[灵侍] 吞噬候选装备状态查询失败 user=%d err=%s", userID, formatTelegramSendError(err))
+		return nil
+	}
+	var out []UserSpiritServant
+	for _, c := range cands {
+		if host != nil && c.ID == host.ID {
+			continue
+		}
+		if c.IsLocked || c.IsDeployed || equipped[c.ID] {
+			continue
+		}
+		if qualityIdx >= 0 && QualityIndex(c.Quality) > qualityIdx {
+			continue
+		}
+		out = append(out, c)
+	}
+	sortServantsWithBonus(equipBonusMap(q, userID), servantManualBonusPctMap(q, userID), out)
+	return out
+}
+
+// ListDevourCandidates 可吞噬候选（面板用，走全局 db）
+func ListDevourCandidates(userID int64, host *UserSpiritServant, qualityIdx int) []UserSpiritServant {
+	return listDevourCandidatesQ(db, userID, host, qualityIdx)
+}
+
+// DevourServants 吞噬执行：devouredIDs 在函数内全量复核（归属/锁定/出战/装备/去重）。
+// 必须在 db.Transaction 内调用；成功后宿主基础属性累加、被吞灵侍软删除、写审计日志。
+func DevourServants(tx *gorm.DB, userID int64, hostID uint, devouredIDs []uint) (*DevourOutcome, error) {
+	if len(devouredIDs) == 0 {
+		return nil, fmt.Errorf("请选择要被吞噬的灵侍")
+	}
+	var host UserSpiritServant
+	if err := tx.Where("id = ? AND user_id = ?", hostID, userID).First(&host).Error; err != nil {
+		return nil, fmt.Errorf("宿主灵侍不存在或不属于你")
+	}
+	// 去重 + 排除自身
+	seen := map[uint]bool{}
+	ids := make([]uint, 0, len(devouredIDs))
+	for _, id := range devouredIDs {
+		if id == hostID || id == 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("请选择要被吞噬的灵侍")
+	}
+
+	// fail-closed：装备状态查询失败时中止吞噬，不得按无装备继续销毁
+	equipped, eqErr := equippedServantIDSet(tx, userID)
+	if eqErr != nil {
+		return nil, fmt.Errorf("装备状态查询失败，已中止吞噬")
+	}
+	// 批量取回被吞灵侍（IN 一次查询；数量不符说明存在无效/他人灵侍，直接失败）
+	var victims []UserSpiritServant
+	if err := tx.Where("user_id = ? AND id IN ?", userID, ids).Find(&victims).Error; err != nil {
+		return nil, err
+	}
+	if len(victims) != len(ids) {
+		return nil, fmt.Errorf("存在无效的被吞噬灵侍，请刷新后重试")
+	}
+	qualityCount := map[string]int{}
+	for i := range victims {
+		v := &victims[i]
+		if reason := servantConsumeBlockReason(v, equipped); reason != "" {
+			return nil, fmt.Errorf("不可吞噬：%s", reason)
+		}
+		qualityCount[v.Quality]++
+	}
+
+	bonusMap := equipBonusMap(tx, userID)
+	manualMap := servantManualBonusPctMap(tx, userID)
+	out := &DevourOutcome{Count: len(victims)}
+	for _, v := range victims {
+		out.Points += DevourPointsFor(v.Quality, v.Star)
+	}
+	out.HP, out.ATK, out.DEF, out.SPD, out.MAG = distributeDevourPoints(&host, out.Points)
+	out.PowerBefore = EnhancedBattlePower(bonusMap, manualMap, &host)
+
+	// 累加宿主一级基础属性（gorm.Expr 原子累加，防并发丢更新）
+	if err := tx.Model(&UserSpiritServant{}).Where("id = ?", host.ID).Updates(map[string]interface{}{
+		"hp":  gorm.Expr("hp + ?", out.HP),
+		"atk": gorm.Expr("atk + ?", out.ATK),
+		"def": gorm.Expr("def + ?", out.DEF),
+		"spd": gorm.Expr("spd + ?", out.SPD),
+		"mag": gorm.Expr("mag + ?", out.MAG),
+	}).Error; err != nil {
+		return nil, err
+	}
+
+	// 消耗被吞灵侍（批量软删除，与升星祭品口径一致）+ 清理其功法修习（软删除保留审计，装备已前置排除）
+	del := tx.Where("user_id = ? AND id IN ?", userID, ids).Delete(&UserSpiritServant{})
+	if del.Error != nil || int(del.RowsAffected) != len(ids) {
+		return nil, fmt.Errorf("吞噬消耗失败")
+	}
+	if err := tx.Where("user_id = ? AND servant_id IN ?", userID, ids).
+		Delete(&ServantManualStudy{}).Error; err != nil {
+		return nil, fmt.Errorf("被吞噬灵侍功法清理失败")
+	}
+
+	// 复核宿主并计算吞噬后战力
+	var hostAfter UserSpiritServant
+	if err := tx.Where("id = ?", host.ID).First(&hostAfter).Error; err != nil {
+		return nil, err
+	}
+	out.PowerAfter = EnhancedBattlePower(bonusMap, manualMap, &hostAfter)
+
+	breakdown := make([]string, 0, len(qualityCount))
+	for _, q := range SpiritQualityNames {
+		if n := qualityCount[q]; n > 0 {
+			breakdown = append(breakdown, fmt.Sprintf("%s×%d", q, n))
+		}
+	}
+	out.QualityBreakdown = strings.Join(breakdown, " ")
+
+	logRecord := ServantDevourLog{
+		UserID:        userID,
+		HostID:        host.ID,
+		HostName:      host.Name,
+		DevouredCount: out.Count,
+		Points:        out.Points,
+		HPGain:        out.HP,
+		ATKGain:       out.ATK,
+		DEFGain:       out.DEF,
+		SPDGain:       out.SPD,
+		MAGGain:       out.MAG,
+		Remark:        fmt.Sprintf("吞噬%d只[%s]", out.Count, out.QualityBreakdown),
+	}
+	if err := tx.Create(&logRecord).Error; err != nil {
+		return nil, fmt.Errorf("吞噬日志写入失败")
+	}
+	log.Printf("[灵侍] 吞噬成功 user=%d host=%s(%d) count=%d points=%d power %d->%d",
+		userID, formatPlainValue(host.Name), host.ID, out.Count, out.Points, out.PowerBefore, out.PowerAfter)
+	return out, nil
+}
+
+// DevourAckText 吞噬成功的 ack 文案（单只/一键共用）
+func DevourAckText(out *DevourOutcome) string {
+	return fmt.Sprintf("🩸 吞噬完成：%d 只（%s），+%d 属性点：气血+%d 攻+%d 防+%d 速+%d 识+%d，战力 +%d",
+		out.Count, out.QualityBreakdown, out.Points, out.HP, out.ATK, out.DEF, out.SPD, out.MAG,
+		out.PowerAfter-out.PowerBefore)
 }

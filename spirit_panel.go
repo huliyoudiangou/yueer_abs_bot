@@ -56,6 +56,16 @@ const (
 	spCbFeed           = "sp:feed"        // sp:feed 灵侍养成面板
 	spCbFeedDoPrefix   = "sp:feed:do:"    // sp:feed:do:{servantID}:{page}（page 可省略，喂养后留在原页）
 	spCbFeedPagePrefix = "sp:feed:page:"  // sp:feed:page:{page} 养成分页（每页10只）
+
+	spCbDevour            = "sp:devour"           // sp:devour 吞噬主页（宿主选择）
+	spDevourPagePrefix    = "sp:devour:page:"     // sp:devour:page:{page} 宿主列表分页（每页10只）
+	spDevourHostPrefix    = "sp:devour:host:"     // sp:devour:host:{hostID}[:{page}] 宿主吞噬面板
+	spDevourBatchPrefix   = "sp:devour:batch:"    // sp:devour:batch:{hostID} 一键吞噬·品阶筛选
+	spDevourBatchQPrefix  = "sp:devour:batch:q:"  // sp:devour:batch:q:{hostID}:{qualityIdx} 一键吞噬·二次确认
+	spDevourBatchGoPrefix = "sp:devour:batch:go:" // sp:devour:batch:go:{hostID}:{qualityIdx} 一键吞噬·执行
+	spDevourPickPrefix    = "sp:devour:pick:"     // sp:devour:pick:{hostID}:{page} 逐只吞噬·候选分页
+	spDevourOnePrefix     = "sp:devour:one:"      // sp:devour:one:{hostID}:{sid} 逐只吞噬·二次确认
+	spDevourOneGoPrefix   = "sp:devour:one:go:"   // sp:devour:one:go:{hostID}:{sid} 逐只吞噬·执行
 )
 
 // 灵晶斋兑换档位（积分）
@@ -107,6 +117,7 @@ func spiritPanelHome(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboard
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("🌿 灵侍养成", spCbFeed),
+			tgbotapi.NewInlineKeyboardButtonData("🩸 灵侍吞噬", spCbDevour),
 		),
 	)
 	return text, kb
@@ -510,7 +521,8 @@ func spiritPanelHelp() (string, tgbotapi.InlineKeyboardMarkup) {
 		"· 灵侍品阶：凡/灵/玄/地/天/圣，共六阶\n" +
 		"· 灵侍属性：金木水火土阴阳（阴阳仅地阶以上可得）\n" +
 		"· 捕捉：灵墟按境界逐级开放（凡人 → 道祖共十四域），需消耗缚灵索\n" +
-		"· 升星：星级上限 凡3/灵4/玄5/地6/天7/圣9；≤3★ 需同品同属性祭品，4-6★ 另需同星级，7-9★ 需同名同星级灵侍；段1-2 可消耗灵魄替代祭品，段3 可消耗万能真身碎片替代同名要求；升星后等级重置\n" +
+		"· 升星：星级上限 凡3/灵4/玄5/地6/天7/圣9；每星 +5% 一级基础属性。在图鉴中点选灵侍进入升星界面（显示「本次升星：⭐X → ⭐Y」），消耗一只符合条件的祭品灵侍升 1 星（升星后等级重置为 1）：升至 3 星及以下需同品阶、同属性祭品（星级不限）；升至 4-6 星需同品阶、同属性且祭品星级 = 当前星级；升至 7-9 星需同名且祭品星级 = 当前星级。锁定、出战中或穿戴装备的灵侍不能作祭品（装备需先卸下）。道具可替代祭品：升至 6 星及以下可直接消耗 1 个灵魄升星（无需灵侍祭品）；升至 7 星及以上可消耗 1 个万能真身碎片替代同名要求（祭品仅需同品质+同星级）\n" +
+		"· 吞噬：万灵阁「灵侍吞噬」选择宿主吞噬其他灵侍换取属性点（按被吞品阶：凡+2/灵+4/玄+8/地+16/天+32/圣+64，星级每 +1 额外 +1；属性点按宿主五维基础值比例分配）；出战中、已锁定、穿戴装备的灵侍不可被吞噬；一键吞噬按品阶及以下批量吞噬（凡/灵/玄/地/天及以下），需二次确认；逐只吞噬同样二次确认；被吞噬灵侍永久消失（功法修习随之失效），不可恢复\n" +
 		"· 推图：灵墟章节（随境界逐级开放）各 10 关 + Boss，神行符 10/日，三星可扫荡\n" +
 		"· 出战队列：上阵/下阵灵侍组成出战队伍（上限 5 只，出战顺序按含装备战力高→低），推图/镜场/PVP 需先上阵\n" +
 		"· 战力：图鉴/养成/出战队列/装备选择均按战力（含装备加成）高→低排列，分页展示\n" +
@@ -1277,6 +1289,394 @@ func spiritPanelFeed(userID int64, page int) (string, tgbotapi.InlineKeyboardMar
 	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
+// ------------------------------------------
+// 灵侍吞噬（2026-09 新增）
+// 流程：宿主选择 → 宿主面板 →（一键吞噬：品阶筛选 → 二次确认 → 执行）/（逐只吞噬：候选 → 二次确认 → 执行）
+// 约束：出战中/已锁定/穿戴装备的灵侍不可被吞噬；一键吞噬需二次确认；被吞噬灵侍永久消失
+// ------------------------------------------
+
+// spiritDevourQualityFilterText 品阶筛选文案（qualityIdx 0-4）
+func spiritDevourQualityFilterText(qualityIdx int) string {
+	if qualityIdx >= 0 && qualityIdx < len(SpiritQualityNames) {
+		return fmt.Sprintf("%s品及以下", SpiritQualityNames[qualityIdx])
+	}
+	return "全部品阶"
+}
+
+// spiritDevourGainPreview 预览吞噬属性点分配（宿主基础值比例分配 + 战力前后对比，装备/功法口径不变）
+func spiritDevourGainPreview(bonusMap map[uint]servantEquipBonus, manualMap map[uint]int, host *UserSpiritServant, points int) (hp, atk, def, spd, mag, powerBefore, powerAfter int) {
+	hp, atk, def, spd, mag = distributeDevourPoints(host, points)
+	powerBefore = EnhancedBattlePower(bonusMap, manualMap, host)
+	after := *host
+	after.HP += hp
+	after.ATK += atk
+	after.DEF += def
+	after.SPD += spd
+	after.MAG += mag
+	powerAfter = EnhancedBattlePower(bonusMap, manualMap, &after)
+	return
+}
+
+// spiritPanelDevour 吞噬主页：宿主选择（全量灵侍，战力高→低，分页每页10只）
+func spiritPanelDevour(userID int64, page int) (string, tgbotapi.InlineKeyboardMarkup) {
+	backKb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+
+	var all []UserSpiritServant
+	if err := db.Where("user_id = ?", userID).Order("id asc").Find(&all).Error; err != nil {
+		log.Printf("[灵侍] 吞噬宿主查询失败 user=%d err=%s", userID, formatTelegramSendError(err))
+	}
+	total := int64(len(all))
+	bonusMap := userEquipBonusMap(userID)
+	manualMap := UserServantManualBonusPercent(userID)
+	sortServantsWithBonus(bonusMap, manualMap, all)
+	totalPages := int((total + spiritListPageSize - 1) / spiritListPageSize)
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	offset := (page - 1) * spiritListPageSize
+	end := offset + spiritListPageSize
+	if end > len(all) {
+		end = len(all)
+	}
+	servants := all[offset:end]
+
+	var b strings.Builder
+	if totalPages > 1 {
+		b.WriteString(fmt.Sprintf("🩸 灵侍吞噬（第 %d/%d 页 · 共 %d 只）\n", page, totalPages, total))
+	} else {
+		b.WriteString("🩸 灵侍吞噬\n")
+	}
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString("选择一只灵侍作为「宿主」，吞噬其他灵侍转化为属性：\n")
+	b.WriteString("· 每吞噬 1 只灵侍，宿主获得属性点（按被吞品阶）：凡+2 / 灵+4 / 玄+8 / 地+16 / 天+32 / 圣+64（星级每 +1 额外 +1）\n")
+	b.WriteString("· 属性点按宿主五维基础值比例分配，直接并入一级基础属性（随等级/星级成长放大）\n")
+	b.WriteString("· 出战中、已锁定、穿戴装备的灵侍不可被吞噬；被吞噬灵侍永久消失（其功法修习随之失效），不可恢复\n")
+	if total == 0 {
+		b.WriteString("\n你尚未收服任何灵侍。前往「灵墟捕捉」收服吧！")
+		return b.String(), backKb
+	}
+	b.WriteString("\n点击下方灵侍选择宿主：")
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i := range servants {
+		s := &servants[i]
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("🩸 宿主：%s %s品 ⭐%d", s.Name, s.Quality, s.Star),
+				fmt.Sprintf("%s%d:%d", spDevourHostPrefix, s.ID, page))))
+	}
+	if totalPages > 1 {
+		var pageRow []tgbotapi.InlineKeyboardButton
+		if page > 1 {
+			pageRow = append(pageRow, tgbotapi.NewInlineKeyboardButtonData("◀ 上一页", fmt.Sprintf("%s%d", spDevourPagePrefix, page-1)))
+		}
+		if page < totalPages {
+			pageRow = append(pageRow, tgbotapi.NewInlineKeyboardButtonData("下一页 ▶", fmt.Sprintf("%s%d", spDevourPagePrefix, page+1)))
+		}
+		rows = append(rows, pageRow)
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// spiritPanelDevourHost 宿主吞噬面板：宿主信息 + 一键吞噬/逐只吞噬入口
+func spiritPanelDevourHost(userID int64, hostID uint) (string, tgbotapi.InlineKeyboardMarkup) {
+	backKb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+
+	var host UserSpiritServant
+	if err := db.Where("id = ? AND user_id = ?", hostID, userID).First(&host).Error; err != nil {
+		return "灵侍不存在或不属于你。", backKb
+	}
+	bonusMap := userEquipBonusMap(userID)
+	manualMap := UserServantManualBonusPercent(userID)
+	candCount := len(ListDevourCandidates(userID, &host, -1))
+
+	var b strings.Builder
+	b.WriteString("🩸 吞噬 · 宿主\n")
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString(fmt.Sprintf("宿主：ID %d %s %s品·%s ⭐%d/%d Lv.%d/%d\n",
+		host.ID, host.Name, host.Quality, host.Attribute, host.Star, QualityMaxStar[host.Quality],
+		host.Level, MaxLevelByStar(host.Star)))
+	b.WriteString(fmt.Sprintf("五维：气血%d 攻击%d 防御%d 速度%d 灵识%d\n",
+		host.HP, host.ATK, host.DEF, host.SPD, host.MAG))
+	b.WriteString(fmt.Sprintf("战力：%d（含装备/功法）\n", EnhancedBattlePower(bonusMap, manualMap, &host)))
+	b.WriteString(fmt.Sprintf("当前可吞噬：%d 只（已排除出战中/已锁定/穿戴装备）\n\n", candCount))
+	b.WriteString("⚠️ 被吞噬灵侍将永久消失，不可恢复。")
+
+	rows := [][]tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⚡ 一键吞噬（按品阶筛选）", fmt.Sprintf("%s%d", spDevourBatchPrefix, host.ID))),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🎯 逐只吞噬", fmt.Sprintf("%s%d:%d", spDevourPickPrefix, host.ID, 1))),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 重新选择宿主", spCbDevour)),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)),
+	}
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// spiritPanelDevourBatch 一键吞噬：品阶筛选（展示各档可吞噬数量）
+func spiritPanelDevourBatch(userID int64, hostID uint) (string, tgbotapi.InlineKeyboardMarkup) {
+	backKb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+
+	var host UserSpiritServant
+	if err := db.Where("id = ? AND user_id = ?", hostID, userID).First(&host).Error; err != nil {
+		return "灵侍不存在或不属于你。", backKb
+	}
+	cands := ListDevourCandidates(userID, &host, -1)
+	// 按品阶聚合，累计到「及以下」档位（qualityIdx 0-4）
+	byQuality := map[string]int{}
+	for _, c := range cands {
+		byQuality[c.Quality]++
+	}
+	cum := make([]int, len(SpiritQualityNames))
+	run := 0
+	for i, q := range SpiritQualityNames {
+		run += byQuality[q]
+		cum[i] = run
+	}
+
+	var b strings.Builder
+	b.WriteString("⚡ 一键吞噬 · 选择品阶\n")
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString(fmt.Sprintf("宿主：%s（%s品·%s ⭐%d）\n\n", host.Name, host.Quality, host.Attribute, host.Star))
+	b.WriteString("将吞噬所选品阶及以下的全部可吞噬灵侍（自动排除出战中、已锁定、穿戴装备的灵侍与宿主自身）：\n")
+	for i, q := range SpiritQualityNames[:5] { // 凡/灵/玄/地/天；圣品不提供「及以下」整档吞噬
+		b.WriteString(fmt.Sprintf("· %s品及以下：%d 只\n", q, cum[i]))
+	}
+	b.WriteString("\n每只灵侍属性点：凡+2 / 灵+4 / 玄+8 / 地+16 / 天+32 / 圣+64（星级每 +1 额外 +1）\n")
+	b.WriteString("点击品阶后进入二次确认，确认前不会消耗任何灵侍。")
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i, q := range SpiritQualityNames[:5] {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("🩸 %s品及以下（%d 只）", q, cum[i]),
+				fmt.Sprintf("%s%d:%d", spDevourBatchQPrefix, host.ID, i))))
+	}
+	rows = append(rows,
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回宿主", fmt.Sprintf("%s%d", spDevourHostPrefix, host.ID))),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// spiritPanelDevourBatchConfirm 一键吞噬二次确认：数量/品阶分布/预计增益/战力变化
+func spiritPanelDevourBatchConfirm(userID int64, hostID uint, qualityIdx int) (string, tgbotapi.InlineKeyboardMarkup) {
+	backKb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+
+	var host UserSpiritServant
+	if err := db.Where("id = ? AND user_id = ?", hostID, userID).First(&host).Error; err != nil {
+		return "灵侍不存在或不属于你。", backKb
+	}
+	if qualityIdx < 0 || qualityIdx > 4 {
+		qualityIdx = 4
+	}
+	cands := ListDevourCandidates(userID, &host, qualityIdx)
+	if len(cands) == 0 {
+		b := "⚠️ 一键吞噬 · 二次确认\n━━━━━━━━━━━━━━\n当前没有符合筛选条件的可吞噬灵侍。"
+		kb := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("🔙 重新选择品阶", fmt.Sprintf("%s%d", spDevourBatchPrefix, host.ID))),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+		return b, kb
+	}
+	byQuality := map[string]int{}
+	totalPoints := 0
+	for _, c := range cands {
+		byQuality[c.Quality]++
+		totalPoints += DevourPointsFor(c.Quality, c.Star)
+	}
+	breakdown := make([]string, 0, len(byQuality))
+	for _, q := range SpiritQualityNames {
+		if n := byQuality[q]; n > 0 {
+			breakdown = append(breakdown, fmt.Sprintf("%s×%d", q, n))
+		}
+	}
+	bonusMap := userEquipBonusMap(userID)
+	manualMap := UserServantManualBonusPercent(userID)
+	hp, atk, def, spd, mag, powerBefore, powerAfter := spiritDevourGainPreview(bonusMap, manualMap, &host, totalPoints)
+
+	var b strings.Builder
+	b.WriteString("⚠️ 一键吞噬 · 二次确认\n")
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString(fmt.Sprintf("宿主：%s（%s品·%s ⭐%d Lv.%d）\n", host.Name, host.Quality, host.Attribute, host.Star, host.Level))
+	b.WriteString(fmt.Sprintf("筛选：%s\n", spiritDevourQualityFilterText(qualityIdx)))
+	b.WriteString(fmt.Sprintf("将吞噬 %d 只灵侍：%s\n", len(cands), strings.Join(breakdown, " ")))
+	b.WriteString(fmt.Sprintf("预计获得：+%d 属性点（气血+%d 攻+%d 防+%d 速+%d 识+%d）\n", totalPoints, hp, atk, def, spd, mag))
+	b.WriteString(fmt.Sprintf("预计战力：%d → %d（+%d）\n\n", powerBefore, powerAfter, powerAfter-powerBefore))
+	b.WriteString("⚠️ 被吞噬灵侍将永久消失，不可恢复！\n确认前请再次核对；出战中、已锁定、穿戴装备的灵侍不会被吞噬。\n实际吞噬以执行时符合筛选条件的灵侍为准——确认后新捕捉/孵化的同档灵侍也会一并吞噬。")
+
+	rows := [][]tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("☠️ 确认一键吞噬（%d 只）", len(cands)),
+				fmt.Sprintf("%s%d:%d", spDevourBatchGoPrefix, host.ID, qualityIdx))),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 重新选择品阶", fmt.Sprintf("%s%d", spDevourBatchPrefix, host.ID))),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)),
+	}
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// spiritPanelDevourPick 逐只吞噬：候选列表（战力高→低，分页每页10只，标注单只属性点）
+func spiritPanelDevourPick(userID int64, hostID uint, page int) (string, tgbotapi.InlineKeyboardMarkup) {
+	backKb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+
+	var host UserSpiritServant
+	if err := db.Where("id = ? AND user_id = ?", hostID, userID).First(&host).Error; err != nil {
+		return "灵侍不存在或不属于你。", backKb
+	}
+	cands := ListDevourCandidates(userID, &host, -1)
+	total := len(cands)
+	totalPages := (total + spiritListPageSize - 1) / spiritListPageSize
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	offset := (page - 1) * spiritListPageSize
+	end := offset + spiritListPageSize
+	if end > total {
+		end = total
+	}
+	pageCands := cands[offset:end]
+
+	bonusMap := userEquipBonusMap(userID)
+	manualMap := UserServantManualBonusPercent(userID)
+
+	var b strings.Builder
+	if totalPages > 1 {
+		b.WriteString(fmt.Sprintf("🎯 逐只吞噬（第 %d/%d 页 · 共 %d 只）\n", page, totalPages, total))
+	} else {
+		b.WriteString("🎯 逐只吞噬\n")
+	}
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString(fmt.Sprintf("宿主：%s（%s品·%s ⭐%d）\n\n", host.Name, host.Quality, host.Attribute, host.Star))
+	if total == 0 {
+		b.WriteString("当前没有可吞噬的灵侍（出战中/已锁定/穿戴装备的灵侍不可被吞噬）。")
+	} else {
+		for i := range pageCands {
+			c := &pageCands[i]
+			line := fmt.Sprintf("· ID %d %s %s品·%s ⭐%d 战力%d（吞噬+%d点）", c.ID, c.Name, c.Quality, c.Attribute, c.Star, EnhancedBattlePower(bonusMap, manualMap, c), DevourPointsFor(c.Quality, c.Star))
+			if pct := manualMap[c.ID]; pct > 0 {
+				line += fmt.Sprintf(" 功法+%d%%", pct)
+			}
+			b.WriteString(line + "\n")
+		}
+		b.WriteString("\n点击灵侍进入二次确认。")
+	}
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i := range pageCands {
+		c := &pageCands[i]
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("🩸 吞噬 %s（+%d 属性点）", c.Name, DevourPointsFor(c.Quality, c.Star)),
+				fmt.Sprintf("%s%d:%d", spDevourOnePrefix, hostID, c.ID))))
+	}
+	if totalPages > 1 {
+		var pageRow []tgbotapi.InlineKeyboardButton
+		if page > 1 {
+			pageRow = append(pageRow, tgbotapi.NewInlineKeyboardButtonData("◀ 上一页", fmt.Sprintf("%s%d:%d", spDevourPickPrefix, hostID, page-1)))
+		}
+		if page < totalPages {
+			pageRow = append(pageRow, tgbotapi.NewInlineKeyboardButtonData("下一页 ▶", fmt.Sprintf("%s%d:%d", spDevourPickPrefix, hostID, page+1)))
+		}
+		rows = append(rows, pageRow)
+	}
+	rows = append(rows,
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回宿主", fmt.Sprintf("%s%d", spDevourHostPrefix, hostID))),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// spiritPanelDevourOneConfirm 逐只吞噬二次确认
+func spiritPanelDevourOneConfirm(userID int64, hostID, victimID uint) (string, tgbotapi.InlineKeyboardMarkup) {
+	backKb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+
+	var host UserSpiritServant
+	if err := db.Where("id = ? AND user_id = ?", hostID, userID).First(&host).Error; err != nil {
+		return "宿主灵侍不存在或不属于你。", backKb
+	}
+	var victim UserSpiritServant
+	if err := db.Where("id = ? AND user_id = ?", victimID, userID).First(&victim).Error; err != nil {
+		return "被吞噬灵侍不存在或不属于你。", backKb
+	}
+	// 复核吞噬限制（与执行口径一致）
+	if victim.ID == host.ID {
+		return "灵侍不能吞噬自身。", backKb
+	}
+	if victim.IsLocked {
+		return "该灵侍已锁定，不能吞噬。", backKb
+	}
+	if victim.IsDeployed {
+		return "该灵侍出战中，请先下阵再吞噬。", backKb
+	}
+	equipped, eqErr := equippedServantIDSet(db, userID)
+	if eqErr != nil {
+		return "装备状态查询失败，请稍后重试。", backKb
+	}
+	if equipped[victim.ID] {
+		return "该灵侍穿戴着装备，请先卸下再吞噬。", backKb
+	}
+
+	points := DevourPointsFor(victim.Quality, victim.Star)
+	bonusMap := userEquipBonusMap(userID)
+	manualMap := UserServantManualBonusPercent(userID)
+	hp, atk, def, spd, mag, powerBefore, powerAfter := spiritDevourGainPreview(bonusMap, manualMap, &host, points)
+
+	var b strings.Builder
+	b.WriteString("⚠️ 吞噬 · 二次确认\n")
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString(fmt.Sprintf("宿主：%s（%s品·%s ⭐%d Lv.%d）\n", host.Name, host.Quality, host.Attribute, host.Star, host.Level))
+	b.WriteString(fmt.Sprintf("被吞噬：ID %d %s %s品·%s ⭐%d Lv.%d\n", victim.ID, victim.Name, victim.Quality, victim.Attribute, victim.Star, victim.Level))
+	b.WriteString(fmt.Sprintf("预计获得：+%d 属性点（气血+%d 攻+%d 防+%d 速+%d 识+%d）\n", points, hp, atk, def, spd, mag))
+	b.WriteString(fmt.Sprintf("预计战力：%d → %d（+%d）\n\n", powerBefore, powerAfter, powerAfter-powerBefore))
+	b.WriteString("⚠️ 被吞噬灵侍将永久消失，不可恢复！")
+
+	rows := [][]tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				fmt.Sprintf("☠️ 确认吞噬 %s", victim.Name),
+				fmt.Sprintf("%s%d:%d", spDevourOneGoPrefix, hostID, victimID))),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回候选列表", fmt.Sprintf("%s%d:%d", spDevourPickPrefix, hostID, 1))),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)),
+	}
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
 // spiritPanelStarUp 升星界面：目标 + 祭品需求 + 候选祭品列表（分页，每页10只，战力高→低）
 // 合并列表：普通祭品在前，碎片祭品（段3）在后，同页内保持两段顺序
 func spiritPanelStarUp(userID int64, servantID uint, page int) (string, tgbotapi.InlineKeyboardMarkup) {
@@ -1306,7 +1706,11 @@ func spiritPanelStarUp(userID int64, servantID uint, page int) (string, tgbotapi
 	}
 
 	b.WriteString(StarUpRequirementText(&target) + "\n")
-	b.WriteString("升星后等级重置为 Lv.1，祭品灵侍将被消耗。\n")
+	b.WriteString(fmt.Sprintf("星级成长：每星 +5%% 一级基础属性（当前 ⭐%d = ×%.2f → 目标 ⭐%d = ×%.2f）\n",
+		target.Star, StarGrowthMult(target.Star), target.Star+1, StarGrowthMult(target.Star+1)))
+	b.WriteString(fmt.Sprintf("升星后等级重置为 Lv.1（新上限 Lv.%d），祭品灵侍将被消耗；重新喂养至 Lv.%d 即可超越升星前战力。\n",
+		MaxLevelByStar(target.Star+1), StarUpBreakEvenLevel(target.Level, target.Star, target.Star+1)))
+	b.WriteString("穿戴装备的灵侍不能作祭品（请先卸下）；祭品已修习的功法将随消耗失效。\n")
 
 	items := GetUserSpiritItems(userID)
 	soulN := items[itemTypeSoul]
@@ -1368,8 +1772,11 @@ func spiritPanelStarUp(userID int64, servantID uint, page int) (string, tgbotapi
 				b.WriteString("\n【碎片祭品】消耗 1 个万能真身碎片，祭品仅需同品质+同星级：\n")
 				shardHeaderShown = true
 			}
-			b.WriteString(fmt.Sprintf("· %s %s品·%s ⭐%d 战力%d\n",
-				c.s.Name, c.s.Quality, c.s.Attribute, c.s.Star, EnhancedBattlePower(bonusMap, manualMap, &c.s)))
+			line := fmt.Sprintf("· %s %s品·%s ⭐%d 战力%d", c.s.Name, c.s.Quality, c.s.Attribute, c.s.Star, EnhancedBattlePower(bonusMap, manualMap, &c.s))
+			if pct := manualMap[c.s.ID]; pct > 0 {
+				line += fmt.Sprintf(" 功法+%d%%", pct)
+			}
+			b.WriteString(line + "\n")
 		}
 	}
 
@@ -1883,6 +2290,150 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 			ackText = fmt.Sprintf("🌿 喂养成功：等级 +1（-%d 灵晶），属性已提升", feedCost)
 		}
 		text, kb = spiritPanelFeed(userID, page)
+	case cb.Data == spCbDevour:
+		text, kb = spiritPanelDevour(userID, 1)
+	case strings.HasPrefix(cb.Data, spDevourPagePrefix):
+		// sp:devour:page:{page} 宿主列表分页
+		page := 0
+		fmt.Sscanf(strings.TrimPrefix(cb.Data, spDevourPagePrefix), "%d", &page)
+		text, kb = spiritPanelDevour(userID, page)
+	case strings.HasPrefix(cb.Data, spDevourBatchGoPrefix):
+		// sp:devour:batch:go:{hostID}:{qualityIdx} 一键吞噬执行（二次确认后才会到达）
+		rest := strings.TrimPrefix(cb.Data, spDevourBatchGoPrefix)
+		parts := strings.Split(rest, ":")
+		if len(parts) != 2 {
+			ackText = "无效的吞噬指令"
+			text, kb = spiritPanelDevour(userID, 1)
+			break
+		}
+		hostID, err1 := strconv.ParseUint(parts[0], 10, 64)
+		qIdx, err2 := strconv.Atoi(parts[1])
+		if err1 != nil || err2 != nil || qIdx < 0 || qIdx > 4 {
+			ackText = "无效的吞噬指令"
+			text, kb = spiritPanelDevour(userID, 1)
+			break
+		}
+		var out *DevourOutcome
+		err := db.Transaction(func(tx *gorm.DB) error {
+			var host UserSpiritServant
+			if e := tx.Where("id = ? AND user_id = ?", hostID, userID).First(&host).Error; e != nil {
+				return fmt.Errorf("宿主灵侍不存在或不属于你")
+			}
+			victims := listDevourCandidatesQ(tx, userID, &host, qIdx)
+			if len(victims) == 0 {
+				return fmt.Errorf("没有符合条件的可吞噬灵侍")
+			}
+			ids := make([]uint, 0, len(victims))
+			for i := range victims {
+				ids = append(ids, victims[i].ID)
+			}
+			var e error
+			out, e = DevourServants(tx, userID, uint(hostID), ids)
+			return e
+		})
+		if err != nil {
+			ackText = fmt.Sprintf("吞噬失败：%v", err)
+		} else {
+			ackText = DevourAckText(out)
+		}
+		text, kb = spiritPanelDevourHost(userID, uint(hostID))
+	case strings.HasPrefix(cb.Data, spDevourBatchQPrefix):
+		// sp:devour:batch:q:{hostID}:{qualityIdx} 一键吞噬二次确认页
+		rest := strings.TrimPrefix(cb.Data, spDevourBatchQPrefix)
+		parts := strings.Split(rest, ":")
+		if len(parts) != 2 {
+			ackText = "无效的吞噬指令"
+			text, kb = spiritPanelDevour(userID, 1)
+			break
+		}
+		hostID, err1 := strconv.ParseUint(parts[0], 10, 64)
+		qIdx, err2 := strconv.Atoi(parts[1])
+		if err1 != nil || err2 != nil || qIdx < 0 || qIdx > 4 {
+			ackText = "无效的吞噬指令"
+			text, kb = spiritPanelDevour(userID, 1)
+			break
+		}
+		text, kb = spiritPanelDevourBatchConfirm(userID, uint(hostID), qIdx)
+	case strings.HasPrefix(cb.Data, spDevourBatchPrefix):
+		// sp:devour:batch:{hostID} 一键吞噬品阶筛选
+		sid, err := strconv.ParseUint(strings.TrimPrefix(cb.Data, spDevourBatchPrefix), 10, 64)
+		if err != nil {
+			ackText = "无效的吞噬指令"
+			text, kb = spiritPanelDevour(userID, 1)
+			break
+		}
+		text, kb = spiritPanelDevourBatch(userID, uint(sid))
+	case strings.HasPrefix(cb.Data, spDevourOneGoPrefix):
+		// sp:devour:one:go:{hostID}:{sid} 逐只吞噬执行（二次确认后才会到达）
+		rest := strings.TrimPrefix(cb.Data, spDevourOneGoPrefix)
+		parts := strings.Split(rest, ":")
+		if len(parts) != 2 {
+			ackText = "无效的吞噬指令"
+			text, kb = spiritPanelDevour(userID, 1)
+			break
+		}
+		hostID, err1 := strconv.ParseUint(parts[0], 10, 64)
+		victimID, err2 := strconv.ParseUint(parts[1], 10, 64)
+		if err1 != nil || err2 != nil {
+			ackText = "无效的吞噬指令"
+			text, kb = spiritPanelDevour(userID, 1)
+			break
+		}
+		var out *DevourOutcome
+		err := db.Transaction(func(tx *gorm.DB) error {
+			var e error
+			out, e = DevourServants(tx, userID, uint(hostID), []uint{uint(victimID)})
+			return e
+		})
+		if err != nil {
+			ackText = fmt.Sprintf("吞噬失败：%v", err)
+		} else {
+			ackText = DevourAckText(out)
+		}
+		text, kb = spiritPanelDevourHost(userID, uint(hostID))
+	case strings.HasPrefix(cb.Data, spDevourOnePrefix):
+		// sp:devour:one:{hostID}:{sid} 逐只吞噬二次确认页
+		rest := strings.TrimPrefix(cb.Data, spDevourOnePrefix)
+		parts := strings.Split(rest, ":")
+		if len(parts) != 2 {
+			ackText = "无效的吞噬指令"
+			text, kb = spiritPanelDevour(userID, 1)
+			break
+		}
+		hostID, err1 := strconv.ParseUint(parts[0], 10, 64)
+		victimID, err2 := strconv.ParseUint(parts[1], 10, 64)
+		if err1 != nil || err2 != nil {
+			ackText = "无效的吞噬指令"
+			text, kb = spiritPanelDevour(userID, 1)
+			break
+		}
+		text, kb = spiritPanelDevourOneConfirm(userID, uint(hostID), uint(victimID))
+	case strings.HasPrefix(cb.Data, spDevourPickPrefix):
+		// sp:devour:pick:{hostID}:{page} 逐只吞噬候选分页
+		rest := strings.TrimPrefix(cb.Data, spDevourPickPrefix)
+		parts := strings.SplitN(rest, ":", 2)
+		sid, err := strconv.ParseUint(parts[0], 10, 64)
+		if err != nil {
+			ackText = "无效的吞噬指令"
+			text, kb = spiritPanelDevour(userID, 1)
+			break
+		}
+		page := 1
+		if len(parts) == 2 {
+			fmt.Sscanf(parts[1], "%d", &page)
+		}
+		text, kb = spiritPanelDevourPick(userID, uint(sid), page)
+	case strings.HasPrefix(cb.Data, spDevourHostPrefix):
+		// sp:devour:host:{hostID}[:{page}] 宿主吞噬面板
+		rest := strings.TrimPrefix(cb.Data, spDevourHostPrefix)
+		parts := strings.SplitN(rest, ":", 2)
+		sid, err := strconv.ParseUint(parts[0], 10, 64)
+		if err != nil {
+			ackText = "无效的吞噬指令"
+			text, kb = spiritPanelDevour(userID, 1)
+			break
+		}
+		text, kb = spiritPanelDevourHost(userID, uint(sid))
 	case strings.HasPrefix(cb.Data, spCbStarUpPrefix):
 		rest := strings.TrimPrefix(cb.Data, spCbStarUpPrefix)
 		fields := strings.SplitN(rest, ":", 2)
@@ -1915,6 +2466,9 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 				}
 			}
 			if valid {
+				// 升星前快照（成功提示展示星级变化与回本等级）
+				var oldSnap UserSpiritServant
+				oldLoaded := db.Where("id = ? AND user_id = ?", targetID, userID).First(&oldSnap).Error == nil
 				err := db.Transaction(func(tx *gorm.DB) error {
 					return StarUpgrade(tx, userID, uint(targetID), sacIDs, useItem)
 				})
@@ -1923,7 +2477,12 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 				} else {
 					var t2 UserSpiritServant
 					if e2 := db.First(&t2, targetID).Error; e2 == nil {
-						ackText = fmt.Sprintf("⭐ 升星成功：%s ⭐%d（等级重置为 1）", t2.Name, t2.Star)
+						if oldLoaded {
+							ackText = fmt.Sprintf("⭐ 升星成功：%s ⭐%d→⭐%d（等级重置为 1，重新喂养至 Lv.%d 即可超越升星前战力）",
+								t2.Name, oldSnap.Star, t2.Star, StarUpBreakEvenLevel(oldSnap.Level, oldSnap.Star, t2.Star))
+						} else {
+							ackText = fmt.Sprintf("⭐ 升星成功：%s ⭐%d（等级重置为 1）", t2.Name, t2.Star)
+						}
 					} else {
 						ackText = "⭐ 升星成功"
 					}
