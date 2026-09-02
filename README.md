@@ -280,6 +280,11 @@
 
 ## 自动推送
 
+**约定：Agent 每次完成改动、且 `go test ./...` 与 `go build ./...` 均通过后，应直接 `git add -A`、`git commit` 并 `git push origin main`，无需等待用户再次确认。**
+
+同时项目保留脚本，便于手动或流水线调用：
+
+
 项目提供 `scripts/agent_autopush.ps1`（Windows PowerShell）与 `scripts/agent_autopush.sh`（Linux/macOS）。
 
 流程：
@@ -290,7 +295,7 @@ go test ./...
 go build ./...
 
 # 测试通过后再自动提交并推送
-powershell -NoProfile -ExecutionPolicy Bypass -File scriptsgent_autopush.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/agent_autopush.ps1
 ```
 
 脚本会：
@@ -304,11 +309,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scriptsgent_autopush.ps1
 
 ```powershell
 $env:AUTO_COMMIT_MESSAGE = "fix: 自动同步"
-powershell -NoProfile -ExecutionPolicy Bypass -File scriptsgent_autopush.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/agent_autopush.ps1
 ```
 
 可以通过 `-NoPush` 只提交不推送：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scriptsgent_autopush.ps1 -NoPush
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/agent_autopush.ps1 -NoPush
 ```
