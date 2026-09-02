@@ -1485,12 +1485,12 @@ input:focus-visible {
   gap: 2px;
   width: min(100%, 760px);
   min-height: calc(68px + var(--safe-bottom));
-  padding: 6px 8px calc(6px + var(--safe-bottom));
+  padding: 6px 7px calc(6px + var(--safe-bottom));
   transform: translateX(-50%);
   border-top: 1px solid rgba(46, 70, 47, 0.25);
-  background: rgba(248, 248, 233, 0.97);
-  box-shadow: 0 -7px 20px rgba(48, 62, 42, 0.17);
-  backdrop-filter: blur(12px);
+  background: rgba(252, 250, 235, 0.98);
+  box-shadow: 0 -8px 24px rgba(36, 58, 39, 0.2);
+  backdrop-filter: blur(14px);
 }
 
 .dock-tab {
@@ -1515,17 +1515,17 @@ input:focus-visible {
   place-items: center;
 }
 
-.dock-tab .ui-icon { width: 25px; height: 25px; }
-.dock-tab strong { font-size: 10px; }
+.dock-tab .ui-icon { width: 30px; height: 30px; }
+.dock-tab strong { font-size: 11px; letter-spacing: .02em; }
 .dock-tab em { display: none; }
 
 .dock-tab b {
   position: absolute;
-  right: 6px;
-  top: 3px;
+  right: 4px;
+  top: 2px;
   display: grid;
-  min-width: 17px;
-  height: 17px;
+  min-width: 18px;
+  height: 18px;
   padding: 0 4px;
   place-items: center;
   border: 2px solid #f8f8e9;
@@ -1537,13 +1537,21 @@ input:focus-visible {
 
 .dock-light { display: none; }
 
+.dock-tab {
+  grid-template-rows: 31px 15px;
+  min-height: 58px;
+  border-radius: 12px;
+  margin: 2px 1px;
+}
+
 .dock-tab.active {
   color: #fff;
   border-color: #1e6042;
-  background: var(--jade);
+  background: linear-gradient(180deg, #2f7451, #24573e);
+  box-shadow: 0 4px 10px rgba(30, 75, 50, .22);
 }
 
-.dock-tab.active .ui-icon { filter: brightness(1.25); }
+.dock-tab.active .ui-icon { filter: brightness(1.2) drop-shadow(0 2px 2px rgba(0,0,0,.2)); }
 
 .tap-ripple-host { position: relative; overflow: hidden; }
 
@@ -3703,4 +3711,184 @@ body {
   .recipe-slip { min-height: 142px; padding-left: 5px; padding-right: 5px; }
   .recipe-slip > .recipe-diagram { width: 69px; height: 69px; }
   .recipe-icon { width: 66px; height: 66px; }
+}
+
+/* Garden v5: brighter, modern QQ-farm-inspired polish. */
+:root {
+  --grass: #6fb24a;
+  --grass-deep: #4d8b3c;
+  --sun: #ffd964;
+  --cream: #fffdf2;
+  --card: #fffbf0;
+  --wood: #9a6b3f;
+  --wood-dark: #6d4627;
+}
+
+body {
+  background:
+    radial-gradient(circle at 8% 12%, rgba(255, 241, 177, .55), transparent 16rem),
+    radial-gradient(circle at 94% 18%, rgba(121, 203, 160, .42), transparent 15rem),
+    linear-gradient(180deg, rgba(209, 240, 221, .94) 0, rgba(237, 244, 207, .96) 44%, #b7d79a 100%);
+}
+
+.app-shell { padding-bottom: calc(92px + var(--safe-bottom)); }
+
+.game-header {
+  border-radius: 14px;
+  background:
+    linear-gradient(135deg, rgba(35, 104, 64, .98), rgba(22, 78, 52, .98));
+  box-shadow: 0 8px 20px rgba(30, 70, 45, .24);
+}
+
+.brand-seal {
+  border-radius: 12px;
+  border: 2px solid #ffe08a;
+  background: linear-gradient(180deg, #d16549, #a84132);
+}
+
+.resource-chip {
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .12);
+  box-shadow: inset 0 1px rgba(255,255,255,.08);
+}
+
+.resource-chip i { border-radius: 10px; }
+
+.farm-map, .shop-scene, .warehouse-scene, .alchemy-scene, .plot-panel, .counter-panel, .farm-placeholder {
+  border-radius: 14px;
+  box-shadow: 0 10px 24px rgba(49, 75, 48, .18);
+}
+
+.farm-map-head, .shop-awning, .warehouse-head {
+  border-radius: 14px 14px 0 0;
+  border-bottom-width: 4px;
+}
+
+.farm-yard { border-radius: 0 0 14px 14px; }
+
+.farm-guide {
+  border-radius: 12px;
+  box-shadow: 0 5px 14px rgba(67, 75, 42, .12);
+}
+
+.farm-action-dock button,
+.quick-plot-actions button,
+.tool,
+.farm-guide > button,
+.owner-action,
+.btn,
+.actions button {
+  border-radius: 10px;
+}
+
+.farm-action-dock button {
+  border-color: rgba(53, 92, 53, .14);
+  background: rgba(255, 253, 234, .96);
+  box-shadow: 0 3px 0 rgba(79, 89, 51, .1);
+}
+
+.goods-card, .herb-bin, .recipe-slip {
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at 20% 8%, rgba(255, 255, 255, .8), transparent 3.5rem),
+    linear-gradient(180deg, #fffdf4, #f6e9c7);
+  box-shadow: 0 5px 0 rgba(101, 71, 37, .14), 0 8px 20px rgba(86, 65, 36, .08);
+}
+
+.goods-card.selected, .herb-bin.selected, .recipe-slip.selected {
+  box-shadow: 0 6px 0 rgba(48, 109, 69, .24), 0 0 0 3px rgba(72, 143, 92, .25), 0 10px 20px rgba(48, 104, 64, .12);
+}
+
+.shop-shelf, .warehouse-grid {
+  border-radius: 16px;
+  border-color: #8c5d35;
+  background:
+    linear-gradient(180deg, transparent 0 47%, rgba(101, 65, 36, .78) 47% 51%, transparent 51%),
+    repeating-linear-gradient(90deg, rgba(101, 68, 39, .12) 0 1px, transparent 1px 44px),
+    #c39460;
+  box-shadow: 0 7px 0 rgba(87, 57, 30, .16), inset 0 2px rgba(255, 231, 178, .25);
+}
+
+.market-offer {
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fff4c6, #ffe69e);
+  box-shadow: 0 4px 0 rgba(158, 98, 31, .16);
+}
+
+.shelf-modes {
+  border-radius: 12px;
+  background: rgba(238, 235, 211, .9);
+}
+
+.shelf-modes button { border-radius: 9px; }
+
+.furnace {
+  border-radius: 12px;
+}
+
+.furnace-pot {
+  border-radius: 30% 30% 42% 42%;
+  border-color: #233f35;
+  box-shadow: 0 8px 0 #c05f35, 0 12px 16px rgba(20,32,24,.3);
+}
+
+.recipe-slip {
+  background:
+    radial-gradient(circle at 15% 10%, #fffbe8, transparent 3rem),
+    linear-gradient(90deg, rgba(177, 126, 54, .10), transparent 13% 87%, rgba(177, 126, 54, .10)),
+    repeating-linear-gradient(0deg, rgba(136, 92, 41, .02) 0 1px, transparent 1px 9px),
+    linear-gradient(180deg, #fff6da, #f0dfb5);
+}
+
+.pill-orb {
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, #fffdf0, #e5f0d1);
+}
+
+.counter-panel, .plot-panel {
+  background: rgba(255, 253, 242, .98);
+  border-radius: 14px;
+}
+
+.owner-action, .btn {
+  background: linear-gradient(180deg, #2f7e56, #226544);
+  box-shadow: 0 4px 0 #184a33, 0 6px 12px rgba(27, 96, 60, .18);
+}
+
+.owner-action:active, .btn:active { transform: translateY(2px); box-shadow: 0 2px 0 #184a33; }
+
+@media (max-width: 359px) {
+  .game-header { border-radius: 12px; }
+  .farm-map, .shop-scene, .warehouse-scene, .alchemy-scene { border-radius: 12px; }
+  .goods-card, .herb-bin, .recipe-slip { border-radius: 12px; }
+}
+
+
+/* Garden v5 detail: rounder item tiles and clearer selected card. */
+.goods-icon, .bin-icon, .seed-pack, .herb-crate, .crop-big, .pill-orb {
+  border-radius: 16px;
+  background: linear-gradient(180deg, #fffdf1, #eef3d8);
+}
+
+.goods-icon .item-logo, .bin-icon .item-logo, .seed-pack .item-logo, .herb-crate .item-logo, .pill-orb .item-logo {
+  filter: drop-shadow(0 5px 4px rgba(75, 55, 29, .18));
+}
+
+.crop-big {
+  border-radius: 50%;
+  background: radial-gradient(circle at 45% 38%, #fffef2, #e4eed0);
+}
+
+.fluent-herb {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 4px 3px rgba(75, 55, 29, .16));
+}
+
+@media (max-width: 359px) {
+  .dock-tab .ui-icon { width: 26px; height: 26px; }
+  .dock-tab { grid-template-rows: 27px 14px; min-height: 52px; }
+  .dock-tab strong { font-size: 10px; }
 }

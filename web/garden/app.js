@@ -2483,7 +2483,7 @@ function farmModeInfo(seed, readyCount, emptyCount) {
     const canPlant = seed && seed.inventory > 0 && emptyCount > 0;
     return {
       kind: canPlant ? "mode-ready" : "mode-warn",
-      icon: "🌰",
+      icon: uiIcon("seed"),
       title: canPlant ? "播种工具已拿起" : "播种前先备种",
       detail: canPlant ? `点空田种下 ${seed.seedName}，可连续打理` : (seed ? `${seed.seedName} 库存不足或暂无空田` : "先去种子商店挑一枚灵种"),
       meta: canPlant ? `${Math.min(seed.inventory, emptyCount)} 块可播` : "不可播",
@@ -2492,7 +2492,7 @@ function farmModeInfo(seed, readyCount, emptyCount) {
   if (app.toolMode === "harvest") {
     return {
       kind: readyCount > 0 ? "mode-hot" : "mode-calm",
-      icon: "🧺",
+      icon: uiIcon("harvest"),
       title: readyCount > 0 ? "收获工具已就绪" : "暂时没有成熟田",
       detail: readyCount > 0 ? "点成熟地块即可收进背包，也可一键收成熟" : "成熟后这里会亮起收获提示",
       meta: readyCount > 0 ? `${readyCount} 块可收` : "等待",
@@ -2500,7 +2500,7 @@ function farmModeInfo(seed, readyCount, emptyCount) {
   }
   return {
     kind: "mode-calm",
-    icon: "✋",
+    icon: uiIcon("hand"),
     title: "手势查看模式",
     detail: "点地块看详情，切换工具后可连续播种或收获",
     meta: "巡园",
@@ -2551,7 +2551,7 @@ function farmFeedItems(seed, readyCount, emptyCount) {
   if (readyPlot) {
     items.push({
       kind: "feed-ready",
-      icon: "收",
+      icon: uiIcon("harvest"),
       title: `${readyPlot.plotNo} 号田成熟`,
       detail: `${readyPlot.herbName} 可收进背包`,
       meta: readyCount > 1 ? `另有 ${readyCount - 1} 块` : "现在",
@@ -2564,7 +2564,7 @@ function farmFeedItems(seed, readyCount, emptyCount) {
   if (emptyPlot) {
     items.push({
       kind: "feed-seed",
-      icon: "种",
+      icon: uiIcon("seed"),
       title: `${emptyPlot.plotNo} 号田可补种`,
       detail: seed && seed.inventory > 0 ? `可用 ${seed.seedName} x${seed.inventory}` : "先去种子铺补货",
       meta: `${emptyCount} 空田`,
@@ -2577,7 +2577,7 @@ function farmFeedItems(seed, readyCount, emptyCount) {
   if (matched) {
     items.push({
       kind: "feed-market",
-      icon: "市",
+      icon: uiIcon("market"),
       title: `${matched.herbName} 急收可处理`,
       detail: `药铺剩余额度 ${matched.left}`,
       meta: "药铺",
@@ -2589,7 +2589,7 @@ function farmFeedItems(seed, readyCount, emptyCount) {
   if (recipe) {
     items.push({
       kind: "feed-alchemy",
-      icon: "丹",
+      icon: uiIcon("recipe"),
       title: `${recipe.productName} 可开炉`,
       detail: `材料 ${recipe.materials.length}/${recipe.materials.length}`,
       meta: "丹炉",
@@ -2601,7 +2601,7 @@ function farmFeedItems(seed, readyCount, emptyCount) {
   if (next && !items.some((item) => item.plotNo === next.plotNo)) {
     items.push({
       kind: "feed-grow",
-      icon: "时",
+      icon: uiIcon("clock"),
       title: `${next.plotNo} 号田快成熟`,
       detail: `${formatRemaining(next.remainingSeconds)} 后可收 ${next.herbName}`,
       meta: formatShortTime(next.maturesAt),
@@ -2613,7 +2613,7 @@ function farmFeedItems(seed, readyCount, emptyCount) {
   if (items.length === 0) {
     items.push({
       kind: "feed-calm",
-      icon: "巡",
+      icon: uiIcon("herb"),
       title: "园区运转平稳",
       detail: "暂无紧急园务，保持巡园即可",
       meta: formatFarmClock(),
@@ -2759,14 +2759,14 @@ function plotAdvice(plot, seed) {
     if (seed && seed.inventory > 0) {
       return {
         kind: "advice-seed",
-        icon: "🌰",
+        icon: uiIcon("seed"),
         title: "可以立即播种",
         detail: `${seed.seedName} 库存 ${seed.inventory} 枚，点下方按钮即可种下`,
       };
     }
     return {
       kind: "advice-empty",
-      icon: "🏪",
+      icon: uiIcon("shop"),
       title: "这块田还空着",
       detail: "先去种子商店补货，再回来播种",
     };
@@ -2774,14 +2774,14 @@ function plotAdvice(plot, seed) {
   if (plot.status === "ready") {
     return {
       kind: "advice-ready",
-      icon: "🧺",
+      icon: uiIcon("harvest"),
       title: "现在是最佳收获时机",
       detail: "收获后空田可继续轮作",
     };
   }
   return {
     kind: "advice-grow",
-    icon: "⏳",
+    icon: uiIcon("clock"),
     title: `${cropStageName(plot)}阶段`,
     detail: `${formatRemaining(plot.remainingSeconds)} 后成熟，预计 ${formatShortTime(plot.maturesAt)}`,
   };
@@ -3243,7 +3243,7 @@ function farmGuidePlan(seed, readyCount, emptyCount) {
     return {
       kind: "harvest",
       tone: "guide-hot",
-      icon: "🧺",
+      icon: uiIcon("harvest"),
       title: `${readyCount} 块灵田成熟`,
       detail: `先收 ${ready.plotNo} 号 ${ready.herbName}，避免熟田闲置`,
       actionLabel: "去收获",
@@ -3254,7 +3254,7 @@ function farmGuidePlan(seed, readyCount, emptyCount) {
     return {
       kind: "plant",
       tone: "guide-seed",
-      icon: "🌰",
+      icon: uiIcon("seed"),
       title: `${emptyCount} 块空田可播`,
       detail: `用 ${seed.seedName} 补上 ${empty.plotNo} 号田，保持轮作`,
       actionLabel: "去播种",
@@ -3264,7 +3264,7 @@ function farmGuidePlan(seed, readyCount, emptyCount) {
     return {
       kind: "seed",
       tone: "guide-seed",
-      icon: "🏪",
+      icon: uiIcon("shop"),
       title: "空田缺少灵种",
       detail: "先到种子货架补货，再回来一键播种",
       actionLabel: "买种子",
@@ -3275,7 +3275,7 @@ function farmGuidePlan(seed, readyCount, emptyCount) {
     return {
       kind: "market",
       tone: "guide-market",
-      icon: "⚖",
+      icon: uiIcon("market"),
       title: "药铺急收可对上库存",
       detail: `${offer.herbName} 还有 ${offer.left} 株额度，可先核对回收`,
       actionLabel: "看药铺",
@@ -3286,7 +3286,7 @@ function farmGuidePlan(seed, readyCount, emptyCount) {
     return {
       kind: "alchemy",
       tone: "guide-alchemy",
-      icon: "🔥",
+      icon: uiIcon("fire"),
       title: "丹炉材料已齐",
       detail: `${recipe.productName} 可以开炉炼制`,
       actionLabel: "去炼丹",
@@ -3297,7 +3297,7 @@ function farmGuidePlan(seed, readyCount, emptyCount) {
     return {
       kind: "wait",
       tone: "guide-calm",
-      icon: "⏳",
+      icon: uiIcon("clock"),
       title: "灵田正在生长",
       detail: `${next.plotNo} 号田还需 ${formatRemaining(next.remainingSeconds)}`,
       actionLabel: "巡园",
@@ -3306,7 +3306,7 @@ function farmGuidePlan(seed, readyCount, emptyCount) {
   return {
     kind: "wait",
     tone: "guide-calm",
-    icon: "🌿",
+    icon: uiIcon("herb"),
     title: "今日园务清爽",
     detail: "药园暂无紧急动作，可查看商店或丹方",
     actionLabel: "巡园",
@@ -3407,7 +3407,7 @@ function seedShopGuide(seed) {
   if (emptyCount > 0 && stocked) {
     return {
       kind: "guide-plant",
-      icon: "🌰",
+      icon: uiIcon("seed"),
       title: "袋中已有可播灵种",
       detail: `${stocked.seedName} x${stocked.inventory}，可先回灵田补上 ${emptyCount} 块空田`,
       action: "use-seed",
@@ -3419,7 +3419,7 @@ function seedShopGuide(seed) {
   if (buyable) {
     return {
       kind: "guide-buy",
-      icon: "🏪",
+      icon: uiIcon("shop"),
       title: "今日还有可买灵种",
       detail: `${buyable.seedName} ${buyable.price} 积分，限购剩 ${buyable.leftToday}`,
       action: "select-seed",
@@ -3430,7 +3430,7 @@ function seedShopGuide(seed) {
   if (seed && seed.price > app.state.points) {
     return {
       kind: "guide-wait",
-      icon: "💰",
+      icon: uiIcon("coins"),
       title: "当前积分不足",
       detail: `${seed.seedName} 还差 ${seed.price - app.state.points} 积分`,
       action: "set-seed-mode",
@@ -3439,7 +3439,7 @@ function seedShopGuide(seed) {
   }
   return {
     kind: "guide-wait",
-    icon: "🧺",
+    icon: uiIcon("harvest"),
     title: "今日货架已巡完",
     detail: "可回灵田查看成长，或去药铺核对库存",
     action: "open-market",
@@ -3454,7 +3454,7 @@ function herbWarehouseGuide(herb) {
     const qty = matchedHerb ? Math.min(matchedHerb.inventory, matchedOffer.left) : 0;
     return {
       kind: "guide-market",
-      icon: "⚖",
+      icon: uiIcon("market"),
       title: "急收行情匹配库存",
       detail: `${matchedOffer.herbName} 可按急收优先处理 ${qty} 株`,
       action: "select-herb",
@@ -3466,7 +3466,7 @@ function herbWarehouseGuide(herb) {
   if (stocked) {
     return {
       kind: "guide-stock",
-      icon: "🧺",
+      icon: uiIcon("harvest"),
       title: "仓库里还有可处理灵草",
       detail: `${stocked.herbName} 库存 ${stocked.inventory} 株，可回收或留作炼丹`,
       action: "select-herb",
@@ -3478,7 +3478,7 @@ function herbWarehouseGuide(herb) {
   if (missingRecipe) {
     return {
       kind: "guide-recipe",
-      icon: "🔥",
+      icon: uiIcon("fire"),
       title: "丹炉缺少材料",
       detail: `${missingRecipe.productName} 还需补齐草药`,
       action: "open-recipes",
@@ -3487,7 +3487,7 @@ function herbWarehouseGuide(herb) {
   }
   return {
     kind: "guide-empty",
-    icon: "🌿",
+    icon: uiIcon("herb"),
     title: "仓库暂时清爽",
     detail: "回灵田播种收获后，灵草会进入这里",
     action: "open-seeds",
@@ -3500,7 +3500,7 @@ function alchemyGuide(recipe) {
   if (ready) {
     return {
       kind: "guide-ready",
-      icon: "🔥",
+      icon: uiIcon("fire"),
       title: "炉火可开，材料已齐",
       detail: `${ready.productName} 可以炼制，先核对炉火费和库存`,
       action: "select-recipe",
@@ -3513,7 +3513,7 @@ function alchemyGuide(recipe) {
     const mat = missing.materials.find((item) => !item.enough);
     return {
       kind: "guide-missing",
-      icon: "🧺",
+      icon: uiIcon("harvest"),
       title: "丹方缺少材料",
       detail: mat ? `${missing.productName} 缺 ${mat.itemName} x${Math.max(0, mat.need - mat.owned)}` : `${missing.productName} 材料未齐`,
       action: "open-herbs",
@@ -3524,7 +3524,7 @@ function alchemyGuide(recipe) {
   if (locked) {
     return {
       kind: "guide-locked",
-      icon: "📜",
+      icon: uiIcon("recipe"),
       title: "还有丹方未参悟",
       detail: `${locked.name} 需要 ${locked.unlockPrice} 积分参悟`,
       action: "select-recipe",
@@ -3534,7 +3534,7 @@ function alchemyGuide(recipe) {
   }
   return {
     kind: "guide-calm",
-    icon: "丹",
+    icon: uiIcon("recipe"),
     title: "丹炉暂时待命",
     detail: recipe ? "可回灵田收草，或去仓库核对材料" : "暂无可处理丹方",
     action: "open-herbs",
@@ -3674,26 +3674,29 @@ function alchemyIdleIcon() {
 
 function uiIcon(name) {
   const icons = {
-    field: `<svg class="ui-icon ui-icon-field" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v10.5A2.5 2.5 0 0 1 17.5 20h-11A2.5 2.5 0 0 1 4 17.5V7Z" fill="#9d6c3d"/><path d="M4 8.5h16M5.5 12h13M6 15.5h12" stroke="#6f4726" stroke-width="1.4" stroke-linecap="round"/><path d="M7 6c2.3-2.5 7.5-2.5 10 0" stroke="#2f7d4d" stroke-width="2" stroke-linecap="round"/><path d="M12 5.8V3.5" stroke="#2f7d4d" stroke-width="2" stroke-linecap="round"/></svg>`,
-    seed: `<svg class="ui-icon ui-icon-seed" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9h12l1.6 8.1A3 3 0 0 1 16.7 21H7.3a3 3 0 0 1-2.9-3.9L6 9Z" fill="#8b5a32"/><path d="M6.2 9c1.1-4 3.1-6 5.8-6s4.7 2 5.8 6c-2.8 1.3-8.8 1.3-11.6 0Z" fill="#f0c45a"/><path d="M12 11c2.4 2.2 2.4 5.8 0 8-2.4-2.2-2.4-5.8 0-8Z" fill="#2f7d4d"/><path d="M8.5 15.2c2-1.7 5-1.7 7 0-2 1.7-5 1.7-7 0Z" fill="#7fb84f"/></svg>`,
-    herb: `<svg class="ui-icon ui-icon-herb" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V9" stroke="#7a4d2b" stroke-width="2" stroke-linecap="round"/><path d="M12 12C6.5 11.7 4.5 8.4 5.2 4c4.5.2 7 2.8 6.8 8Z" fill="#5aa05b"/><path d="M12 13c5.5-.3 7.5-3.6 6.8-8-4.5.2-7 2.8-6.8 8Z" fill="#2f7d4d"/><path d="M12 18c-3.5-.3-5.2-2-5.7-4.6 3.1-.2 5 1.2 5.7 4.6Z" fill="#8fc35a"/></svg>`,
-    recipe: `<svg class="ui-icon ui-icon-recipe" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h10.8A2.2 2.2 0 0 1 19 5.2V21l-3-1.4-3 1.4-3-1.4L7 21V6.2A3.2 3.2 0 0 0 6 3Z" fill="#f1d39a"/><path d="M6 3a3 3 0 0 0 0 6h11" fill="none" stroke="#9a6335" stroke-width="1.6" stroke-linecap="round"/><path d="M10 10h5M10 14h4" stroke="#7b4b2a" stroke-width="1.5" stroke-linecap="round"/><path d="M8.5 4.5h7" stroke="#fff2c8" stroke-width="1.4" stroke-linecap="round"/></svg>`,
-    harvest: `<svg class="ui-icon ui-icon-harvest" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 10h12l-1.3 8.2A3 3 0 0 1 13.8 21H10a3 3 0 0 1-2.9-2.8L6 10Z" fill="#9a6335"/><path d="M8 10c.4-4 2-6 4-6s3.6 2 4 6" fill="none" stroke="#76512b" stroke-width="2" stroke-linecap="round"/><path d="M8 13h8" stroke="#f0c45a" stroke-width="1.6" stroke-linecap="round"/><path d="M11 8c-.2-3 1.6-5 4.8-5 .1 3.2-1.6 5.1-4.8 5Z" fill="#2f7d4d"/></svg>`,
-    hand: `<svg class="ui-icon ui-icon-hand" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.2 12.2V5.7a1.4 1.4 0 0 1 2.8 0v5.1-6.2a1.4 1.4 0 0 1 2.8 0v6.2-4.9a1.4 1.4 0 0 1 2.8 0v7.4l.9-1.4a1.5 1.5 0 0 1 2.5 1.6l-2.6 4.2A5 5 0 0 1 13.1 20h-1.4a5 5 0 0 1-4.8-3.6L6 13.2a1.5 1.5 0 0 1 2.2-1Z" fill="#f0c58f" stroke="#9a6335" stroke-width="1.3" stroke-linejoin="round"/></svg>`,
-    market: `<svg class="ui-icon ui-icon-market" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h16l-1.4 10H5.4L4 9Z" fill="#c69a61"/><path d="M6 9c.8-3.6 2.8-5.5 6-5.5S17.2 5.4 18 9" fill="none" stroke="#73512f" stroke-width="2" stroke-linecap="round"/><path d="M8 13h8M9 16h6" stroke="#fff0bf" stroke-width="1.4" stroke-linecap="round"/><path d="M10 6h4" stroke="#2f7d4d" stroke-width="2" stroke-linecap="round"/></svg>`,
-    shop: `<svg class="ui-icon ui-icon-shop" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10h14v10H5V10Z" fill="#e7c787"/><path d="M4 7h16l-1.5 4h-13L4 7Z" fill="#b45a4a"/><path d="M7 7l.8 4M12 7v4M17 7l-.8 4" stroke="#fff1c5" stroke-width="1.3" stroke-linecap="round"/><path d="M8 15h8M9 18h6" stroke="#7a4d2b" stroke-width="1.5" stroke-linecap="round"/></svg>`,
-    clock: `<svg class="ui-icon ui-icon-clock" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="#eef6f8" stroke="#327f82" stroke-width="2"/><path d="M12 7v5l3.5 2" stroke="#327f82" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 5.5 4.8 4.3M18 5.5l1.2-1.2" stroke="#b5852c" stroke-width="1.8" stroke-linecap="round"/></svg>`,
+    field: `<svg class="ui-icon ui-icon-field" viewBox="0 0 48 48" aria-hidden="true"><path fill="currentColor" d="M6 15h36c1.1 0 2 .9 2 2v19c0 1.1-.9 2-2 2H6c-1.1 0-2-.9-2-2V17c0-1.1.9-2 2-2Zm2 4v2h5v-2H8Zm8 0v2h5v-2h-5Zm8 0v2h5v-2h-5Zm8 0v2h6v-2h-6Zm-24 6v12h32V25H8Zm5 2v3h4v-3h-4Zm8 0v3h4v-3h-4Zm8 0v3h4v-3h-4Z"/><path fill="currentColor" d="M15 10c-2-4 2-7 9-7s11 3 9 7c-5 2-13 2-18 0Z" opacity=".9"/><path fill="currentColor" d="M24 3c1 3 1 6 0 9-1-3-1-6 0-9Z"/></svg>`,
+    seed: `<svg class="ui-icon ui-icon-seed" viewBox="0 0 48 48" aria-hidden="true"><path fill="currentColor" d="M11 15h26c1.7 0 3 1.3 3 3l-4 22c-.3 1.8-1.8 3-3.6 3h-16.8a3.7 3.7 0 0 1-3.6-3L8 18c0-1.7 1.3-3 3-3Z" opacity=".95"/><path fill="currentColor" d="M13 12c1.5-5.5 5.5-8 11-8s9.5 2.5 11 8c-6 2.5-16 2.5-22 0Z"/><path fill="currentColor" d="M24 16c5 5 5 12 0 17-5-5-5-12 0-17Z" opacity=".78"/><circle cx="24" cy="26" r="7" fill="currentColor" opacity=".85"/><path fill="currentColor" d="M17 31c4-3 10-3 14 0-4 3-10 3-14 0Z"/></svg>`,
+    herb: `<svg class="ui-icon ui-icon-herb" viewBox="0 0 48 48" aria-hidden="true"><path fill="currentColor" d="M24 44V18" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"/><path fill="currentColor" d="M24 22C12 20 7 12 9 4c11 1 16 8 15 18Z"/><path fill="currentColor" d="M24 25c12-2 17-9 15-17-11 1-16 8-15 17Z" opacity=".85"/><path fill="currentColor" d="M24 36c-8-1-13-5-14-12 8-1 13 3 14 12Z" opacity=".7"/></svg>`,
+    recipe: `<svg class="ui-icon ui-icon-recipe" viewBox="0 0 48 48" aria-hidden="true"><path fill="currentColor" d="M11 6h22c2.2 0 4 1.8 4 4v31l-6-3-6 3-6-3-6 3V12c0-3.3-1-4-2-6Z"/><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" d="M12 6c0 3 1.5 5 4 5h17M18 18h11M18 25h9"/></svg>`,
+    harvest: `<svg class="ui-icon ui-icon-harvest" viewBox="0 0 48 48" aria-hidden="true"><path fill="currentColor" d="M10 20h28l-3 18a4 4 0 0 1-4 3H17a4 4 0 0 1-4-3L10 20Z"/><path fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" d="M15 20c1-8 4-12 9-12s8 4 9 12M15 27h18"/><path fill="currentColor" d="M25 8c-1-5 3-7 9-6 0 6-3 8-9 6Z"/></svg>`,
+    hand: `<svg class="ui-icon ui-icon-hand" viewBox="0 0 48 48" aria-hidden="true"><path fill="currentColor" d="M16 22V12a3 3 0 0 1 6 0v8-11a3 3 0 0 1 6 0v11-8a3 3 0 0 1 6 0v14l2-3a3 3 0 0 1 5 3l-6 10a9 9 0 0 1-7 4h-3a9 9 0 0 1-8-5l-6-9a3 3 0 0 1 5-4Z"/></svg>`,
+    market: `<svg class="ui-icon ui-icon-market" viewBox="0 0 48 48" aria-hidden="true"><path fill="currentColor" d="M8 18h32l-3 24H11L8 18Z"/><path fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" d="M11 18c1-7 6-11 13-11s12 4 13 11M16 25h16M18 31h12"/></svg>`,
+    shop: `<svg class="ui-icon ui-icon-shop" viewBox="0 0 48 48" aria-hidden="true"><path fill="currentColor" d="M8 13h32l-3 8H11L8 13ZM8 21h32v20H8V21Z"/><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M12 21v20M24 21v20M36 21v20M14 28h20M15 35h18"/></svg>`,
+    clock: `<svg class="ui-icon ui-icon-clock" viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="17" fill="none" stroke="currentColor" stroke-width="3"/><path fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" d="M24 12v12l8 6"/><circle cx="24" cy="24" r="2.5" fill="currentColor"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="m13.5 10-2-2M34.5 10l2-2"/></svg>`,
+    fire: `<svg class="ui-icon ui-icon-fire" viewBox="0 0 48 48" aria-hidden="true"><path fill="currentColor" d="M24 6c2 7 8 10 8 18a8 8 0 1 1-16 0c0-4 2-6 3-9 3 2 5 3 5-9Z"/><path fill="currentColor" d="M19 34c2 2 8 2 10 0-1 5-9 5-10 0Z" opacity=".7"/></svg>`,
+    coins: `<svg class="ui-icon ui-icon-coins" viewBox="0 0 48 48" aria-hidden="true"><circle cx="20" cy="18" r="10" fill="none" stroke="currentColor" stroke-width="3"/><path fill="currentColor" d="M9 20c0 7 5 12 12 12 2 0 4-.4 6-1.2-2 5.4-8 7.2-13.5 4.4C8.5 32.4 6 27 6 22c0-1 .1-1.9.3-2.8C7.5 20 8.2 20 9 20Z"/></svg>`,
   };
   return icons[name] || `<span class="ui-icon ui-icon-text" aria-hidden="true">•</span>`;
 }
 
+
 function itemLogo(type, key, name) {
 	const itemKey = String(key || "").replace(/^mock_/, "");
 	const variant = logoVariant(itemKey || name);
-	const category = type === "herb" ? herbCategory(name) : "";
 	const palette = gardenItemPalette(itemKey, variant);
-	if (type === "seed") return seedLogoSVG(variant, palette, itemKey);
+	if (type === "seed") return cuteSeedSVG(itemKey, palette[0], palette[1], palette[2], palette[3]);
 	if (type === "pill") return pillLogoSVG(itemKey, gardenPillPalette(itemKey));
+	const category = type === "herb" ? herbCategory(name) : "";
 	return herbLogoSVG(category, variant, palette, itemKey);
 }
 
@@ -3727,6 +3730,63 @@ function gardenItemPalette(key, variant) {
 	return palettes[key] || logoPalette(variant);
 }
 
+
+function cuteSeedSVG(key, primary, accent, gold, earth) {
+  const motif = gardenSeedEmblemSVG(key, primary, accent, gold);
+  return `
+    <svg class="item-logo seed-logo seed-cute logo-${key}" viewBox="0 0 64 64" aria-hidden="true">
+      <ellipse cx="32" cy="55" rx="24" ry="6" fill="rgba(64,42,24,.16)"/>
+      <path d="M17 53h30c6 0 10-4 9-10l-5-24H13L8 43c-1 6 3 10 9 10Z" fill="${earth}"/>
+      <path d="M15 19c3-8 9-12 17-12s14 4 17 12c-8 5-26 5-34 0Z" fill="${gold}"/>
+      <path d="M18 21h28l3 20c1 4-2 7-6 7H21c-4 0-7-3-6-7l3-20Z" fill="${earth}"/>
+      <path d="M20 24h24" stroke="#f8e3a6" stroke-width="3" stroke-linecap="round" opacity=".72"/>
+      <circle cx="32" cy="38" r="12" fill="#fff7d8" opacity=".96"/>
+      <circle cx="32" cy="38" r="12" fill="none" stroke="${gold}" stroke-width="2" opacity=".55"/>
+      ${motif}
+      <circle cx="18" cy="14" r="3" fill="#fff7d8" opacity=".8"/>
+      <circle cx="46" cy="14" r="3" fill="#fff7d8" opacity=".8"/>
+    </svg>
+  `;
+}
+
+// 2026-09 garden v5: the eight production herbs use polished inline SVG art.
+// For most entries the artwork is adapted from Fluent Emoji / open icon libraries,
+// embedded inline so the Mini App does not depend on external icon CDNs.
+function cuteHerbSVG(key, name) {
+  const svgs = {
+    ninglu: `
+      <svg class="item-logo herb-logo herb-ninglu fluent-herb" viewBox="0 0 32 32"><g fill="none"><path fill="#44911b" d="m8.018 29.6l1.14.39l1.35-3.898l4.02.418c.33.03.63-.21.66-.54a.605.605 0 0 0-.54-.66l-3.733-.39a13.2 13.2 0 0 1 5.09-6.46l4.143.44c.33.03.63-.21.66-.54a.605.605 0 0 0-.54-.66l-2.904-.31a14.4 14.4 0 0 0 4.024-6.03l.38-1.09a.6.6 0 0 0-.37-.77a.6.6 0 0 0-.77.37l-.38 1.09a13.2 13.2 0 0 1-4.046 5.824l-1.704-3.504a.605.605 0 1 0-1.09.53l1.806 3.716l-.006.004a14.4 14.4 0 0 0-5.282 6.59l-1.308-2.69a.605.605 0 1 0-1.09.53l1.83 3.763z"/><path fill="#86d72f" d="M23.978 2c-3.34 1.63-4.74 5.66-3.11 9a6.727 6.727 0 0 0 3.11-9m-8.19 7.05l-1.81-3.72a4.226 4.226 0 0 0-1.95 5.65l1.81 3.72a4.23 4.23 0 0 0 1.95-5.65m-5.43 6.39l-2.32-4.76c-2.68 1.31-3.8 4.54-2.49 7.22l2.32 4.76a5.41 5.41 0 0 0 2.49-7.22m17.56.03l-4.12-.43c-2.32-.25-4.39 1.44-4.64 3.76l4.12.43c2.32.24 4.4-1.44 4.64-3.76m-8.57 6.13l5.27.55a5.403 5.403 0 0 1-5.94 4.81l-5.27-.55a5.403 5.403 0 0 1 5.94-4.81"/></g></svg>
+    `,
+    qingling: `
+      <svg class="item-logo herb-logo herb-qingling fluent-herb" viewBox="0 0 32 32"><g fill="none"><path fill="#86d72f" d="M22.39 6.45c-2.29 0-4.32 1.08-5.63 2.75v-.47h-.01A7.155 7.155 0 0 0 9.61 2H2c0 3.95 3.2 7.15 7.15 7.15h5.19v12.46h2.42v-8h6.09c3.95 0 7.15-3.2 7.15-7.15h-7.61z"/><path fill="#6d4534" d="M15.55 21a8.99 8.99 0 0 0-8.99 8.99h17.99c0-4.965-4.025-8.99-9-8.99"/></g></svg>
+    `,
+    chiyang: `
+      <svg class="item-logo herb-logo herb-chiyang fluent-herb" viewBox="0 0 32 32"><g fill="none"><path fill="#86d72f" d="M15 30h3.867c3.276 0 5.963-2.545 6.133-5.68a.297.297 0 0 0-.3-.32l-3.506.01A5.27 5.27 0 0 0 17 26.169V22l1.34-.65c.27-.13.27-.52 0-.65L17 20.03v-1.8h-2v6.73l-1.35.67c-.27.13-.27.52 0 .65l1.35.67z"/><path fill="#ca0b4a" d="M14.79 12.13h.86c.04 0 .08-.01.12-.02c.07.03.14.06.22.06h.87c2.13 0 3.86-1.73 3.86-3.86V2.54c0-.28-.22-.5-.5-.5h-.87c-1.57 0-2.91.94-3.52 2.28A3.82 3.82 0 0 0 12.31 2h-.86c-.29 0-.52.23-.52.51v5.76c0 2.13 1.73 3.86 3.86 3.86"/><path fill="#f8312f" d="M11 4.5s3 0 5 3c2-3 5-3 5-3h1.113c.682 0 1.108.646.805 1.258C22.484 6.63 22 7.712 22 9c0 .944.223 1.554.458 2.198c.263.72.542 1.482.542 2.802c0 2.5-1 5-7 5s-7-2.5-7-5c0-1.03.25-1.765.5-2.5s.5-1.47.5-2.5c0-1.201-.36-2.222-.757-3.063c-.318-.672.132-1.437.875-1.437z"/></g></svg>
+    `,
+    yuehua: `
+      <svg class="item-logo herb-logo herb-yuehua fluent-herb" viewBox="0 0 32 32"><g fill="none"><path fill="#86d72f" d="M25.251 15.495c-3.7-1.85-8.39-.31-10.33 3.51l-.35.68a.5.5 0 0 0 .023.502a.5.5 0 0 0-.223.418v.76c0 4.28 3.48 7.78 7.61 7.81l5.15.01c.26 0 .46-.22.45-.48a9.1 9.1 0 0 0-2.798-6.09a9.1 9.1 0 0 0 5.238-4.16a.45.45 0 0 0-.18-.63z"/><path fill="#ff6dc6" d="M24.911 8.105a5.42 5.42 0 0 0-4.85-.14c.15-1.62-.4-3.29-1.68-4.49a5.477 5.477 0 0 0-7.73.25c-1.18 1.26-1.63 2.93-1.4 4.52c-1.5-.52-3.22-.38-4.67.52a5.474 5.474 0 0 0-1.76 7.53a5.42 5.42 0 0 0 3.48 2.45a5.42 5.42 0 0 0-.67 4.02a5.454 5.454 0 0 0 6.52 4.15a5.37 5.37 0 0 0 3.19-2.07c.84.96 2.02 1.64 3.39 1.83c2.99.4 5.74-1.7 6.15-4.69c.19-1.41-.18-2.77-.94-3.85a5.455 5.455 0 0 0 .97-10.03"/><path fill="#f70a8d" d="M20.841 10.715c-.93-.5-1.99-.49-2.88-.08a3.228 3.228 0 0 0-5.01-3c-1.13.76-1.57 2-1.4 3.17a3.25 3.25 0 0 0-3.2.62c-1.01.87-1.38 2.36-.89 3.6a3.25 3.25 0 0 0 2.34 2.01c-.52.86-.65 1.96-.19 3.02a3.27 3.27 0 0 0 2.94 1.91a3.26 3.26 0 0 0 2.61-1.3c.94 1.08 2.6 1.56 4.38.59c.83-.45 1.3-1.35 1.27-2.29c.11-.84-.11-1.64-.56-2.28a3.2 3.2 0 0 0 1.91-1.57c.85-1.59.26-3.56-1.32-4.4"/><path fill="#fff478" d="M14.901 16.475a1.95 1.95 0 1 0 0-3.9a1.95 1.95 0 0 0 0 3.9"/><path fill="#f9c23c" d="M14.851 15.075c-.14 0-.28-.06-.38-.17l-3.78-4.33a.505.505 0 0 1 .05-.71c.21-.18.52-.16.71.05l3.79 4.33c.18.21.16.52-.05.71a.6.6 0 0 1-.34.12"/><path fill="#fff478" d="M10.412 9.77a.49.49 0 1 0 0-.98a.49.49 0 0 0 0 .98m1.11.09a.49.49 0 1 0 0-.98a.49.49 0 0 0 0 .98m-.77.6a.49.49 0 1 1-.98 0a.49.49 0 0 1 .98 0m.41 1.29a.49.49 0 1 0 0-.98a.49.49 0 0 0 0 .98m1.46-1.39a.49.49 0 1 1-.98 0a.49.49 0 0 1 .98 0"/></g></svg>
+    `,
+    xuanshen: `
+      <svg class="item-logo herb-logo herb-xuanshen fluent-herb" viewBox="0 0 32 32"><g fill="none"><path fill="#e19747" fill-rule="evenodd" d="M15.011 4.898c.508-.336.954-.63.55-1.035L14.146 2.45a1.5 1.5 0 0 0-2.12-.001L8.111 6.354A5.5 5.5 0 0 0 6.5 10.243v4.561C5.708 14.931 4.875 15 4 15v8.422c2.834 0 5.361-.341 7.616-.916l1.331 3.586c.8 2.156 1.31 3.003 3.61 3.003l3.49.234c.828 0 2.963-.265 2.963-1.094v-1.734a1.5 1.5 0 0 0-1.5-1.5h-4.953a.5.5 0 0 1-.47-.326l-1.198-3.23a26.3 26.3 0 0 0 5.288-2.837v.705l3.26 1.904c1.941.882 5.15 2.022 5.824 0c.82-2.459-1.156-4.95-3.736-4.71l-2.992.276c1.75-1.506 3.11-3.025 4.17-4.267c1.385-1.624 2.572-3.134 1.351-4.686a10.7 10.7 0 0 0-2.003-1.932c-2.7-2.017-5.77-2.496-6.95-1.11c-.192.176-.36.384-.488.622c-1.342 2.478-3.95 6.205-8.233 8.205l.136-3.896a.5.5 0 0 1 .146-.353L14.36 5.39c.182-.182.424-.341.652-.493" clip-rule="evenodd"/><path fill="#b97028" fill-rule="evenodd" d="M15.56 3.862a1.5 1.5 0 0 1 0 2.123l-3.914 3.903a.5.5 0 0 0-.146.354v2.79c-.712.41-1.476.771-2.294 1.07c-.146-2.061-.102-5.18.763-6.103c1.093-1.166 3.783-3.647 4.983-4.745zM10.6 24.26l.8 2.154A5.5 5.5 0 0 0 16.556 30h4.954a1.5 1.5 0 0 0 1.5-1.5v-.489l-.022.004c-8.666 1.698-10.28-4.33-8.887-4.785H14.1a31.7 31.7 0 0 0 4.95-2.298l5.32 2.418a3.59 3.59 0 0 0 4.875-2.082l.015-.045l.002-.006q.182-.552.188-1.092l-.15.045c-.876.26-2.338.696-3.799.33c-1.463-.365-2.365-1.062-2.887-1.913a4.3 4.3 0 0 1-.58-1.757l3.068-.284a37 37 0 0 0 3.481-3.558q.223-.262.363-.551q.038-.045.074-.093c.859-1.15.278-3.113-1.282-4.896q-.19.33-.387.677c-1.356 2.39-3.13 5.514-7.85 9.375C16.404 20.032 9 22 4.5 22L4 24v1c2.348 0 4.55-.271 6.6-.74" clip-rule="evenodd"/><path fill="#d3883e" fill-rule="evenodd" d="M9.627 4.842c.283.783.793 1.6 1.456 2.193c.753.673 1.658 1.022 2.647.776l-1.056 1.054c-.863-.106-1.63-.525-2.257-1.085c-.673-.601-1.207-1.382-1.559-2.172zM6.5 12.128v-1.044a6.9 6.9 0 0 1 5 .53v1.153a5.9 5.9 0 0 0-5-.64m8.91 17.751q.507.109 1.039.12a5.7 5.7 0 0 1 .014-2.376c.212-.95.704-1.916 1.693-2.623h-1.48a5.4 5.4 0 0 0-1.189 2.405a6.8 6.8 0 0 0-.078 2.474m11.956-15.536c-1.074-1.55-2.62-3.01-4.325-4.224c-1.758-1.252-3.714-2.265-5.548-2.853q-.283.423-.606.86c1.798.53 3.783 1.532 5.573 2.808c1.707 1.216 3.207 2.66 4.195 4.142q.374-.375.711-.733m-3.442 5.046c.444-1.106 1.128-2.144 2.067-2.897c.48.017.931.127 1.34.312c-1.136.597-1.968 1.683-2.48 2.957c-.469 1.17-.648 2.45-.555 3.555l-1.023-.465a9.1 9.1 0 0 1 .65-3.462m-4.93 1.574c-.046-2.549-.436-4.713-1.37-6.392c-.825-1.486-2.056-2.56-3.768-3.194q-.453.383-.947.742c1.833.52 3.052 1.516 3.841 2.937c.877 1.578 1.25 3.728 1.25 6.445h.012q.501-.263.983-.538m-8.923-2.389a12.9 12.9 0 0 1-.002 5.802q-.537.113-1.087.206c.534-1.87.54-3.963.115-5.78c-.443-1.894-1.316-3.357-2.413-4.028q.654-.113 1.271-.278c1.026.97 1.738 2.463 2.116 4.078" clip-rule="evenodd"/><path fill="#975617" fill-rule="evenodd" d="M13.73 7.81c-.988.246-1.893-.103-2.647-.776l-.082-.075c-.26.254-.5.493-.709.705q.062.06.125.116c.627.56 1.395.979 2.257 1.084zm-2.23 3.805a6.9 6.9 0 0 0-2.312-.722c-.023.328-.037.666-.042 1.003a5.9 5.9 0 0 1 2.354.871zM23.273 22.85a9.1 9.1 0 0 1 .506-3.076q.394.262.9.463a8 8 0 0 0-.383 3.078zm-5.448-4.246c.12.88.175 1.845.175 2.895h.012q.501-.263.983-.538a21 21 0 0 0-.242-2.915q-.432.286-.928.558m-8.843 5.977c.287-1.003.422-2.07.42-3.126q.495-.097.997-.21a12.6 12.6 0 0 1-.33 3.13q-.536.112-1.087.206m16.085-12.828c.885.812 1.672 1.685 2.299 2.589q-.337.356-.712.732c-.577-.867-1.33-1.72-2.196-2.522q.322-.408.609-.8m-9.58 15.651q.034-.154.078-.31q.402.28.902.51l-.004.017A5.7 5.7 0 0 0 16.45 30a5.5 5.5 0 0 1-1.04-.12a6.8 6.8 0 0 1 .078-2.474" clip-rule="evenodd"/><ellipse cx="5" cy="2" fill="#ffce7c" rx="5" ry="2" transform="matrix(0 -1 -1 0 6 25)"/><ellipse cx="3" cy="1" fill="#ffdea7" rx="3" ry="1" transform="matrix(0 -1 -1 0 5 23)"/></g></svg>
+    `,
+    longxue: `
+      <svg class="item-logo herb-logo herb-longxue fluent-herb" viewBox="0 0 32 32"><g fill="none"><path fill="#008463" d="M15.98 2a1 1 0 0 1 1 1v4.41a1 1 0 1 1-2 0V3a1 1 0 0 1 1-1"/><path fill="#f8312f" d="m18.18 29.01l5.27-5.97c5.67-6.43 1.11-16.55-7.47-16.55S2.84 16.61 8.51 23.04l5.27 5.97a2.94 2.94 0 0 0 4.4 0"/><path fill="#1c1c1c" d="M9.62 13.24c-.51 0-.93.42-.93.93v.93c0 .51.42.93.93.93s.93-.42.93-.93v-.93c0-.52-.42-.93-.93-.93m2.25 5.83c0-.51.42-.93.93-.93c.52 0 .93.42.93.93V20c0 .51-.42.93-.93.93s-.93-.42-.93-.93zm6.37 0c0-.51.42-.93.93-.93c.52 0 .93.42.93.93V20c0 .51-.42.93-.93.93s-.93-.42-.93-.93zm-3.18-4.9c0-.51.42-.93.93-.93s.93.41.93.93v.93c0 .51-.42.93-.93.93s-.93-.42-.93-.93zm.93 8.52c-.51 0-.93.42-.93.93v.93c0 .51.42.93.93.93s.93-.42.93-.93v-.93c0-.51-.42-.93-.93-.93m5.45-8.52c0-.51.42-.93.93-.93s.93.41.93.93v.93c0 .51-.42.93-.93.93s-.93-.42-.93-.93z"/><path fill="#00d26a" d="M6.14 11.44h5.54a5.43 5.43 0 0 0 4.296-2.103a5.43 5.43 0 0 0 4.293 2.103h5.54c0-3-2.43-5.44-5.44-5.44h-8.79c-3 0-5.44 2.44-5.44 5.44"/></g></svg>
+    `,
+    tianxin: `
+      <svg class="item-logo herb-logo herb-tianxin fluent-herb" viewBox="0 0 32 32"><g fill="none"><path fill="#008463" d="M17.688 6.952h-3.372c0-3.177-3.597-5.04-6.242-3.24C4.394 6.218 1.984 10.423 2 15.183C2.026 22.858 8.39 29.072 16.136 29C23.807 28.926 30 22.75 30 15.137c0-4.758-2.42-8.953-6.107-11.448c-2.631-1.784-6.205.105-6.205 3.263"/><path fill="#f70a8d" fill-rule="evenodd" d="M20.38 6.17a7.3 7.3 0 0 1 .307 4.794a7.28 7.28 0 0 1 4.841.24a.73.73 0 0 1 .404.954a7.3 7.3 0 0 1-3.143 3.59a7.3 7.3 0 0 1 3.185 3.556a.73.73 0 0 1-.391.961a7.28 7.28 0 0 1-4.76.316a7.28 7.28 0 0 1-.263 4.759a.73.73 0 0 1-.955.404a7.3 7.3 0 0 1-3.59-3.143a7.3 7.3 0 0 1-3.555 3.184a.736.736 0 0 1-.962-.39a7.3 7.3 0 0 1-.316-4.761a7.28 7.28 0 0 1-4.762-.263a.737.737 0 0 1-.403-.955a7.3 7.3 0 0 1 3.145-3.59a7.3 7.3 0 0 1-3.184-3.555a.735.735 0 0 1 .391-.962a7.28 7.28 0 0 1 4.76-.315a7.28 7.28 0 0 1 .263-4.762a.73.73 0 0 1 .955-.404a7.3 7.3 0 0 1 3.55 3.075A7.3 7.3 0 0 1 19.42 5.78a.733.733 0 0 1 .961.39m-4.423 9.603l.044.014l-.007.017l-.018.008l-.018-.007l-.007-.017z" clip-rule="evenodd"/><path fill="#ff6dc6" d="M15.373 15.512a8.484 8.484 0 0 1 0-11.995a.847.847 0 0 1 1.203 0a8.484 8.484 0 0 1 0 11.995a.847.847 0 0 1-1.203 0"/><path fill="#ff6dc6" d="M15.373 28.058a8.484 8.484 0 0 1 0-11.995a.847.847 0 0 1 1.203 0a8.484 8.484 0 0 1 0 11.995a.847.847 0 0 1-1.203 0"/><path fill="#f837a2" d="M15.354 16.018a8.483 8.483 0 0 1-8.482-8.482c0-.471.382-.852.85-.85a8.483 8.483 0 0 1 8.482 8.483a.85.85 0 0 1-.85.849"/><path fill="#f837a2" d="M24.227 24.891a8.483 8.483 0 0 1-8.482-8.482a.85.85 0 0 1 .85-.85a8.483 8.483 0 0 1 8.481 8.483a.85.85 0 0 1-.849.849"/><path fill="#ff6dc6" d="M15.7 16.39a8.484 8.484 0 0 1-11.995 0a.847.847 0 0 1 0-1.202a8.484 8.484 0 0 1 11.995 0a.85.85 0 0 1 0 1.202"/><path fill="#ff6dc6" d="M28.247 16.39a8.484 8.484 0 0 1-11.995 0a.847.847 0 0 1 0-1.202a8.483 8.483 0 0 1 11.995 0a.847.847 0 0 1 0 1.202"/><path fill="#f837a2" d="M25.006 7.495a8.483 8.483 0 0 1-8.482 8.482a.847.847 0 0 1-.85-.85a8.483 8.483 0 0 1 8.482-8.482a.85.85 0 0 1 .85.85"/><path fill="#f837a2" d="M16.207 16.409a8.483 8.483 0 0 1-8.482 8.482a.85.85 0 0 1-.853-.853a8.48 8.48 0 0 1 8.485-8.478a.85.85 0 0 1 .85.849"/><path fill="#f9c23c" d="M15.976 19.278a3.49 3.49 0 1 0 0-6.981a3.49 3.49 0 0 0 0 6.981"/></g></svg>
+    `,
+    ziyuzhi: `
+      <svg class="item-logo herb-logo herb-ziyuzhi fluent-herb" viewBox="0 0 64 64" aria-hidden="true"><ellipse cx="32" cy="55" rx="22" ry="5" fill="rgba(53,38,24,.18)"/><path d="M23 31h18l6 24H17l6-24Z" fill="#e7cf9e" stroke="#68432f" stroke-width="2"/><path d="M7 31C10 13 23 5 42 10c10 3 16 10 16 21-13 10-37 10-51 0Z" fill="#b27bc1"/><path d="M14 27c11 6 28 6 38 0" fill="none" stroke="#744e9e" stroke-width="7" stroke-linecap="round"/><path d="M18 20c9-6 23-6 32 0" fill="none" stroke="#ead9f3" stroke-width="3" stroke-linecap="round" opacity=".7"/><circle cx="43" cy="20" r="3" fill="#e6c991"/></svg>
+    `,
+  };
+  const svg = svgs[key] || `
+    <svg class="item-logo herb-logo herb-default fluent-herb" viewBox="0 0 32 32" aria-hidden="true">
+      <path fill="#86d72f" d="M22.39 6.45c-2.29 0-4.32 1.08-5.63 2.75v-.47h-.01A7.155 7.155 0 0 0 9.61 2H2c0 3.95 3.2 7.15 7.15 7.15h5.19v12.46h2.42v-8h6.09c3.95 0 7.15-3.2 7.15-7.15h-7.61z"/><path fill="#6d4534" d="M15.55 21a8.99 8.99 0 0 0-8.99 8.99h17.99c0-4.965-4.025-8.99-9-8.99"/>
+    </svg>`;
+  return svg;
+}
+
+
 function seedLogoSVG(variant, palette, key) {
 	const [primary, accent, gold, earth] = palette;
 	const emblem = gardenSeedEmblemSVG(key, primary, accent, gold);
@@ -3752,6 +3812,9 @@ function gardenSeedEmblemSVG(key, primary, accent, gold) {
 }
 
 function herbLogoSVG(category, variant, palette, key) {
+	if (["ninglu","qingling","chiyang","yuehua","xuanshen","ziyuzhi","longxue","tianxin"].includes(key)) {
+		return cuteHerbSVG(key, "");
+	}
 	const illustrated = gardenHerbIllustrationSVG(key, palette, variant);
 	if (illustrated) return illustrated;
 	const [primary, accent, gold, earth] = palette;
