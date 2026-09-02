@@ -316,7 +316,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 
-	if text == userMenuGardenText || text == userMenuGardenMiniAppText || text == "药园" {
+	if text == userMenuGardenText || text == "药园" {
 		registerIncomingGroupCommandForAutoDelete(msg)
 		handleGardenEntry(bot, msg)
 		return

@@ -1975,7 +1975,7 @@ func claimGardenMaturityNotice(plantingID uint, now time.Time) (bool, error) {
 func sendGardenMaturityNotice(bot *tgbotapi.BotAPI, userID int64, plantings []GardenPlanting) error {
 	msg := tgbotapi.NewMessage(userID, gardenMaturityNoticeText(plantings))
 	msg.ParseMode = "Markdown"
-	msg.ReplyMarkup = gardenInlineMarkupWithMiniApp(gardenMaturityNoticeMarkup())
+	msg.ReplyMarkup = gardenMaturityNoticeMarkup()
 	_, err := bot.Send(msg)
 	return err
 }
@@ -2015,7 +2015,7 @@ func gardenMaturityNoticeMarkup() tgbotapi.InlineKeyboardMarkup {
 func sendGardenScreen(bot *tgbotapi.BotAPI, chatID int64, text string, markup tgbotapi.InlineKeyboardMarkup) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ParseMode = "Markdown"
-	msg.ReplyMarkup = gardenInlineMarkupWithMiniApp(markup)
+	msg.ReplyMarkup = markup
 	if _, err := sendAutoDelete(bot, msg); err != nil {
 		log.Printf("发送药园菜单失败: chat=%d err=%s", chatID, formatTelegramSendError(err))
 	}

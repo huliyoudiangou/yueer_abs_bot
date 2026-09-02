@@ -171,7 +171,6 @@ func main() {
 
 	bot.Debug = false // 建议线上环境关闭上帝视角，避免日志爆炸
 	log.Printf("✅ Bot 已成功启动，当前运行账号: %s", formatPlainValue(bot.Self.UserName))
-	StartGardenMiniAppServer()
 
 	if info, err := bot.GetWebhookInfo(); err != nil {
 		log.Printf("⚠️ 查询 Telegram webhook 状态失败，将继续尝试清理: %s", formatTelegramSendError(err))

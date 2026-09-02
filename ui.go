@@ -8,7 +8,6 @@ import (
 
 const (
 	userMenuGardenText        = "🌱 药园"
-	userMenuGardenMiniAppText = "🌱 打开药园"
 )
 
 // 用户主菜单

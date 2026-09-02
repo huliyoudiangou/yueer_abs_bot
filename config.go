@@ -33,9 +33,6 @@ type Config struct {
 	DatabaseBusyTimeoutMS int
 	StartupNotifyAdmins   bool
 	GithubAPIToken        string
-	GardenMiniAppEnabled  bool
-	GardenMiniAppURL      string
-	GardenMiniAppListen   string
 	// 🗑️ 已彻底删除 ServerLines 属性
 }
 
@@ -65,9 +62,6 @@ func LoadConfig() {
 		DatabaseBusyTimeoutMS: getEnvAsInt("DATABASE_BUSY_TIMEOUT_MS", 10000),
 		StartupNotifyAdmins:   getEnvAsBool("BOT_STARTUP_NOTIFY_ADMINS", false),
 		GithubAPIToken:        strings.TrimSpace(getEnv("GITHUB_API_TOKEN", "")),
-		GardenMiniAppEnabled:  getEnvAsBool("GARDEN_MINI_APP_ENABLED", false),
-		GardenMiniAppURL:      strings.TrimRight(strings.TrimSpace(getEnv("GARDEN_MINI_APP_URL", "")), "/"),
-		GardenMiniAppListen:   strings.TrimSpace(getEnv("GARDEN_MINI_APP_LISTEN", ":8081")),
 	}
 
 	AppConfig.AdminIDs = make(map[int64]bool)
@@ -194,17 +188,6 @@ func validateConfig() {
 		AppConfig.DatabaseBusyTimeoutMS = 60000
 	}
 
-	if AppConfig.GardenMiniAppListen == "" {
-		AppConfig.GardenMiniAppListen = ":8081"
-	}
-	if AppConfig.GardenMiniAppEnabled {
-		if AppConfig.GardenMiniAppURL == "" {
-			log.Fatalf("GARDEN_MINI_APP_ENABLED=true requires GARDEN_MINI_APP_URL")
-		}
-		if !strings.HasPrefix(AppConfig.GardenMiniAppURL, "https://") && !isLocalGardenMiniAppURL(AppConfig.GardenMiniAppURL) {
-			log.Fatalf("GARDEN_MINI_APP_URL must use https:// for Telegram Mini App public access: url=%s", formatPlainValue(AppConfig.GardenMiniAppURL))
-		}
-	}
 }
 
 func isValidAbsAPIURL(rawURL string) bool {
@@ -240,19 +223,6 @@ func parseAbsAPIURL(rawURL string) (*url.URL, error) {
 		return nil, url.InvalidHostError(rawURL)
 	}
 	return parsed, nil
-}
-
-func isLocalGardenMiniAppURL(rawURL string) bool {
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || parsed == nil || parsed.Scheme != "http" {
-		return false
-	}
-	switch strings.ToLower(parsed.Hostname()) {
-	case "localhost", "127.0.0.1", "::1":
-		return true
-	default:
-		return false
-	}
 }
 
 func secretFingerprint(secret string) string {
