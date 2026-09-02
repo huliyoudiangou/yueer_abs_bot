@@ -32,6 +32,7 @@ var bookRequestAnnouncementCandidateSnapshots sync.Map
 type bookAnnouncementPreviewEntry struct {
 	ReqID     uint
 	ItemID    string
+	Candidate BookAnnouncementCandidate
 	ExpiresAt time.Time
 }
 
@@ -153,6 +154,7 @@ func (c *AbsClient) GetRecentBookAnnouncementCandidates(window time.Duration, no
 	libraryNames := make(map[string]string, len(libraries))
 	candidatesByItemID := make(map[string]BookAnnouncementCandidate)
 	successfulLibraries := 0
+	libraryScanFailed := false
 
 	for _, library := range libraries {
 		library.ID = strings.TrimSpace(library.ID)
@@ -162,10 +164,12 @@ func (c *AbsClient) GetRecentBookAnnouncementCandidates(window time.Duration, no
 		libraryNames[library.ID] = strings.TrimSpace(library.Name)
 
 		libraryReadSucceeded := false
+		libraryReadFailed := false
 		for page := 0; page < bookRequestAnnouncementMaxQueryPages; page++ {
 			items, err := c.getRecentAbsLibraryItemsPage(library.ID, bookRequestAnnouncementQueryLimit, page)
 			if err != nil {
 				log.Printf("ABS recent library page read failed: library=%s page=%d err=%s", formatPlainValue(library.ID), page, formatPlainError(err))
+				libraryReadFailed = true
 				break
 			}
 			libraryReadSucceeded = true
@@ -190,10 +194,29 @@ func (c *AbsClient) GetRecentBookAnnouncementCandidates(window time.Duration, no
 		if libraryReadSucceeded {
 			successfulLibraries++
 		}
+		if libraryReadFailed {
+			libraryScanFailed = true
+		}
 	}
 
-	if successfulLibraries == 0 {
-		return nil, fmt.Errorf("所有 ABS 媒体库最近入库读取均失败")
+	// 候选列表要求全量媒体库扫描成功：某个媒体库读取失败可能只是该库暂时不可用，
+	// 但也可能意味着该库正好包含本次求书对应的新书，因此宁可让管理员稍后重试，
+	// 也不要生成一个可能漏掉目标书籍的候选列表。
+	if successfulLibraries == 0 || libraryScanFailed {
+		// 实时扫描失败时，先尝试立即采集一次，再回退到本地事件表。
+		if scanErr := scanAndPersistBookLibraryEvents(now); scanErr != nil {
+			log.Printf("求书入库事件即时采集失败: err=%s", formatPlainError(scanErr))
+		}
+		events, eventErr := loadRecentBookLibraryEvents(bookRequestAnnouncementDisplayLimit)
+		if eventErr == nil {
+			candidates := bookLibraryEventsAsCandidates(events)
+			if len(candidates) > 0 {
+				return candidates, nil
+			}
+		} else {
+			log.Printf("求书入库事件本地回退读取失败: err=%s", formatPlainError(eventErr))
+		}
+		return nil, fmt.Errorf("部分或全部 ABS 媒体库最近入库读取失败，请稍后重试")
 	}
 
 	candidates := make([]BookAnnouncementCandidate, 0, len(candidatesByItemID))
@@ -206,6 +229,16 @@ func (c *AbsClient) GetRecentBookAnnouncementCandidates(window time.Duration, no
 		}
 		return candidates[i].RecentAt.After(candidates[j].RecentAt)
 	})
+	if len(candidates) == 0 {
+		// 实时扫描窗口内没有结果时，回退到本地持久化的近期入库事件，
+		// 避免管理员标记已上传稍晚后因 20 分钟窗口已过而找不到候选。
+		events, eventErr := loadRecentBookLibraryEvents(bookRequestAnnouncementDisplayLimit)
+		if eventErr != nil {
+			log.Printf("求书入库事件本地回退读取失败: err=%s", formatPlainError(eventErr))
+		} else {
+			candidates = bookLibraryEventsAsCandidates(events)
+		}
+	}
 	return candidates, nil
 }
 
@@ -491,8 +524,16 @@ func sendBookAnnouncementCandidatePrompt(bot *tgbotapi.BotAPI, adminID int64, re
 	if err != nil {
 		return err
 	}
+	if len(candidates) > 0 {
+		if req, found, loadErr := loadBookRequestByID(DB, reqID, "announcement hint ranking"); loadErr == nil && found {
+			hint := extractXmlyTitleHint(req.XmlyLink)
+			if hint != "" {
+				sortBookAnnouncementCandidatesByRequestHint(candidates, hint)
+			}
+		}
+	}
 	if len(candidates) == 0 {
-		msg := tgbotapi.NewMessage(adminID, fmt.Sprintf("✅ 求书工单 #%d 已处理。\n\n近 20 分钟内未找到可公告的新书。若 ABS 扫描刚完成，可稍后点击‘重新读取候选’。", reqID))
+		msg := tgbotapi.NewMessage(adminID, fmt.Sprintf("✅ 求书工单 #%d 已处理。\n\n近 20 分钟内未找到可公告的新书，本地近期入库事件也暂无可匹配书籍。若 ABS 扫描刚完成，可稍后点击‘重新读取候选’。", reqID))
 		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 			tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData("🔄 重新读取候选", fmt.Sprintf("br_ann_refresh_%d", reqID)),
@@ -528,7 +569,7 @@ func buildBookAnnouncementCandidatePage(reqID uint, snapshotToken string, candid
 	return buildBookAnnouncementCandidatePageWithTokenStore(reqID, snapshotToken, candidates, page, storeBookAnnouncementPreviewCandidate)
 }
 
-func buildBookAnnouncementCandidatePageWithTokenStore(reqID uint, snapshotToken string, candidates []BookAnnouncementCandidate, page int, tokenStore func(uint, string) string) (string, tgbotapi.InlineKeyboardMarkup, int, bool) {
+func buildBookAnnouncementCandidatePageWithTokenStore(reqID uint, snapshotToken string, candidates []BookAnnouncementCandidate, page int, tokenStore func(uint, BookAnnouncementCandidate) string) (string, tgbotapi.InlineKeyboardMarkup, int, bool) {
 	var empty tgbotapi.InlineKeyboardMarkup
 	if reqID == 0 || strings.TrimSpace(snapshotToken) == "" || len(candidates) == 0 || tokenStore == nil {
 		return "", empty, 0, false
@@ -549,7 +590,7 @@ func buildBookAnnouncementCandidatePageWithTokenStore(reqID uint, snapshotToken 
 	rows := make([][]tgbotapi.InlineKeyboardButton, 0, end-start+2)
 	for index := start; index < end; index++ {
 		candidate := candidates[index]
-		token := tokenStore(reqID, candidate.ItemID)
+		token := tokenStore(reqID, candidate)
 		if token == "" {
 			return "", empty, 0, false
 		}
@@ -685,9 +726,38 @@ func parseBookAnnouncementPageCallback(data string) (uint, int, string, bool) {
 	return uint(reqID64), int(page64), token, true
 }
 
+func enrichBookAnnouncementCandidate(candidate BookAnnouncementCandidate) (BookAnnouncementCandidate, error) {
+	itemID := strings.TrimSpace(candidate.ItemID)
+	if itemID == "" {
+		return candidate, nil
+	}
+	if strings.TrimSpace(candidate.Title) != "" && strings.TrimSpace(candidate.LibraryName) != "" && !candidate.RecentAt.IsZero() {
+		return candidate, nil
+	}
+	if absClient == nil {
+		return candidate, nil
+	}
+	full, err := absClient.GetBookAnnouncementCandidateByItemID(itemID)
+	if err != nil {
+		return candidate, err
+	}
+	if full == nil {
+		return candidate, nil
+	}
+	if strings.TrimSpace(full.ItemID) == "" {
+		full.ItemID = itemID
+	}
+	return *full, nil
+}
+
 func sendBookAnnouncementPreview(bot *tgbotapi.BotAPI, adminID int64, reqID uint, candidate BookAnnouncementCandidate) error {
+	var err error
+	candidate, err = enrichBookAnnouncementCandidate(candidate)
+	if err != nil {
+		return err
+	}
 	caption := "请确认是否发布到大群：\n\n" + formatBookAnnouncementCaption(candidate) + "\n\n\u516c\u544a\u51ed\u8bc1\uff1a" + formatBookAnnouncementDeliveryKey(reqID)
-	token := storeBookAnnouncementPreviewCandidate(reqID, candidate.ItemID)
+	token := storeBookAnnouncementPreviewCandidate(reqID, candidate)
 	if token == "" {
 		return fmt.Errorf("BOOK_ANNOUNCEMENT_PREVIEW_TOKEN_PERSIST_FAILED")
 	}
@@ -716,21 +786,26 @@ func sendBookAnnouncementPreview(bot *tgbotapi.BotAPI, adminID int64, reqID uint
 
 	msg := tgbotapi.NewMessage(adminID, caption)
 	msg.ReplyMarkup = keyboard
-	_, err := sendNoAutoDelete(bot, msg)
-	return err
+	_, sendErr := sendNoAutoDelete(bot, msg)
+	return sendErr
 }
 
-func storeBookAnnouncementPreviewCandidate(reqID uint, itemID string) string {
-	itemID = strings.TrimSpace(itemID)
-	if DB == nil || reqID == 0 || itemID == "" {
+func storeBookAnnouncementPreviewCandidate(reqID uint, candidate BookAnnouncementCandidate) string {
+	candidate.ItemID = strings.TrimSpace(candidate.ItemID)
+	if DB == nil || reqID == 0 || candidate.ItemID == "" {
+		return ""
+	}
+	body, err := json.Marshal(candidate)
+	if err != nil {
+		log.Printf("book announcement preview candidate encode failed: req=%d item=%s err=%s", reqID, formatPlainValue(candidate.ItemID), formatPlainError(err))
 		return ""
 	}
 	now := time.Now()
 	cleanupExpiredBookAnnouncementPreviewCandidates(now)
 	for attempt := 0; attempt < 3; attempt++ {
 		token := generateRandomCode(16)
-		entry := bookAnnouncementPreviewEntry{ReqID: reqID, ItemID: itemID, ExpiresAt: now.Add(bookRequestAnnouncementPreviewTTL)}
-		row := BookRequestAnnouncementPreviewCandidate{Token: token, RequestID: reqID, ItemID: itemID, ExpiresAt: entry.ExpiresAt}
+		entry := bookAnnouncementPreviewEntry{ReqID: reqID, ItemID: candidate.ItemID, Candidate: candidate, ExpiresAt: now.Add(bookRequestAnnouncementPreviewTTL)}
+		row := BookRequestAnnouncementPreviewCandidate{Token: token, RequestID: reqID, ItemID: candidate.ItemID, CandidateJSON: string(body), ExpiresAt: entry.ExpiresAt}
 		if err := DB.Create(&row).Error; err != nil {
 			log.Printf("book announcement preview candidate persist failed: req=%d attempt=%d err=%s", reqID, attempt+1, formatPlainError(err))
 			continue
@@ -741,10 +816,10 @@ func storeBookAnnouncementPreviewCandidate(reqID uint, itemID string) string {
 	return ""
 }
 
-func resolveBookAnnouncementPreviewCandidate(reqID uint, token string, now time.Time) (string, bool) {
+func resolveBookAnnouncementPreviewCandidate(reqID uint, token string, now time.Time) (BookAnnouncementCandidate, bool) {
 	token = strings.TrimSpace(token)
 	if reqID == 0 || token == "" {
-		return "", false
+		return BookAnnouncementCandidate{}, false
 	}
 	if now.IsZero() {
 		now = time.Now()
@@ -752,26 +827,40 @@ func resolveBookAnnouncementPreviewCandidate(reqID uint, token string, now time.
 	if value, ok := bookRequestAnnouncementPreviewItems.Load(token); ok {
 		entry, valid := value.(bookAnnouncementPreviewEntry)
 		if valid && entry.ReqID == reqID && strings.TrimSpace(entry.ItemID) != "" && (entry.ExpiresAt.IsZero() || !now.After(entry.ExpiresAt)) {
-			return entry.ItemID, true
+			candidate := entry.Candidate
+			if strings.TrimSpace(candidate.ItemID) == "" {
+				candidate.ItemID = entry.ItemID
+			}
+			return candidate, true
 		}
 		deleteBookAnnouncementPreviewCandidateToken(token)
 	}
 	if DB == nil {
-		return "", false
+		return BookAnnouncementCandidate{}, false
 	}
 	var row BookRequestAnnouncementPreviewCandidate
 	if err := DB.Where("token = ? AND request_id = ?", token, reqID).First(&row).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Printf("book announcement preview candidate lookup failed: req=%d err=%s", reqID, formatPlainError(err))
 		}
-		return "", false
+		return BookAnnouncementCandidate{}, false
 	}
 	if now.After(row.ExpiresAt) || strings.TrimSpace(row.ItemID) == "" {
 		_ = DB.Delete(&row).Error
-		return "", false
+		return BookAnnouncementCandidate{}, false
 	}
-	bookRequestAnnouncementPreviewItems.Store(token, bookAnnouncementPreviewEntry{ReqID: reqID, ItemID: row.ItemID, ExpiresAt: row.ExpiresAt})
-	return row.ItemID, true
+	candidate := BookAnnouncementCandidate{ItemID: row.ItemID}
+	if strings.TrimSpace(row.CandidateJSON) != "" {
+		if err := json.Unmarshal([]byte(row.CandidateJSON), &candidate); err != nil {
+			log.Printf("book announcement preview candidate decode failed: req=%d err=%s", reqID, formatPlainError(err))
+			candidate = BookAnnouncementCandidate{ItemID: row.ItemID}
+		}
+	}
+	if strings.TrimSpace(candidate.ItemID) == "" {
+		candidate.ItemID = row.ItemID
+	}
+	bookRequestAnnouncementPreviewItems.Store(token, bookAnnouncementPreviewEntry{ReqID: reqID, ItemID: row.ItemID, Candidate: candidate, ExpiresAt: row.ExpiresAt})
+	return candidate, true
 }
 
 func deleteBookAnnouncementPreviewCandidateToken(token string) {
@@ -872,7 +961,7 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 		if !allowed {
 			return true
 		}
-		itemID, resolved := resolveBookAnnouncementPreviewCandidate(reqID, token, time.Now())
+		candidate, resolved := resolveBookAnnouncementPreviewCandidate(reqID, token, time.Now())
 		if !resolved {
 			if err := sendBookAnnouncementCandidatePrompt(bot, cb.From.ID, req.ID); err != nil {
 				answerCallback(bot, cb.ID, "候选已失效且重新读取失败，请稍后重试")
@@ -882,14 +971,8 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 			answerCallback(bot, cb.ID, "候选已失效，已重新读取")
 			return true
 		}
-		candidate, err := absClient.GetBookAnnouncementCandidateByItemID(itemID)
-		if err != nil {
-			log.Printf("⚠️ 求书公告候选详情读取失败: req=%d item=%s admin=%d err=%s", reqID, formatPlainValue(itemID), cb.From.ID, formatPlainError(err))
-			answerCallback(bot, cb.ID, "书籍详情读取失败，请重新选择或稍后重试")
-			return true
-		}
-		if err := sendBookAnnouncementPreview(bot, cb.From.ID, req.ID, *candidate); err != nil {
-			log.Printf("⚠️ 求书入库公告预览发送失败: req=%d admin=%d item=%s err=%s", req.ID, cb.From.ID, formatPlainValue(itemID), formatTelegramSendError(err))
+		if err := sendBookAnnouncementPreview(bot, cb.From.ID, req.ID, candidate); err != nil {
+			log.Printf("⚠️ 求书入库公告预览发送失败: req=%d admin=%d item=%s err=%s", req.ID, cb.From.ID, formatPlainValue(candidate.ItemID), formatTelegramSendError(err))
 			answerCallback(bot, cb.ID, "公告预览发送失败，请稍后重试")
 			return true
 		}
@@ -916,7 +999,7 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 	if !allowed {
 		return true
 	}
-	itemID, resolved := resolveBookAnnouncementPreviewCandidate(reqID, token, time.Now())
+	candidate, resolved := resolveBookAnnouncementPreviewCandidate(reqID, token, time.Now())
 	if !resolved {
 		if err := sendBookAnnouncementCandidatePrompt(bot, cb.From.ID, req.ID); err != nil {
 			answerCallback(bot, cb.ID, "公告预览已失效，重新读取候选失败，请稍后重试")
@@ -945,7 +1028,7 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 		answerCallback(bot, cb.ID, "\u8be5\u5de5\u5355\u7684\u65b0\u4e66\u516c\u544a\u5df2\u7ecf\u53d1\u5e03")
 		return true
 	}
-	_, claimErr := claimBookRequestAnnouncementDelivery(reqID, itemID, AppConfig.NoticeGroupID, cb.From.ID, time.Now())
+	_, claimErr := claimBookRequestAnnouncementDelivery(reqID, candidate.ItemID, AppConfig.NoticeGroupID, cb.From.ID, time.Now())
 	if claimErr != nil {
 		switch {
 		case errors.Is(claimErr, errBookAnnouncementAlreadySent):
@@ -963,8 +1046,26 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 		return true
 	}
 
-	sentMessage, publishErr := publishBookRequestGroupAnnouncement(bot, req, itemID)
-	if publishErr != nil {
+	const maxPublishAttempts = 3
+	for attempt := 1; attempt <= maxPublishAttempts; attempt++ {
+		sentMessage, publishErr := publishBookRequestGroupAnnouncement(bot, req, candidate)
+		if publishErr == nil {
+			// success path below
+			if err := finalizeBookRequestAnnouncementDelivery(req, cb.From.ID, getTelegramDisplayName(cb.From), sentMessage.MessageID, time.Now()); err != nil {
+				log.Printf("book announcement sent but finalization failed: req=%d message=%d err=%s", reqID, sentMessage.MessageID, formatPlainError(err))
+				if markErr := markBookRequestAnnouncementDelivery(reqID, bookAnnouncementDeliveryUncertain, "telegram_sent_finalize_failed", sentMessage.MessageID); markErr != nil {
+					log.Printf("book announcement finalization fallback state write failed: req=%d message=%d err=%s", reqID, sentMessage.MessageID, formatPlainError(markErr))
+				}
+				removeBookAnnouncementPreviewButtons(bot, cb)
+				answerCallback(bot, cb.ID, "公告已发出，但状态登记失败；为避免重复请勿再次发布，并联系超管检查")
+				return true
+			}
+			deleteBookAnnouncementPreviewCandidateToken(token)
+			removeBookAnnouncementPreviewButtons(bot, cb)
+			answerCallback(bot, cb.ID, "已发布到大群")
+			return true
+		}
+
 		status := bookAnnouncementDeliveryFailed
 		errorCode := "pre_send_or_rejected"
 		if publishErr.DeliveryMayHaveSucceeded {
@@ -973,32 +1074,31 @@ func handleBookRequestAnnouncementCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.Ca
 		}
 		if markErr := markBookRequestAnnouncementDelivery(reqID, status, errorCode); markErr != nil {
 			log.Printf("book announcement delivery failure state write failed: req=%d err=%s", reqID, formatPlainError(markErr))
-			answerCallback(bot, cb.ID, "\u53d1\u9001\u6216\u72b6\u6001\u767b\u8bb0\u5931\u8d25\uff0c\u7ed3\u679c\u6309\u4e0d\u786e\u5b9a\u5904\u7406\uff1b\u8bf7\u5148\u68c0\u67e5\u901a\u77e5\u7fa4\uff0c\u52ff\u91cd\u590d\u70b9\u51fb")
+			answerCallback(bot, cb.ID, "发送或状态登记失败，结果按不确定处理；请先检查通知群，勿重复点击")
 			return true
 		}
-		log.Printf("book announcement publish failed: req=%d item=%s admin=%d uncertain=%t err=%s", reqID, formatPlainValue(itemID), cb.From.ID, publishErr.DeliveryMayHaveSucceeded, formatPlainError(publishErr.Err))
+		log.Printf("book announcement publish failed: req=%d item=%s admin=%d attempt=%d uncertain=%t err=%s", reqID, formatPlainValue(candidate.ItemID), cb.From.ID, attempt, publishErr.DeliveryMayHaveSucceeded, formatPlainError(publishErr.Err))
 		if publishErr.DeliveryMayHaveSucceeded {
 			removeBookAnnouncementPreviewButtons(bot, cb)
-			answerCallback(bot, cb.ID, "\u53d1\u9001\u7ed3\u679c\u4e0d\u786e\u5b9a\uff0c\u5df2\u505c\u6b62\u81ea\u52a8\u91cd\u53d1\uff1b\u8bf7\u4eba\u5de5\u68c0\u67e5\u901a\u77e5\u7fa4")
-		} else {
-			answerCallback(bot, cb.ID, "\u516c\u544a\u672a\u53d1\u51fa\uff0c\u5df2\u5b89\u5168\u6807\u8bb0\u5931\u8d25\uff0c\u53ef\u7a0d\u540e\u91cd\u8bd5")
+			answerCallback(bot, cb.ID, "发送结果不确定，已停止自动重发；请人工检查通知群")
+			return true
 		}
-		return true
-	}
-
-	if err := finalizeBookRequestAnnouncementDelivery(req, cb.From.ID, getTelegramDisplayName(cb.From), sentMessage.MessageID, time.Now()); err != nil {
-		log.Printf("book announcement sent but finalization failed: req=%d message=%d err=%s", reqID, sentMessage.MessageID, formatPlainError(err))
-		if markErr := markBookRequestAnnouncementDelivery(reqID, bookAnnouncementDeliveryUncertain, "telegram_sent_finalize_failed", sentMessage.MessageID); markErr != nil {
-			log.Printf("book announcement finalization fallback state write failed: req=%d message=%d err=%s", reqID, sentMessage.MessageID, formatPlainError(markErr))
+		// 明确失败（未被标记为 uncertain）时最多重试 3 次。
+		if attempt < maxPublishAttempts {
+			// 失败后状态已写为 failed，允许再次 claim 后重试。
+			if _, retryClaimErr := claimBookRequestAnnouncementDelivery(reqID, candidate.ItemID, AppConfig.NoticeGroupID, cb.From.ID, time.Now()); retryClaimErr != nil {
+				log.Printf("book announcement retry claim failed: req=%d attempt=%d err=%s", reqID, attempt+1, formatPlainError(retryClaimErr))
+				break
+			}
+			continue
 		}
 		removeBookAnnouncementPreviewButtons(bot, cb)
-		answerCallback(bot, cb.ID, "\u516c\u544a\u5df2\u53d1\u51fa\uff0c\u4f46\u72b6\u6001\u767b\u8bb0\u5931\u8d25\uff1b\u4e3a\u907f\u514d\u91cd\u590d\u8bf7\u52ff\u518d\u6b21\u53d1\u5e03\uff0c\u5e76\u8054\u7cfb\u8d85\u7ba1\u68c0\u67e5")
+		answerCallback(bot, cb.ID, "公告未发出，已安全标记失败，可稍后重试")
 		return true
 	}
 
-	deleteBookAnnouncementPreviewCandidateToken(token)
 	removeBookAnnouncementPreviewButtons(bot, cb)
-	answerCallback(bot, cb.ID, "\u5df2\u53d1\u5e03\u5230\u5927\u7fa4")
+	answerCallback(bot, cb.ID, "重试已被中断，请稍后重新点击发布")
 	return true
 }
 
@@ -1057,11 +1157,24 @@ func (e *bookAnnouncementPublishError) Error() string {
 }
 
 func definiteTelegramRejection(err error) bool {
+	if err == nil {
+		return false
+	}
 	var tgErr *tgbotapi.Error
-	return errors.As(err, &tgErr) && tgErr.Code >= 400 && tgErr.Code < 500 && tgErr.Code != 429
+	if errors.As(err, &tgErr) && tgErr.Code >= 400 && tgErr.Code < 500 && tgErr.Code != 429 {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "chat not found") ||
+		strings.Contains(text, "bot was kicked") ||
+		strings.Contains(text, "kicked from") ||
+		strings.Contains(text, "not enough rights") ||
+		strings.Contains(text, "forbidden") ||
+		strings.Contains(text, "bad request: chat") ||
+		strings.Contains(text, "can't send")
 }
 
-func publishBookRequestGroupAnnouncement(bot *tgbotapi.BotAPI, req BookRequest, itemID string) (tgbotapi.Message, *bookAnnouncementPublishError) {
+func publishBookRequestGroupAnnouncement(bot *tgbotapi.BotAPI, req BookRequest, candidate BookAnnouncementCandidate) (tgbotapi.Message, *bookAnnouncementPublishError) {
 	var zero tgbotapi.Message
 	if bot == nil {
 		return zero, &bookAnnouncementPublishError{Err: fmt.Errorf("Telegram Bot \u672a\u521d\u59cb\u5316")}
@@ -1072,11 +1185,16 @@ func publishBookRequestGroupAnnouncement(bot *tgbotapi.BotAPI, req BookRequest, 
 	if AppConfig == nil || AppConfig.NoticeGroupID == 0 {
 		return zero, &bookAnnouncementPublishError{Err: fmt.Errorf("\u901a\u77e5\u7fa4\u672a\u914d\u7f6e")}
 	}
-	candidate, err := absClient.GetBookAnnouncementCandidateByItemID(itemID)
-	if err != nil {
-		return zero, &bookAnnouncementPublishError{Err: err}
+	candidate.ItemID = strings.TrimSpace(candidate.ItemID)
+	if candidate.ItemID == "" {
+		return zero, &bookAnnouncementPublishError{Err: fmt.Errorf("ABS item ID 为空")}
 	}
-	caption := formatBookAnnouncementCaption(*candidate) + "\n\n\u516c\u544a\u51ed\u8bc1\uff1a" + formatBookAnnouncementDeliveryKey(req.ID)
+	var enrichErr error
+	candidate, enrichErr = enrichBookAnnouncementCandidate(candidate)
+	if enrichErr != nil {
+		return zero, &bookAnnouncementPublishError{Err: enrichErr}
+	}
+	caption := formatBookAnnouncementCaption(candidate) + "\n\n\u516c\u544a\u51ed\u8bc1\uff1a" + formatBookAnnouncementDeliveryKey(req.ID)
 
 	if cover, coverErr := absClient.DownloadBookAnnouncementCover(candidate.ItemID); coverErr == nil {
 		photo := tgbotapi.NewPhoto(AppConfig.NoticeGroupID, tgbotapi.FileBytes{Name: "cover.jpg", Bytes: cover})

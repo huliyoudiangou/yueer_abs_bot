@@ -158,6 +158,7 @@ func main() {
 
 	absClient = NewAbsClient()
 	StartABSCrossDaySessionBackfill()
+	StartBookLibraryEventCollector()
 
 	bot, err := tgbotapi.NewBotAPIWithClient(
 		AppConfig.TgToken,

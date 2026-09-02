@@ -1078,6 +1078,7 @@ func InitDB() {
 		&BookRequestAnnouncementDelivery{},
 		&BookRequestAnnouncementCandidateSnapshot{},
 		&BookRequestAnnouncementPreviewCandidate{},
+		&BookLibraryEvent{},
 		&LotteryActivity{},
 		&LotteryPrize{},
 		&LotteryParticipant{},

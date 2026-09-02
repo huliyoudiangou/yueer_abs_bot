@@ -70,15 +70,18 @@ func (BookRequestAnnouncementCandidateSnapshot) TableName() string {
 // BookRequestAnnouncementPreviewCandidate persists the opaque callback token
 // used by selection and publish buttons. Keeping item IDs server-side avoids
 // exceeding Telegram's 64-byte callback limit and survives restarts.
+// CandidateJSON stores the selected item's public ABS metadata snapshot so
+// preview and publish do not require a second ABS read after selection.
 type BookRequestAnnouncementPreviewCandidate struct {
 	ID        uint `gorm:"primaryKey"`
 	CreatedAt time.Time
 	UpdatedAt time.Time
 
-	Token     string    `gorm:"uniqueIndex;not null"`
-	RequestID uint      `gorm:"index;not null"`
-	ItemID    string    `gorm:"not null"`
-	ExpiresAt time.Time `gorm:"index;not null"`
+	Token         string    `gorm:"uniqueIndex;not null"`
+	RequestID     uint      `gorm:"index;not null"`
+	ItemID        string    `gorm:"not null"`
+	CandidateJSON string    `gorm:"type:text"`
+	ExpiresAt     time.Time `gorm:"index;not null"`
 }
 
 func (BookRequestAnnouncementPreviewCandidate) TableName() string {

@@ -87,6 +87,13 @@ func editBookRequestAdminMessage(bot *tgbotapi.BotAPI, chatID int64, messageID i
 					tgbotapi.NewInlineKeyboardButtonData("🚫 取消工单", fmt.Sprintf("br_cancel_%d", req.ID)),
 				),
 			)
+		} else if isBookRequestUploadedStatus(req.Status) {
+			keyboard = tgbotapi.NewInlineKeyboardMarkup(
+				tgbotapi.NewInlineKeyboardRow(
+					tgbotapi.NewInlineKeyboardButtonData("🔄 重新读取候选", fmt.Sprintf("br_ann_refresh_%d", req.ID)),
+					tgbotapi.NewInlineKeyboardButtonData("跳过公告", fmt.Sprintf("br_ann_skip_%d", req.ID)),
+				),
+			)
 		}
 
 		if len(keyboard.InlineKeyboard) > 0 {
@@ -412,6 +419,13 @@ func sendBookRequestDetail(bot *tgbotapi.BotAPI, chatID int64, req BookRequest) 
 			),
 			tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData("🚫 取消工单", fmt.Sprintf("br_cancel_%d", req.ID)),
+			),
+		)
+	} else if isBookRequestUploadedStatus(req.Status) {
+		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("🔄 重新读取候选", fmt.Sprintf("br_ann_refresh_%d", req.ID)),
+				tgbotapi.NewInlineKeyboardButtonData("跳过公告", fmt.Sprintf("br_ann_skip_%d", req.ID)),
 			),
 		)
 	}
