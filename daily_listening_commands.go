@@ -156,12 +156,21 @@ func handleRefreshSectDailyListeningStatsCommand(bot *tgbotapi.BotAPI, msg *tgbo
 		return
 	}
 
+	// 每名成员最多触发 1 次统计 + 最多 5 页会话扫描，一次刷新最多数百个 ABS 请求，加冷却防滥用。
+	if !CheckRateLimit(msg.From.ID, "sect_daily_listening_refresh", 60*time.Second) {
+		replyText(bot, msg.Chat.ID, "⏳ 宗门净修为刷新太频繁，请每分钟最多刷新一次。")
+		return
+	}
+
 	count := refreshSectMembersDailyListeningStats(member.SectID, 100)
 	replyText(bot, msg.Chat.ID, fmt.Sprintf("✅ 已刷新本宗门 `%d` 名成员的每日净修为。", count))
 }
 
 func handleRefreshAllDailyListeningStats(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	success, total, skipped := refreshAllDailyListeningStatsWithOptions(true)
+	// 全服级批量重算属于高危管理操作，补齐与其他管理变更一致的审计留痕。
+	writeAuditLog(msg.From.ID, "REFRESH_ALL_DAILY_LISTENING", "daily_listening_stats",
+		fmt.Sprintf("全服今日净修为刷新: 成功 %d/%d，跳过 %d", success, total, skipped))
 	replyText(bot, msg.Chat.ID, fmt.Sprintf("✅ 全服今日净修为刷新完成：成功 `%d/%d`，跳过 `%d`。", success, total, skipped))
 }
 

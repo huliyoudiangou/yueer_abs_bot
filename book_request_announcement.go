@@ -292,22 +292,6 @@ func (c *AbsClient) getAbsLibraries() ([]absLibrarySummary, error) {
 	return nil, fmt.Errorf("解析 ABS 媒体库失败")
 }
 
-func (c *AbsClient) getLatestAbsLibraryItem(libraryID string) (absLibraryItem, bool, error) {
-	var zero absLibraryItem
-	items, err := c.getRecentAbsLibraryItemsPage(libraryID, 1, 0)
-	if err != nil {
-		return zero, false, err
-	}
-	if len(items) == 0 {
-		return zero, false, nil
-	}
-	return items[0], true, nil
-}
-
-func (c *AbsClient) getRecentAbsLibraryItems(libraryID string, limit int) ([]absLibraryItem, error) {
-	return c.getRecentAbsLibraryItemsPage(libraryID, limit, 0)
-}
-
 func (c *AbsClient) getRecentAbsLibraryItemsPage(libraryID string, limit int, page int) ([]absLibraryItem, error) {
 	if limit <= 0 {
 		limit = bookRequestAnnouncementQueryLimit

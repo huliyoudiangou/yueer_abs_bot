@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 func showPointTransactions(bot *tgbotapi.BotAPI, chatID int64, requesterID int64, targetID int64, days int) {
@@ -420,14 +420,6 @@ var highRiskAuditActionSet = map[string]struct{}{
 	"CLAIM_GITHUB_BENEFIT_RENEW":             {},
 	"SET_GITHUB_BENEFIT_ENABLED":             {},
 	"SET_GITHUB_BENEFIT_QUOTA":               {},
-}
-
-func highRiskAuditActions() []string {
-	actions := make([]string, 0, len(highRiskAuditActionSet))
-	for action := range highRiskAuditActionSet {
-		actions = append(actions, action)
-	}
-	return actions
 }
 
 func isHighRiskAuditAction(action string) bool {

@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	userMenuGardenText        = "🌱 药园"
+	userMenuGardenText = "🌱 药园"
 )
 
 // 用户主菜单

@@ -235,6 +235,8 @@ func pointTransactionTypeText(txType string) string {
 		return "牌九中奖"
 	case "book_request_cost":
 		return "求书工单"
+	case "book_request_refund":
+		return "求书工单退款"
 	case "breakthrough_auto_buy":
 		return "突破代购"
 	case "breakthrough_refund":

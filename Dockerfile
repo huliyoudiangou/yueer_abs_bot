@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1
 
 # 第一阶段：编译环境
-FROM golang:1.22-alpine3.20 AS builder
+# go.mod 已升级到 go 1.25（x/text v0.41 修复 GO-2026-5970），构建镜像必须 ≥ 1.25，
+# 同时 1.26 工具链修复了 crypto/tls、encoding/asn1、net/http 的已知标准库漏洞。
+FROM golang:1.26-alpine AS builder
 
 RUN apk add --no-cache gcc musl-dev
 

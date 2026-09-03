@@ -778,11 +778,6 @@ func ensureMarketplaceSecretListingRealmTx(tx *gorm.DB, sellerID int64) error {
 	return nil
 }
 
-func validateMarketplaceSecrets(secrets []string) bool {
-	_, ok := normalizeMarketplaceSecrets(secrets)
-	return ok
-}
-
 func createMarketplaceListingInTx(tx *gorm.DB, listing *MarketplaceListing) error {
 	if tx == nil || listing == nil {
 		return fmt.Errorf("MARKETPLACE_LISTING_INVALID")
@@ -1427,10 +1422,6 @@ func marketplaceListingPillEffectLine(listingType string, itemName string) strin
 		return ""
 	}
 	return marketplacePillEffectLine(itemName)
-}
-
-func marketplaceDetailActionText(listing MarketplaceListing, stock int64) string {
-	return marketplaceDetailActionTextWithStockStatus(listing, stock, true)
 }
 
 func marketplaceDetailActionTextWithStockStatus(listing MarketplaceListing, stock int64, stockAvailable bool) string {

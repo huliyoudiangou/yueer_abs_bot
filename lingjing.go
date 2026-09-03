@@ -46,26 +46,19 @@ func ExchangePointsToLingjing(tx *gorm.DB, userID int64, pointsAmount int) (int,
 			return fmt.Errorf("积分扣除失败: %w", err)
 		}
 
-		// 检查并记录每日配额
-		var quota DailyLingjingQuota
-		findErr := ttx.Where("user_id = ? AND day_key = ?", userID, today).First(&quota).Error
-		if errors.Is(findErr, gorm.ErrRecordNotFound) {
-			quota = DailyLingjingQuota{UserID: userID, DayKey: today, Spent: pointsAmount}
-			if err := ttx.Create(&quota).Error; err != nil {
-				return fmt.Errorf("无法创建当日配额: %w", err)
+		// 检查并记录每日配额（原子条件更新：防并发超限、防丢失更新、防重复建行）
+		if ok, quotaErr := addDailyLingjingQuotaSpentInTx(ttx, userID, today, pointsAmount); quotaErr != nil {
+			return quotaErr
+		} else if !ok {
+			remain := 0
+			var quota DailyLingjingQuota
+			if qerr := ttx.Where("user_id = ? AND day_key = ?", userID, today).First(&quota).Error; qerr == nil {
+				remain = DailyMaxExchangePoints - quota.Spent
+				if remain < 0 {
+					remain = 0
+				}
 			}
-		} else if findErr == nil {
-			newSpent := quota.Spent + pointsAmount
-			if newSpent > DailyMaxExchangePoints {
-				remain := DailyMaxExchangePoints - quota.Spent
-				return fmt.Errorf("今日兑换已超上限%d积分，剩余可兑换:%d", DailyMaxExchangePoints, remain)
-			}
-			quota.Spent = newSpent
-			if err := ttx.Save(&quota).Error; err != nil {
-				return fmt.Errorf("更新当日配额失败: %w", err)
-			}
-		} else {
-			return fmt.Errorf("查询当日配额失败: %w", findErr)
+			return fmt.Errorf("今日兑换已超上限%d积分，剩余可兑换:%d", DailyMaxExchangePoints, remain)
 		}
 
 		// 更新钱包余额（不存在则创建）
@@ -77,29 +70,8 @@ func ExchangePointsToLingjing(tx *gorm.DB, userID int64, pointsAmount int) (int,
 		} else if pct > 0 {
 			lingjing = int(float64(lingjing) * (1 + pct))
 		}
-		var balance UserLingjingBalance
-		balErr := ttx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("user_id = ?", userID).First(&balance).Error
-		if errors.Is(balErr, gorm.ErrRecordNotFound) {
-			newBalance := UserLingjingBalance{
-				UserID:      userID,
-				Lingjing:    lingjing,
-				Lingchen:    0,
-				TotalEarned: lingjing,
-				TotalSpent:  0,
-			}
-			if err := ttx.Create(&newBalance).Error; err != nil {
-				return fmt.Errorf("无法创建灵晶钱包: %w", err)
-			}
-		} else if balErr == nil {
-			before := balance.Lingjing
-			balance.Lingjing += lingjing
-			balance.TotalEarned += lingjing
-			if err := ttx.Save(&balance).Error; err != nil {
-				return fmt.Errorf("无法更新灵晶余额: %w", err)
-			}
-			_ = before
-		} else {
-			return fmt.Errorf("查询灵晶余额失败: %w", balErr)
+		if err := addLingjingBalanceInTx(ttx, userID, lingjing); err != nil {
+			return err
 		}
 
 		// 记录灵晶交易流水
@@ -117,6 +89,46 @@ func ExchangePointsToLingjing(tx *gorm.DB, userID int64, pointsAmount int) (int,
 		return nil
 	})
 	return lingjing, err
+}
+
+// addDailyLingjingQuotaSpentInTx 原子累加当日灵晶兑换配额。
+// 返回 false 表示当日剩余额度不足。
+// 依赖 (user_id, day_key) 的 partial 唯一索引（见 db.go 迁移）：行不存在时先建行，
+// 并发首兑竞态由唯一索引 + OnConflict DoNothing 兜底，随后重试一次条件累加以得到确定结果。
+func addDailyLingjingQuotaSpentInTx(tx *gorm.DB, userID int64, dayKey string, pointsAmount int) (bool, error) {
+	if tx == nil {
+		return false, fmt.Errorf("灵晶配额事务为空")
+	}
+
+	bump := func() (bool, error) {
+		res := tx.Model(&DailyLingjingQuota{}).
+			Where("user_id = ? AND day_key = ? AND spent + ? <= ?", userID, dayKey, pointsAmount, DailyMaxExchangePoints).
+			UpdateColumn("spent", gorm.Expr("spent + ?", pointsAmount))
+		if res.Error != nil {
+			return false, fmt.Errorf("更新当日配额失败: %w", res.Error)
+		}
+		return res.RowsAffected > 0, nil
+	}
+
+	ok, err := bump()
+	if err != nil || ok {
+		return ok, err
+	}
+
+	create := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&DailyLingjingQuota{
+		UserID: userID,
+		DayKey: dayKey,
+		Spent:  pointsAmount,
+	})
+	if create.Error != nil {
+		return false, fmt.Errorf("无法创建当日配额: %w", create.Error)
+	}
+	if create.RowsAffected == 0 {
+		// 行已被并发事务抢先创建（自带 spent 初值），重试条件累加以得到确定结果。
+		return bump()
+	}
+	// 本事务已建行且 spent 已含本次用量，不能再累加。
+	return true, nil
 }
 
 // SectSecretRealmTokenLingjingAmount 秘境信物单向兑换灵晶数量
@@ -141,30 +153,9 @@ func ExchangeSectSecretRealmTokenToLingjing(tx *gorm.DB, userID int64) (int, err
 			return fmt.Errorf("秘境信物不足")
 		}
 
-		// 2. 更新钱包余额（不存在则创建，存在则累加）
-		var balance UserLingjingBalance
-		balErr := ttx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("user_id = ?", userID).First(&balance).Error
-		if errors.Is(balErr, gorm.ErrRecordNotFound) {
-			newBalance := UserLingjingBalance{
-				UserID:      userID,
-				Lingjing:    amount,
-				Lingchen:    0,
-				TotalEarned: amount,
-				TotalSpent:  0,
-			}
-			if err := ttx.Create(&newBalance).Error; err != nil {
-				return fmt.Errorf("无法创建灵晶钱包: %w", err)
-			}
-		} else if balErr == nil {
-			if err := ttx.Model(&UserLingjingBalance{}).Where("user_id = ?", userID).
-				Updates(map[string]interface{}{
-					"lingjing":     gorm.Expr("lingjing + ?", amount),
-					"total_earned": gorm.Expr("total_earned + ?", amount),
-				}).Error; err != nil {
-				return fmt.Errorf("加灵晶失败: %w", err)
-			}
-		} else {
-			return fmt.Errorf("查询灵晶余额失败: %w", balErr)
+		// 2. 更新钱包余额（不存在则创建，存在则累加；并发首建由唯一索引兜底）
+		if err := addLingjingBalanceInTx(ttx, userID, amount); err != nil {
+			return err
 		}
 
 		// 3. 记录灵晶交易流水
@@ -218,29 +209,61 @@ func SpendLingjing(tx *gorm.DB, userID int64, amount int, expenseType, descripti
 	return err
 }
 
+// addLingjingBalanceInTx 原子累加灵晶余额；钱包不存在时先建钱包再累加。
+// 首建竞态由 user_id 唯一索引 + OnConflict DoNothing 兜底，杜绝并发首建导致的建行失败或重复建行。
+func addLingjingBalanceInTx(tx *gorm.DB, userID int64, amount int) error {
+	if tx == nil {
+		return fmt.Errorf("灵晶钱包事务为空")
+	}
+
+	bump := func() (int64, error) {
+		res := tx.Model(&UserLingjingBalance{}).
+			Where("user_id = ?", userID).
+			Updates(map[string]interface{}{
+				"lingjing":     gorm.Expr("lingjing + ?", amount),
+				"total_earned": gorm.Expr("total_earned + ?", amount),
+			})
+		return res.RowsAffected, res.Error
+	}
+
+	if affected, err := bump(); err != nil {
+		return fmt.Errorf("加灵晶失败: %w", err)
+	} else if affected > 0 {
+		return nil
+	}
+
+	newBalance := UserLingjingBalance{
+		UserID:      userID,
+		Lingjing:    amount,
+		Lingchen:    0,
+		TotalEarned: amount,
+		TotalSpent:  0,
+	}
+	create := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&newBalance)
+	if create.Error != nil {
+		return fmt.Errorf("无法创建灵晶钱包: %w", create.Error)
+	}
+	if create.RowsAffected == 0 {
+		// 并发首建：钱包已被其他事务创建，重试一次原子累加以确保入账。
+		affected, err := bump()
+		if err != nil {
+			return fmt.Errorf("加灵晶失败: %w", err)
+		}
+		if affected == 0 {
+			return fmt.Errorf("灵晶钱包状态异常，累加未生效: user=%d", userID)
+		}
+	}
+	return nil
+}
+
 // EarnLingjing 灵侍奖励灵晶
 func EarnLingjing(tx *gorm.DB, userID int64, amount int, rewardType, description string) error {
 	if amount <= 0 {
 		return fmt.Errorf("invalid earn amount")
 	}
 	err := tx.Transaction(func(ttx *gorm.DB) error {
-		var balance UserLingjingBalance
-		findErr := ttx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("user_id = ?", userID).First(&balance).Error
-		if errors.Is(findErr, gorm.ErrRecordNotFound) {
-			newBalance := UserLingjingBalance{UserID: userID, Lingjing: amount, TotalEarned: amount}
-			if err := ttx.Create(&newBalance).Error; err != nil {
-				return fmt.Errorf("无法创建灵晶钱包: %w", err)
-			}
-		} else if findErr == nil {
-			if err := ttx.Model(&UserLingjingBalance{}).Where("user_id = ?", userID).
-				Updates(map[string]interface{}{
-					"lingjing":     gorm.Expr("lingjing + ?", amount),
-					"total_earned": gorm.Expr("total_earned + ?", amount),
-				}).Error; err != nil {
-				return fmt.Errorf("加灵晶失败: %w", err)
-			}
-		} else {
-			return fmt.Errorf("查询灵晶余额失败: %w", findErr)
+		if err := addLingjingBalanceInTx(ttx, userID, amount); err != nil {
+			return err
 		}
 
 		transaction := LingjingTransaction{

@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"gorm.io/gorm"
 )
 
@@ -636,7 +636,7 @@ func handleBookRequestCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery)
 		log.Printf("book request finish reload failed: req=%d err=%s", reqID, formatPlainError(err))
 	}
 
-	log.Printf("✅ 求书工单处理完成: req=%d status=%s admin=%d refunded=%d", reqID, status, cb.From.ID, refunded)
+	log.Printf("✅ 求书工单处理完成: req=%d status=%s admin=%d refunded=%d", reqID, formatPlainValue(status), cb.From.ID, refunded)
 
 	sendPlainText(bot, req.UserID, formatBookRequestUserResultText(req))
 	callbackText := "已处理"

@@ -1563,6 +1563,69 @@ func runConsistencyMigrations() {
 		log.Fatalf("github benefit claimed unique index migration failed; startup blocked: %s", formatPlainError(err))
 	}
 
+	// 灵晶每日兑换配额：按 (user_id, day_key) 收敛为单行。
+	// 历史重复行（如并发首兑竞态残留）把整组 SUM(spent)/SUM(exchanged)（含保留行自身）
+	// 合并进最早一行（保守口径，既不放大也不缩水剩余额度）后清理，再建 partial 唯一索引，
+	// 防止并发首兑重复建行导致每日配额翻倍。
+	runOneTimeMigration("20260903_daily_lingjing_quota_unique", func() error {
+		err := DB.Transaction(func(tx *gorm.DB) error {
+			type quotaMerge struct {
+				UserID         int64
+				DayKey         string
+				TotalSpent     int
+				TotalExchanged int
+			}
+			var merges []quotaMerge
+			if err := tx.Raw(`
+				SELECT user_id, day_key, SUM(spent) AS total_spent, SUM(exchanged) AS total_exchanged
+				FROM daily_lingjing_quotas
+				WHERE deleted_at IS NULL
+				GROUP BY user_id, day_key
+				HAVING COUNT(*) > 1;
+			`).Scan(&merges).Error; err != nil {
+				return err
+			}
+			for _, m := range merges {
+				if res := tx.Model(&DailyLingjingQuota{}).
+					Where("id = (SELECT MIN(id) FROM daily_lingjing_quotas WHERE user_id = ? AND day_key = ? AND deleted_at IS NULL)", m.UserID, m.DayKey).
+					Updates(map[string]interface{}{
+						"spent":     m.TotalSpent,
+						"exchanged": m.TotalExchanged,
+					}); res.Error != nil {
+					return res.Error
+				}
+				log.Printf("📌 灵晶每日配额重复行清理: user=%d day=%s 合并 spent=%d exchanged=%d", m.UserID, formatPlainValue(m.DayKey), m.TotalSpent, m.TotalExchanged)
+			}
+			return tx.Exec(`
+				DELETE FROM daily_lingjing_quotas
+				WHERE deleted_at IS NULL
+				  AND id NOT IN (
+					SELECT MIN(id) FROM daily_lingjing_quotas
+					WHERE deleted_at IS NULL
+					GROUP BY user_id, day_key
+				  );
+			`).Error
+		})
+		if err != nil {
+			return err
+		}
+		assertNoDuplicateGroups("daily_lingjing_quotas(user_id, day_key)", `
+			SELECT CAST(user_id AS TEXT) || ':' || day_key AS key, COUNT(*) AS count
+			FROM daily_lingjing_quotas
+			WHERE deleted_at IS NULL
+			GROUP BY user_id, day_key
+			HAVING COUNT(*) > 1;
+		`)
+		if err := ensureSoftDeletePartialUniqueIndex(DB, "idx_daily_lingjing_quotas_user_day_unique", `
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_lingjing_quotas_user_day_unique
+			ON daily_lingjing_quotas(user_id, day_key)
+			WHERE deleted_at IS NULL;
+		`); err != nil {
+			return err
+		}
+		return nil
+	})
+
 	assertNoDuplicateGroups("cultivation_realm_configs(major_realm)", `
 		SELECT CAST(major_realm AS TEXT) AS key, COUNT(*) AS count
 		FROM cultivation_realm_configs

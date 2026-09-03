@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -3295,11 +3295,37 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	case "WAITING_BIND_PASS":
 		username := session.GetTemp("username")
 		password := text
+		// ABS 密码是外部服务凭据，验证失败必须持久化限速，防止通过 Bot 无限爆破。
+		if locked, lockMessage := absPasswordLockedMessage(userID); locked {
+			replyText(bot, chatID, lockMessage)
+			return
+		}
+		// 单飞：同一用户同时只允许一个 ABS 密码校验在途，防止连发消息绕过失败限速。
+		if _, busy := absPasswordVerifyInFlight.LoadOrStore(userID, struct{}{}); busy {
+			replyText(bot, chatID, "⏳ 上一条密码正在校验中，请等结果出来再试。")
+			return
+		}
 		replyText(bot, chatID, "⏳ 正在校验身份...")
 		go func() {
+			defer absPasswordVerifyInFlight.Delete(userID)
+			if locked, lockMessage := absPasswordLockedMessage(userID); locked {
+				replyText(bot, chatID, lockMessage)
+				return
+			}
 			absID, err := absClient.VerifyUser(username, password)
+			// 外部调用返回后重新获取用户锁，保证会话读写与消息处理串行；
+			// 失败计数与会话变更都必须在锁内完成，杜绝并发互相覆盖。
+			unlock := lockUser(userID)
+			defer unlock()
 			if err != nil {
-				replyText(bot, chatID, "❌ 验证失败: "+formatMarkdownError(err))
+				replyText(bot, chatID, "❌ 验证失败: "+formatMarkdownError(err)+"\n\n"+recordABSPasswordFailure(userID))
+				return
+			}
+			resetABSPasswordFailures(userID)
+			// 会话已被用户取消或重开（指针不一致）时丢弃本次结果，
+			// 绝不复活已取消的绑定流程，避免后续消息被当作安全码消费。
+			if cur, ok := UserSessions.Load(userID); !ok || cur != session {
+				log.Printf("ℹ️ ABS 密码校验结果已丢弃（会话已变更）: user=%d", userID)
 				return
 			}
 			var existingUser User
@@ -3468,13 +3494,20 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			clearSession(userID)
 			return
 		}
-		replyText(bot, chatID, "⏳ 正在校验密码...")
-		if _, err := absClient.VerifyUser(u.Username, text); err != nil {
-			log.Printf("⚠️ 修改用户名密码校验失败: user=%d err=%s", userID, formatPlainError(err))
-			replyText(bot, chatID, "❌ 密码错误，身份校验未通过。修改用户名已取消。")
+		// ABS 密码是外部服务凭据，验证失败必须持久化限速，防止通过 Bot 无限爆破。
+		if locked, lockMessage := absPasswordLockedMessage(userID); locked {
+			replyText(bot, chatID, lockMessage)
 			clearSession(userID)
 			return
 		}
+		replyText(bot, chatID, "⏳ 正在校验密码...")
+		if _, err := absClient.VerifyUser(u.Username, text); err != nil {
+			log.Printf("⚠️ 修改用户名密码校验失败: user=%d err=%s", userID, formatPlainError(err))
+			replyText(bot, chatID, "❌ 密码错误，身份校验未通过。修改用户名已取消。\n\n"+recordABSPasswordFailure(userID))
+			clearSession(userID)
+			return
+		}
+		resetABSPasswordFailures(userID)
 		session.SetStep("WAITING_NEW_USERNAME")
 		replyText(bot, chatID, "✅ 密码验证通过！\n\n📝 **请输入新的用户名**\n(⚠️ 仅限 3-20 位字母、数字、下划线)")
 		UserSessions.Store(userID, session)

@@ -85,7 +85,3 @@ func getConfigIntFromDBChecked(db *gorm.DB, key string, defaultVal int) (int, er
 func getConfigIntChecked(key string, defaultVal int) (int, error) {
 	return getConfigIntFromDBChecked(DB, key, defaultVal)
 }
-
-func upsertSystemConfigValue(key string, value string) error {
-	return upsertSystemConfigValueInTx(DB, key, value)
-}

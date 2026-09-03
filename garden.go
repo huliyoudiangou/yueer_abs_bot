@@ -181,18 +181,6 @@ func gardenHerbReturnUnitPriceFloor(cfg gardenSeedConfig, returnPct int) int {
 	return cfg.Price * returnPct * 2 / (denom * 100)
 }
 
-func gardenHerbReturnUnitPrice(cfg gardenSeedConfig, returnPct int) int {
-	if !cfg.Purchasable || cfg.Price <= 0 || cfg.YieldMin <= 0 || cfg.YieldMax <= 0 {
-		return cfg.SellPrice
-	}
-
-	denom := cfg.YieldMin + cfg.YieldMax
-	if returnPct <= 0 {
-		returnPct = 100
-	}
-	return (cfg.Price*returnPct*2 + denom*100 - 1) / (denom * 100)
-}
-
 func gardenMarketScore(dayKey string, seedKey string, salt string) int {
 	score := 0
 	for _, ch := range dayKey + ":" + seedKey + ":" + salt {
@@ -1228,97 +1216,6 @@ func gardenPlantSeed(userID int64, plotNo int, seedKey string) error {
 	})
 }
 
-func gardenPlantAllSeeds(userID int64, seedKey string) (int, error) {
-	cfg, ok := gardenSeedByKey(seedKey)
-	if !ok {
-		return 0, errGardenSeedUnknown
-	}
-
-	var planted int
-	err := DB.Transaction(func(tx *gorm.DB) error {
-		txPlanted := 0
-		var plots []GardenPlot
-		if err := tx.Where("user_id = ?", userID).Order("plot_no asc").Find(&plots).Error; err != nil {
-			return err
-		}
-		if len(plots) == 0 {
-			return errGardenPlotNotFound
-		}
-
-		var plantings []GardenPlanting
-		if err := tx.Where("user_id = ? AND status = ?", userID, gardenStatusGrowing).Find(&plantings).Error; err != nil {
-			return err
-		}
-		busy := make(map[uint]struct{}, len(plantings))
-		for _, planting := range plantings {
-			busy[planting.PlotID] = struct{}{}
-		}
-
-		emptyPlots := make([]GardenPlot, 0, len(plots))
-		for _, plot := range plots {
-			if _, ok := busy[plot.ID]; ok {
-				continue
-			}
-			emptyPlots = append(emptyPlots, plot)
-		}
-		if len(emptyPlots) == 0 {
-			return errGardenNoEmptyPlot
-		}
-
-		var inv Inventory
-		if err := tx.Where("user_id = ? AND item_name = ? AND quantity > 0", userID, cfg.SeedName).First(&inv).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return errGardenSeedNotEnough
-			}
-			return err
-		}
-
-		toPlant := inv.Quantity
-		if toPlant > len(emptyPlots) {
-			toPlant = len(emptyPlots)
-		}
-		if toPlant <= 0 {
-			return errGardenSeedNotEnough
-		}
-
-		res := tx.Model(&Inventory{}).
-			Where("user_id = ? AND item_name = ? AND quantity >= ?", userID, cfg.SeedName, toPlant).
-			UpdateColumn("quantity", gorm.Expr("quantity - ?", toPlant))
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
-			return errGardenSeedNotEnough
-		}
-
-		now := time.Now()
-		for i := 0; i < toPlant; i++ {
-			plot := emptyPlots[i]
-			planting := GardenPlanting{
-				UserID:    userID,
-				PlotID:    plot.ID,
-				PlotNo:    plot.PlotNo,
-				SeedKey:   cfg.Key,
-				SeedName:  cfg.SeedName,
-				HerbName:  cfg.HerbName,
-				PlantedAt: now,
-				MaturesAt: now.Add(cfg.GrowDuration),
-				Status:    gardenStatusGrowing,
-			}
-			if err := createGardenPlantingInTx(tx, &planting); err != nil {
-				return err
-			}
-			txPlanted++
-		}
-		planted = txPlanted
-		return nil
-	})
-	if err != nil {
-		return 0, err
-	}
-	return planted, nil
-}
-
 func gardenHarvestPlot(userID int64, plotNo int) (int, string, error) {
 	var harvestedQty int
 	var herbName string
@@ -1414,11 +1311,6 @@ func gardenHarvestAll(userID int64) (int, int, error) {
 		return 0, 0, err
 	}
 	return harvestedPlots, harvestedQty, nil
-}
-
-func gardenSellHerb(userID int64, seedKey string, qty int) (int, error) {
-	gained, _, err := gardenSellHerbQuantity(userID, seedKey, qty)
-	return gained, err
 }
 
 func gardenSellHerbQuantity(userID int64, seedKey string, requestedQty int) (int, int, error) {
@@ -1614,28 +1506,12 @@ func inventoryQuantityUpsertClause(quantity int) clause.OnConflict {
 	}
 }
 
-func gardenUserPlots(userID int64) []GardenPlot {
-	plots, err := gardenUserPlotsWithError(userID)
-	if err != nil {
-		log.Printf("⚠️ 读取灵田列表失败: user=%d err=%s", userID, formatPlainError(err))
-	}
-	return plots
-}
-
 func gardenUserPlotsWithError(userID int64) ([]GardenPlot, error) {
 	var plots []GardenPlot
 	if err := DB.Where("user_id = ?", userID).Order("plot_no asc").Find(&plots).Error; err != nil {
 		return plots, err
 	}
 	return plots, nil
-}
-
-func gardenActivePlantingsByPlot(userID int64) map[uint]GardenPlanting {
-	result, err := gardenActivePlantingsByPlotWithError(userID)
-	if err != nil {
-		log.Printf("⚠️ 读取种植记录失败: user=%d err=%s", userID, formatPlainError(err))
-	}
-	return result
 }
 
 func gardenActivePlantingsByPlotWithError(userID int64) (map[uint]GardenPlanting, error) {
@@ -1648,14 +1524,6 @@ func gardenActivePlantingsByPlotWithError(userID int64) (map[uint]GardenPlanting
 		result[planting.PlotID] = planting
 	}
 	return result, nil
-}
-
-func gardenInventoryByNames(userID int64, names []string) map[string]int {
-	result, err := gardenInventoryByNamesWithError(userID, names)
-	if err != nil {
-		log.Printf("⚠️ 读取药园背包失败: user=%d err=%s", userID, formatPlainError(err))
-	}
-	return result
 }
 
 func gardenInventoryByNamesWithError(userID int64, names []string) (map[string]int, error) {
@@ -1673,14 +1541,6 @@ func gardenInventoryByNamesWithError(userID int64, names []string) (map[string]i
 	return result, nil
 }
 
-func gardenInventoryTotal(userID int64, names []string) int {
-	total, err := gardenInventoryTotalWithError(userID, names)
-	if err != nil {
-		log.Printf("⚠️ 读取药园背包总数失败: user=%d err=%s", userID, formatPlainError(err))
-	}
-	return total
-}
-
 func gardenInventoryTotalWithError(userID int64, names []string) (int, error) {
 	total := 0
 	items, err := gardenInventoryByNamesWithError(userID, names)
@@ -1691,14 +1551,6 @@ func gardenInventoryTotalWithError(userID int64, names []string) (int, error) {
 		total += qty
 	}
 	return total, nil
-}
-
-func gardenTodaySeedPurchases(userID int64, dayKey string) map[string]int {
-	result, err := gardenTodaySeedPurchasesWithError(userID, dayKey)
-	if err != nil {
-		log.Printf("⚠️ 读取种子限购记录失败: user=%d day=%s err=%s", userID, formatPlainValue(dayKey), formatPlainError(err))
-	}
-	return result
 }
 
 func gardenTodaySeedPurchasesWithError(userID int64, dayKey string) (map[string]int, error) {
@@ -1713,14 +1565,6 @@ func gardenTodaySeedPurchasesWithError(userID int64, dayKey string) (map[string]
 	return result, nil
 }
 
-func gardenTodayHerbMarketSales(userID int64, dayKey string) map[string]int {
-	result, err := gardenTodayHerbMarketSalesWithError(userID, dayKey)
-	if err != nil {
-		log.Printf("⚠️ 读取药市急收额度失败: user=%d day=%s err=%s", userID, formatPlainValue(dayKey), formatPlainError(err))
-	}
-	return result
-}
-
 func gardenTodayHerbMarketSalesWithError(userID int64, dayKey string) (map[string]int, error) {
 	var rows []GardenHerbMarketSale
 	if err := DB.Where("user_id = ? AND day_key = ?", userID, dayKey).Find(&rows).Error; err != nil {
@@ -1731,14 +1575,6 @@ func gardenTodayHerbMarketSalesWithError(userID int64, dayKey string) (map[strin
 		result[row.SeedKey] = row.Quantity
 	}
 	return result, nil
-}
-
-func gardenUnlockedRecipes(userID int64) map[string]bool {
-	result, err := gardenUnlockedRecipesWithError(userID)
-	if err != nil {
-		log.Printf("⚠️ 读取丹方解锁记录失败: user=%d err=%s", userID, formatPlainError(err))
-	}
-	return result
 }
 
 func gardenUnlockedRecipesWithError(userID int64) (map[string]bool, error) {

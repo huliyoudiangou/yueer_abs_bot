@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -100,49 +99,6 @@ type absLiveListeningSession struct {
 	// guaranteed per-day minimums, never guessed pause placement.
 	CrossDayStatus   string
 	StoredAllocation map[string]float64
-}
-
-func collectDailyListeningSessionData(userID int64, absUserID string, now time.Time) (map[string]float64, []absLiveListeningSession) {
-	result := make(map[string]float64)
-	if DB == nil || absClient == nil || userID == 0 || strings.TrimSpace(absUserID) == "" {
-		return result, nil
-	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-
-	body, code, err := absClient.sendRequest("GET", absUserListeningSessionsPath(absUserID, 0, dailyListeningSessionPageSize), nil)
-	if err != nil || code != 200 {
-		log.Printf("每日听书 ABS 用户最新会话读取失败: user=%d abs=%s code=%d err=%s", userID, formatPlainValue(absUserID), code, formatPlainError(err))
-		return result, nil
-	}
-
-	sessions, err := parseABSSessionsPayload(body)
-	if err != nil {
-		log.Printf("每日听书 ABS 用户最新会话解析失败: user=%d abs=%s err=%s", userID, formatPlainValue(absUserID), formatPlainError(err))
-		return result, nil
-	}
-
-	parsedSessions := make([]absLiveListeningSession, 0, len(sessions))
-	for _, raw := range sessions {
-		if !absSessionBelongsToUser(raw, absUserID) {
-			continue
-		}
-		session, ok := parseAbsLiveListeningSession(raw, absUserID)
-		if !ok {
-			log.Printf("每日听书 ABS 用户会话字段不足，跳过统计补算: user=%d abs=%s", userID, formatPlainValue(absUserID))
-			continue
-		}
-		parsedSessions = append(parsedSessions, session)
-		deltaByDay := consumeAbsLiveListeningSessionDelta(userID, absUserID, session, now)
-		for dayKey, seconds := range deltaByDay {
-			if seconds > 0 {
-				result[dayKey] += seconds
-			}
-		}
-	}
-
-	return result, parsedSessions
 }
 
 func parseABSSessionsPayload(body []byte) ([]map[string]interface{}, error) {
@@ -598,90 +554,6 @@ func absSessionBelongsToUser(raw map[string]interface{}, absUserID string) bool 
 	return false
 }
 
-func consumeAbsLiveListeningSessionDelta(userID int64, absUserID string, session absLiveListeningSession, now time.Time) map[string]float64 {
-	result := make(map[string]float64)
-	if DB == nil || userID == 0 || session.SessionKey == "" || session.ItemKey == "" || !session.IsPlaying {
-		upsertAbsLiveListeningCheckpoint(userID, absUserID, session, now)
-		return result
-	}
-
-	var cp AbsLiveListeningCheckpoint
-	err := DB.Where("user_id = ? AND session_key = ? AND item_key = ?", userID, session.SessionKey, session.ItemKey).First(&cp).Error
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		log.Printf("每日听书活跃会话 checkpoint 读取失败: user=%d session=%s err=%s", userID, formatPlainValue(session.SessionKey), formatPlainError(err))
-		upsertAbsLiveListeningCheckpoint(userID, absUserID, session, now)
-		return result
-	}
-
-	if err == nil && !cp.LastObservedAt.IsZero() {
-		usedPositionDelta := false
-		if session.HasPosition && cp.LastPositionSeconds >= 0 {
-			delta := session.PositionSeconds - cp.LastPositionSeconds
-			if delta > 0 && livePositionDeltaAllowed(delta, cp.LastObservedAt, now) {
-				addAllocatedLiveSeconds(result, cp.LastObservedAt, now, delta)
-				usedPositionDelta = true
-			}
-		}
-		if !usedPositionDelta && canUseLiveClockFallback(session, cp) {
-			if deltaSeconds, ok := liveClockFallbackSeconds(cp.LastObservedAt, now); ok {
-				addAllocatedLiveSeconds(result, cp.LastObservedAt, now, deltaSeconds)
-			}
-		}
-	} else {
-		// 首次观察只建立 checkpoint。缺少上一采样点时无法证明 StartedAt 之后始终在播放，
-		// 直接按墙钟补算会把暂停、离线和陈旧会话误计为听书时长。
-	}
-
-	upsertAbsLiveListeningCheckpoint(userID, absUserID, session, now)
-	return result
-}
-
-func canUseLiveClockFallback(session absLiveListeningSession, checkpoint AbsLiveListeningCheckpoint) bool {
-	return session.HasPlayingState && session.IsPlaying && checkpoint.LastIsPlaying
-}
-func liveClockFallbackSeconds(lastObservedAt time.Time, now time.Time) (float64, bool) {
-	if lastObservedAt.IsZero() || !now.After(lastObservedAt) {
-		return 0, false
-	}
-	delta := now.Sub(lastObservedAt)
-	if delta <= 0 || delta > dailyListeningLiveClockFallbackMax {
-		return 0, false
-	}
-	return delta.Seconds(), true
-}
-
-func livePositionDeltaAllowed(delta float64, lastObservedAt time.Time, now time.Time) bool {
-	if delta <= 0 || lastObservedAt.IsZero() || now.Before(lastObservedAt) {
-		return false
-	}
-	elapsed := now.Sub(lastObservedAt).Seconds()
-	if elapsed <= 0 {
-		return false
-	}
-	return delta <= elapsed*dailyListeningLivePositionMaxRate+60
-}
-
-func addAllocatedLiveSeconds(result map[string]float64, start time.Time, end time.Time, seconds float64) {
-	if seconds <= 0 || !end.After(start) {
-		return
-	}
-	if seconds > sectMaxRawListeningSecondsPerDay {
-		seconds = sectMaxRawListeningSecondsPerDay
-	}
-
-	segments := splitDurationByBeijingDay(start, end)
-	total := 0.0
-	for _, segmentSeconds := range segments {
-		total += segmentSeconds
-	}
-	if total <= 0 {
-		return
-	}
-	for dayKey, segmentSeconds := range segments {
-		result[dayKey] += seconds * (segmentSeconds / total)
-	}
-}
-
 func splitDurationByBeijingDay(start time.Time, end time.Time) map[string]float64 {
 	result := make(map[string]float64)
 	if !end.After(start) {
@@ -702,54 +574,6 @@ func splitDurationByBeijingDay(start time.Time, end time.Time) map[string]float6
 		cursor = next
 	}
 	return result
-}
-
-func upsertAbsLiveListeningCheckpoint(userID int64, absUserID string, session absLiveListeningSession, observedAt time.Time) {
-	if DB == nil || userID == 0 || session.SessionKey == "" || session.ItemKey == "" {
-		return
-	}
-	if observedAt.IsZero() {
-		observedAt = time.Now()
-	}
-	entry := AbsLiveListeningCheckpoint{
-		UserID:              userID,
-		AbsUserID:           strings.TrimSpace(absUserID),
-		SessionKey:          session.SessionKey,
-		ItemKey:             session.ItemKey,
-		LastObservedAt:      observedAt,
-		LastPositionSeconds: -1,
-		LastIsPlaying:       session.IsPlaying,
-		LastServerUpdatedAt: session.UpdatedAt,
-	}
-	if session.HasPosition {
-		entry.LastPositionSeconds = session.PositionSeconds
-	}
-	res := DB.Clauses(absLiveListeningCheckpointOnConflict(observedAt)).Create(&entry)
-	if res.Error != nil {
-		log.Printf("每日听书活跃会话 checkpoint 写入失败: user=%d session=%s err=%s", userID, formatPlainValue(session.SessionKey), formatPlainError(res.Error))
-	}
-}
-
-func absLiveListeningCheckpointOnConflict(now time.Time) clause.OnConflict {
-	return clause.OnConflict{
-		Columns: []clause.Column{
-			{Name: "user_id"},
-			{Name: "session_key"},
-			{Name: "item_key"},
-		},
-		TargetWhere: clause.Where{Exprs: []clause.Expression{
-			clause.Eq{Column: clause.Column{Name: "deleted_at"}, Value: nil},
-		}},
-		DoUpdates: clause.Assignments(map[string]interface{}{
-			"abs_user_id":            gorm.Expr("excluded.abs_user_id"),
-			"last_observed_at":       gorm.Expr("excluded.last_observed_at"),
-			"last_position_seconds":  gorm.Expr("excluded.last_position_seconds"),
-			"last_is_playing":        gorm.Expr("excluded.last_is_playing"),
-			"last_server_updated_at": gorm.Expr("excluded.last_server_updated_at"),
-			"updated_at":             now,
-			"deleted_at":             nil,
-		}),
-	}
 }
 
 func sessionPlayingState(raw map[string]interface{}) (bool, bool) {

@@ -3,12 +3,13 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"github.com/joho/godotenv"
 	"log"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {

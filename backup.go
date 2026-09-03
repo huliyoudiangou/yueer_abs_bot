@@ -165,11 +165,6 @@ func gzipDecompressBytes(compressed []byte) ([]byte, error) {
 	return io.ReadAll(reader)
 }
 
-func encryptBackupData(plainData []byte, backupKey string) ([]byte, error) {
-	// 历史兼容入口：默认按 v2 明文库加密。新备份请走 encryptBackupDataWithHeader + v3。
-	return encryptBackupDataWithHeader(plainData, backupKey, backupMagicHeaderV2)
-}
-
 func encryptBackupDataWithHeader(payload []byte, backupKey string, magicHeader string) ([]byte, error) {
 	magicHeader = strings.TrimSpace(magicHeader)
 	if magicHeader == "" {
@@ -362,6 +357,3 @@ func zeroBytes(data []byte) {
 		data[i] = 0
 	}
 }
-
-// 兼容旧测试与外部引用。
-const backupMagicHeader = backupMagicHeaderV2

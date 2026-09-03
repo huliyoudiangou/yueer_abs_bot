@@ -96,16 +96,21 @@ func generateRandomCode(length int) string {
 	}
 
 	bytes := make([]byte, (length+1)/2)
-	if _, err := rand.Read(bytes); err != nil {
-		log.Printf("❌ 生成随机码失败: %s", formatPlainError(err))
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+	// 熵源故障必须 fail-closed：本函数的产物包含邀请码/续期卡/卡密/领奖暗号等安全令牌，
+	// 绝不能静默退化为时间戳等可预测值；重试后仍失败则中止本次生成（由各调用点的 recover 兜底）。
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, err = rand.Read(bytes); err == nil {
+			code := hex.EncodeToString(bytes)
+			if len(code) > length {
+				code = code[:length]
+			}
+			return code
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-
-	code := hex.EncodeToString(bytes)
-	if len(code) > length {
-		code = code[:length]
-	}
-	return code
+	log.Printf("❌ crypto/rand 不可用，已中止安全码生成（fail-closed）: err=%s", formatPlainError(err))
+	panic("crypto/rand unavailable; refusing to generate predictable security token")
 }
 
 func getManualPillUsageConfig(itemName string, t time.Time) (periodStart time.Time, periodKey string, maxCount int, cycleName string, addHours float64, ok bool) {

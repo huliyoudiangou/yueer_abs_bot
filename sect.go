@@ -2127,13 +2127,6 @@ func handleSectShop(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	))
 }
 
-func sectShopMonthRange(t time.Time) (time.Time, time.Time) {
-	loc := time.FixedZone("CST", 8*3600)
-	local := t.In(loc)
-	start := time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, loc)
-	return start, start.AddDate(0, 1, 0)
-}
-
 func sectShopMonthKey(t time.Time) string {
 	return signInMonthKey(t)
 }

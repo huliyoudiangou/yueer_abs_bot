@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -129,6 +130,9 @@ func worldBossPointDescriptionName(name string) string {
 var (
 	lastWorldBossStartKey string
 	worldBossRankOrder    = "damage DESC, delta_hours DESC, created_at ASC"
+	// worldBossLiveRefreshMu 串行化实时伤害刷新：调度器、Boss状态/Boss排行/参加Boss 都会触发，
+	// 每轮刷新按参与人数对 ABS 逐个拉取听书时长并回写伤害/血量，重入会导致重复 ABS 请求与伤害重复写库。
+	worldBossLiveRefreshMu sync.Mutex
 )
 
 func isWorldBossOpenDay(weekday time.Weekday) bool {
@@ -367,9 +371,12 @@ func refreshActiveWorldBosses(bot *tgbotapi.BotAPI, now time.Time) {
 		if time.Since(event.UpdatedAt) < worldBossLiveRefreshInterval {
 			continue
 		}
-		refreshed, _, err := refreshWorldBossLiveDamage(event)
+		refreshed, ran, err := tryRefreshWorldBossLiveDamage(event)
 		if err != nil {
 			log.Printf("⚠️ 世界Boss实时伤害刷新失败: boss=%s err=%s", formatPlainValue(event.BossID), formatPlainError(err))
+			continue
+		}
+		if !ran {
 			continue
 		}
 		ensureWorldBossLiveBoard(bot, refreshed)
@@ -397,6 +404,25 @@ func recoverStaleWorldBossSettlements(now time.Time) {
 }
 
 func refreshWorldBossLiveDamage(event WorldBossEvent) (WorldBossEvent, float64, error) {
+	// 用户触发路径（Boss状态/Boss排行/参加Boss）使用阻塞锁：等待在途刷新完成后重算，
+	// 保证参加后立即看到最新血量；调度器走 tryRefreshWorldBossLiveDamage，忙时跳过。
+	worldBossLiveRefreshMu.Lock()
+	defer worldBossLiveRefreshMu.Unlock()
+	return refreshWorldBossLiveDamageLocked(event)
+}
+
+// tryRefreshWorldBossLiveDamage 调度器专用：已有刷新在途时直接跳过，等待下一轮 tick，避免重复 ABS 拉取。
+// 返回 ran=false 表示本轮未执行，调用方不得基于旧数据刷新战榜或结算。
+func tryRefreshWorldBossLiveDamage(event WorldBossEvent) (WorldBossEvent, bool, error) {
+	if !worldBossLiveRefreshMu.TryLock() {
+		return event, false, nil
+	}
+	defer worldBossLiveRefreshMu.Unlock()
+	refreshed, _, err := refreshWorldBossLiveDamageLocked(event)
+	return refreshed, true, err
+}
+
+func refreshWorldBossLiveDamageLocked(event WorldBossEvent) (WorldBossEvent, float64, error) {
 	if event.BossID == "" || event.Status != "active" {
 		return event, 0, nil
 	}
@@ -1032,6 +1058,11 @@ func handleWorldBossStatus(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 	if event.Status == "active" {
+		// 实时刷新按参与人数逐个拉取 ABS 听书时长，对单用户加冷却防止刷屏拖垮 ABS。
+		if !CheckRateLimit(msg.From.ID, "world_boss_live_refresh", 10*time.Second) {
+			replyText(bot, msg.Chat.ID, "⏳ 查询太频繁了，请稍等几秒再刷新实时战况。")
+			return
+		}
 		if refreshed, _, err := refreshWorldBossLiveDamage(event); err == nil {
 			event = refreshed
 			ensureWorldBossLiveBoard(bot, event)
@@ -1088,6 +1119,11 @@ func handleWorldBossRank(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 	if event.Status == "active" {
+		// 实时刷新按参与人数逐个拉取 ABS 听书时长，对单用户加冷却防止刷屏拖垮 ABS。
+		if !CheckRateLimit(msg.From.ID, "world_boss_live_refresh", 10*time.Second) {
+			replyText(bot, msg.Chat.ID, "⏳ 查询太频繁了，请稍等几秒再刷新实时战况。")
+			return
+		}
 		if refreshed, _, err := refreshWorldBossLiveDamage(event); err == nil {
 			event = refreshed
 			ensureWorldBossLiveBoard(bot, event)
@@ -1325,11 +1361,6 @@ func ensureWorldBossLiveBoardSync(bot *tgbotapi.BotAPI, bossID string) error {
 	return nil
 }
 
-func getActiveWorldBoss() (WorldBossEvent, bool) {
-	event, err := getActiveWorldBossChecked()
-	return event, err == nil
-}
-
 func getActiveWorldBossChecked() (WorldBossEvent, error) {
 	if DB == nil {
 		return WorldBossEvent{}, fmt.Errorf("WORLD_BOSS_DB_UNAVAILABLE")
@@ -1344,11 +1375,6 @@ func getActiveWorldBossChecked() (WorldBossEvent, error) {
 		return WorldBossEvent{}, err
 	}
 	return event, nil
-}
-
-func getActiveOrLatestWorldBoss() (WorldBossEvent, bool) {
-	event, err := getActiveOrLatestWorldBossChecked()
-	return event, err == nil
 }
 
 func getActiveOrLatestWorldBossChecked() (WorldBossEvent, error) {
@@ -1391,14 +1417,6 @@ func calculateWorldBossDamage(baseHours float64, finalHours float64, maxDeltaHou
 	return damage, baseDamage, multiplier
 }
 
-func getWorldBossCultivationDamageBonus(userID int64) float64 {
-	bonus, err := getWorldBossCultivationDamageBonusChecked(userID)
-	if err != nil {
-		return 0
-	}
-	return bonus
-}
-
 func getWorldBossCultivationDamageBonusChecked(userID int64) (float64, error) {
 	var cul Cultivation
 	if err := DB.Where("user_id = ?", userID).First(&cul).Error; err != nil {
@@ -1429,14 +1447,6 @@ func calculateWorldBossCultivationDamageBonus(major int, minor int) float64 {
 	bonus := float64(stage) * worldBossCultivationBonusPerStage
 	if bonus > worldBossCultivationBonusCap {
 		return worldBossCultivationBonusCap
-	}
-	return bonus
-}
-
-func getWorldBossSectDamageBonus(userID int64) float64 {
-	bonus, err := getWorldBossSectDamageBonusChecked(userID)
-	if err != nil {
-		return 0
 	}
 	return bonus
 }
@@ -1493,14 +1503,6 @@ func getWorldBossFortuneDamageBonusChecked(userID int64) (float64, error) {
 		return 0, err
 	}
 	return pct, nil
-}
-
-func applyWorldBossDamageBonuses(userID int64, baseDamage float64) (float64, float64) {
-	damage, multiplier, err := applyWorldBossDamageBonusesChecked(userID, baseDamage)
-	if err != nil {
-		return baseDamage, 1
-	}
-	return damage, multiplier
 }
 
 func applyWorldBossDamageBonusesChecked(userID int64, baseDamage float64) (float64, float64, error) {

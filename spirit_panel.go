@@ -256,15 +256,6 @@ func spiritPanelBag(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboardM
 	return text, tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
-// 未开放玩法的占位面板
-func spiritPanelComingSoon(title, body string) (string, tgbotapi.InlineKeyboardMarkup) {
-	text := title + "\n━━━━━━━━━━━━━━\n" + body + "\n\n🏗 该玩法正在建设中，敬请期待。"
-	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)),
-	)
-	return text, kb
-}
-
 func spiritPanelCatch(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboardMarkup) {
 	lingjing, err := GetUserWalletBalance(db, userID)
 	if err != nil {
@@ -2528,7 +2519,7 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 	edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
 	edit.ReplyMarkup = &kb
 	if _, err := bot.Send(edit); err != nil {
-		log.Printf("[灵侍] 面板刷新失败 user=%d cb=%s err=%s", userID, cb.Data, formatTelegramSendError(err))
+		log.Printf("[灵侍] 面板刷新失败 user=%d cb=%s err=%s", userID, formatPlainValue(cb.Data), formatTelegramSendError(err))
 	}
 
 	// ACK

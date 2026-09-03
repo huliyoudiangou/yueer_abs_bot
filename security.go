@@ -6,11 +6,16 @@ import (
 	"log"
 	"math"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
 	"gorm.io/gorm"
 )
+
+// absPasswordVerifyInFlight 同一用户同时只允许一个 ABS 密码校验在途。
+// 防止连发消息在失败计数落库前全部通过限速检查（爆破窗口），也避免并发校验互相覆盖会话。
+var absPasswordVerifyInFlight sync.Map
 
 func getTodayAuditDeltaTotalTx(tx *gorm.DB, actorID int64, action string) (int, error) {
 	startOfDay, endOfDay := auditDayRange(time.Now())
@@ -211,6 +216,86 @@ func updateSecurityAttemptFailureInTx(tx *gorm.DB, attempt *SecurityAttemptLock,
 
 func verifyUserSecurityCodeWithCooldown(userID int64, input string, stored string) (bool, string) {
 	return verifySensitiveTokenWithPersistentCooldown(userID, securityCodeAttemptPurpose, input, stored)
+}
+
+const (
+	// absPasswordAttemptPurpose ABS 账号密码验权（绑定/改用户名）专用限速目的。
+	// ABS 密码是外部服务凭据，必须与其他安全码一样持久化限速，防止通过 Bot 无限爆破。
+	absPasswordAttemptPurpose = "abs_password_verify"
+	absPasswordMaxFailures    = 5
+	absPasswordLockDuration   = 10 * time.Minute
+)
+
+// absPasswordLockedMessage 命中持久化锁定时返回面向用户的提示；未锁定返回 false。
+func absPasswordLockedMessage(userID int64) (bool, string) {
+	if DB == nil {
+		return false, ""
+	}
+
+	var attempt SecurityAttemptLock
+	err := DB.Where("user_id = ? AND purpose = ?", userID, absPasswordAttemptPurpose).First(&attempt).Error
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			// 查锁失败按未锁定放行（与安全码兜底口径一致），但必须留痕：
+			// DB 异常期间 ABS 密码防爆破会静默失效，需要日志暴露该窗口。
+			log.Printf("⚠️ ABS 密码验证锁读取失败，按未锁定处理: user=%d err=%s", userID, formatPlainError(err))
+		}
+		return false, ""
+	}
+
+	now := time.Now()
+	if attempt.LockedUntil != nil && attempt.LockedUntil.After(now) {
+		remaining := securityAttemptRemainingMinutes(*attempt.LockedUntil, now)
+		return true, fmt.Sprintf("⏳ 验证失败次数过多，请 %d 分钟后再试。", remaining)
+	}
+	return false, ""
+}
+
+// recordABSPasswordFailure 记录一次 ABS 密码验证失败，返回附带剩余次数/锁定提示的用户文案。
+// ABS 网络调用不得进入事务，因此失败计数在验证返回后单独落库。
+func recordABSPasswordFailure(userID int64) string {
+	if DB == nil {
+		return "❌ 验证失败。"
+	}
+
+	message := "❌ 验证失败。"
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var recordErr error
+		message, recordErr = recordSecurityAttemptFailureInTx(
+			tx,
+			userID,
+			absPasswordAttemptPurpose,
+			absPasswordMaxFailures,
+			absPasswordLockDuration,
+			time.Now(),
+			"⚠️ 剩余尝试次数：%d",
+			"⏳ 验证失败次数过多，请 10 分钟后再试。",
+		)
+		return recordErr
+	})
+	if err != nil {
+		log.Printf("⚠️ ABS 密码验证失败次数持久化异常: user=%d err=%s", userID, formatPlainError(err))
+		return "❌ 验证失败。"
+	}
+	return message
+}
+
+// resetABSPasswordFailures ABS 密码验证成功后清零失败计数；失败仅记日志，不影响已通过的验证。
+func resetABSPasswordFailures(userID int64) {
+	if DB == nil {
+		return
+	}
+
+	err := DB.Model(&SecurityAttemptLock{}).
+		Where("user_id = ? AND purpose = ? AND (fail_count > 0 OR locked_until IS NOT NULL OR last_fail_at IS NOT NULL)", userID, absPasswordAttemptPurpose).
+		Updates(map[string]interface{}{
+			"fail_count":   0,
+			"locked_until": nil,
+			"last_fail_at": nil,
+		}).Error
+	if err != nil {
+		log.Printf("⚠️ ABS 密码验证成功后清零失败计数异常: user=%d err=%s", userID, formatPlainError(err))
+	}
 }
 
 func verifySensitiveTokenWithPersistentCooldown(userID int64, purpose string, input string, stored string) (bool, string) {

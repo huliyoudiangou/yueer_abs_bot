@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 // 🛡️ 核心重构：后台巡警协程，集成了消息安全清理与内存垃圾回收

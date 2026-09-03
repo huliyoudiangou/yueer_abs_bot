@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"gorm.io/gorm"
 )
 
@@ -390,7 +390,7 @@ func handleGrabRedPacket(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		return
 	}
 
-	balanceText := fmt.Sprintf("`%d` 积分", u.Points)
+	var balanceText string
 	if err := DB.Where("telegram_id = ?", userID).First(&u).Error; err != nil {
 		log.Printf("⚠️ 红包领取后余额读取失败: user=%d packet=%s err=%s", userID, formatPlainValue(packet.ID), formatPlainError(err))
 		balanceText = "`读取失败`"

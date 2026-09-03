@@ -141,14 +141,6 @@ func getSectTechnologyName(key string) string {
 	return key
 }
 
-func getSectTechnologyLevelTx(tx *gorm.DB, sectID int64, techKey string) int {
-	level, err := getSectTechnologyLevelTxChecked(tx, sectID, techKey)
-	if err != nil {
-		return 0
-	}
-	return level
-}
-
 func getSectTechnologyLevelTxChecked(tx *gorm.DB, sectID int64, techKey string) (int, error) {
 	if tx == nil {
 		tx = DB
@@ -172,18 +164,6 @@ func getSectTechnologyLevelTxChecked(tx *gorm.DB, sectID int64, techKey string) 
 		return sectTechnologyMaxLevel, nil
 	}
 	return tech.Level, nil
-}
-
-func getSectTechnologyLevel(sectID int64, techKey string) int {
-	return getSectTechnologyLevelTx(DB, sectID, techKey)
-}
-
-func getSectTechnologyLevelByUser(userID int64, techKey string) int {
-	level, err := getSectTechnologyLevelByUserChecked(userID, techKey)
-	if err != nil {
-		return 0
-	}
-	return level
 }
 
 func getSectTechnologyLevelByUserChecked(userID int64, techKey string) (int, error) {
@@ -219,24 +199,12 @@ func getSectMaxMembersWithTech(sect Sect) int {
 	return getSectMaxMembersWithTechTx(DB, sect)
 }
 
-func getSectDailyTaskRewardsTx(tx *gorm.DB, sectID int64) (int, int) {
-	contribution, prestige, err := getSectDailyTaskRewardsTxChecked(tx, sectID)
-	if err != nil {
-		return sectDailyTaskRewardContribution, sectDailyTaskRewardPrestige
-	}
-	return contribution, prestige
-}
-
 func getSectDailyTaskRewardsTxChecked(tx *gorm.DB, sectID int64) (int, int, error) {
 	level, err := getSectTechnologyLevelTxChecked(tx, sectID, sectTechDailyTaskBonus)
 	if err != nil {
 		return 0, 0, err
 	}
 	return sectDailyTaskRewardContribution + level, sectDailyTaskRewardPrestige + level, nil
-}
-
-func getSectDailyTaskRewards(sectID int64) (int, int) {
-	return getSectDailyTaskRewardsTx(DB, sectID)
 }
 
 func sectTechnologyUpgradeErrorCode(err error) string {

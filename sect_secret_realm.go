@@ -189,12 +189,6 @@ type sectSecretRealmRewardMultiplier struct {
 	PrestigePercent     int
 }
 
-type sectSecretRealmDropRule struct {
-	ItemName      string
-	Quantity      int
-	ChancePercent int
-}
-
 type sectSecretRealmRawDeltaDetail struct {
 	ObservedDeltaSeconds float64
 	WallClockCapSeconds  float64
@@ -280,11 +274,6 @@ func StartSectSecretRealmScheduler(bot *tgbotapi.BotAPI) {
 	log.Println("✅ 宗门秘境调度器已启动：每分钟巡检过期秘境")
 }
 
-func getSectSecretRealmCost(level int) int {
-	profile, _ := defaultSectSecretRealmConfig().profile(sectSecretRealmProfileNormal)
-	return getSectSecretRealmProfileCost(profile, level)
-}
-
 func getSectSecretRealmProfileCost(profile SectSecretRealmProfileConfig, level int) int {
 	if level < 1 {
 		level = 1
@@ -342,10 +331,6 @@ func sectSecretRealmWallClockCapSeconds(joinedAt time.Time, eventStart time.Time
 	return end.Sub(start).Seconds()
 }
 
-func calculateSectSecretRealmRawDeltaSeconds(baseRawSeconds float64, finalRawSeconds float64, joinedAt time.Time, eventStart time.Time, eventEnd time.Time, settledAt time.Time) float64 {
-	return calculateSectSecretRealmRawDeltaDetail(baseRawSeconds, finalRawSeconds, joinedAt, eventStart, eventEnd, settledAt).DeltaSeconds
-}
-
 func calculateSectSecretRealmRawDeltaDetail(baseRawSeconds float64, finalRawSeconds float64, joinedAt time.Time, eventStart time.Time, eventEnd time.Time, settledAt time.Time) sectSecretRealmRawDeltaDetail {
 	if baseRawSeconds < 0 {
 		baseRawSeconds = 0
@@ -373,11 +358,6 @@ func calculateSectSecretRealmRawDeltaDetail(baseRawSeconds float64, finalRawSeco
 	return detail
 }
 
-func calculateSectSecretRealmSuppressedHours(rawDeltaSeconds float64) float64 {
-	profile, _ := defaultSectSecretRealmConfig().profile(sectSecretRealmProfileNormal)
-	return calculateSectSecretRealmSuppressedHoursForProfile(rawDeltaSeconds, profile)
-}
-
 func calculateSectSecretRealmSuppressedHoursForProfile(rawDeltaSeconds float64, profile SectSecretRealmProfileConfig) float64 {
 	if rawDeltaSeconds <= 0 {
 		return 0
@@ -387,11 +367,6 @@ func calculateSectSecretRealmSuppressedHoursForProfile(rawDeltaSeconds float64, 
 		return rawHours
 	}
 	return profile.PressureFullHours + (rawHours-profile.PressureFullHours)*profile.PressureAfterRate
-}
-
-func sectSecretRealmGuardianBonusPercentForMajor(major int) int {
-	profile, _ := defaultSectSecretRealmConfig().profile(sectSecretRealmProfileNormal)
-	return sectSecretRealmGuardianBonusPercentForProfile(major, profile)
 }
 
 func sectSecretRealmGuardianBonusPercentForProfile(major int, profile SectSecretRealmProfileConfig) int {
@@ -414,11 +389,6 @@ func applySectSecretRealmHourBonus(hours float64, bonusPercent int) float64 {
 	return hours * float64(100+bonusPercent) / 100.0
 }
 
-func sectSecretRealmGuardian(participants []SectSecretRealmParticipant) (SectSecretRealmParticipant, int) {
-	profile, _ := defaultSectSecretRealmConfig().profile(sectSecretRealmProfileNormal)
-	return sectSecretRealmGuardianForProfile(participants, profile)
-}
-
 func sectSecretRealmGuardianForProfile(participants []SectSecretRealmParticipant, profile SectSecretRealmProfileConfig) (SectSecretRealmParticipant, int) {
 	var guardian SectSecretRealmParticipant
 	for _, p := range participants {
@@ -438,11 +408,6 @@ func sectSecretRealmGuardianForProfile(participants []SectSecretRealmParticipant
 	return guardian, sectSecretRealmGuardianBonusPercentForProfile(guardian.MajorRealm, profile)
 }
 
-func sectSecretRealmRewardMultiplierForMajor(major int) sectSecretRealmRewardMultiplier {
-	profile, _ := defaultSectSecretRealmConfig().profile(sectSecretRealmProfileNormal)
-	return sectSecretRealmRewardMultiplierForProfile(major, profile)
-}
-
 func sectSecretRealmRewardMultiplierForProfile(major int, profile SectSecretRealmProfileConfig) sectSecretRealmRewardMultiplier {
 	multiplier := sectSecretRealmRewardMultiplier{PointPercent: 100, ContributionPercent: 100, PrestigePercent: 100}
 	for _, rule := range profile.Multipliers {
@@ -457,11 +422,6 @@ func sectSecretRealmRewardMultiplierForProfile(major int, profile SectSecretReal
 	return multiplier
 }
 
-func sectSecretRealmDropRuleForMajor(major int) (sectSecretRealmDropRule, bool) {
-	profile, _ := defaultSectSecretRealmConfig().profile(sectSecretRealmProfileNormal)
-	return sectSecretRealmDropRuleForProfile(major, profile)
-}
-
 func sectSecretRealmEligibleDropRules(major int, profile SectSecretRealmProfileConfig) []SectSecretRealmDropCfg {
 	eligible := make([]SectSecretRealmDropCfg, 0, len(profile.DropRules))
 	for _, rule := range profile.DropRules {
@@ -473,26 +433,6 @@ func sectSecretRealmEligibleDropRules(major int, profile SectSecretRealmProfileC
 		eligible = append(eligible, rule)
 	}
 	return eligible
-}
-
-// sectSecretRealmDropRuleForProfile 返回“门槛最高的可用掉落规则”，
-// 仅用于兼容旧只读展示；实际掉落发放走加权多档池。
-func sectSecretRealmDropRuleForProfile(major int, profile SectSecretRealmProfileConfig) (sectSecretRealmDropRule, bool) {
-	eligible := sectSecretRealmEligibleDropRules(major, profile)
-	if len(eligible) == 0 {
-		return sectSecretRealmDropRule{}, false
-	}
-	selected := eligible[len(eligible)-1]
-	for _, rule := range eligible {
-		if rule.MinMajorRealm >= selected.MinMajorRealm {
-			selected = rule
-		}
-	}
-	return sectSecretRealmDropRule{
-		ItemName:      selected.ItemName,
-		Quantity:      selected.Quantity,
-		ChancePercent: selected.ChancePercent,
-	}, true
 }
 
 func sectSecretRealmStableDropScore(realmID string, userID int64, major int) int {
@@ -516,11 +456,6 @@ func sectSecretRealmDropWeight(rule SectSecretRealmDropCfg) int {
 		return 0
 	}
 	return weight
-}
-
-func sectSecretRealmDropForScore(major int, deltaHours float64, score int) (string, int) {
-	profile, _ := defaultSectSecretRealmConfig().profile(sectSecretRealmProfileNormal)
-	return sectSecretRealmDropForScoreWithProfile(major, deltaHours, score, 0, profile)
 }
 
 func sectSecretRealmDropForScoreWithProfile(major int, deltaHours float64, score int, itemScore int, profile SectSecretRealmProfileConfig) (string, int) {
@@ -565,11 +500,6 @@ func sectSecretRealmDropForScoreWithProfile(major int, deltaHours float64, score
 	}
 	last := eligible[len(eligible)-1]
 	return last.ItemName, last.Quantity
-}
-
-func sectSecretRealmDropForParticipant(realmID string, userID int64, major int, deltaHours float64) (string, int) {
-	profile, _ := defaultSectSecretRealmConfig().profile(sectSecretRealmProfileNormal)
-	return sectSecretRealmDropForParticipantWithProfile(realmID, userID, major, deltaHours, profile)
 }
 
 func sectSecretRealmDropForParticipantWithProfile(realmID string, userID int64, major int, deltaHours float64, profile SectSecretRealmProfileConfig) (string, int) {
@@ -853,11 +783,6 @@ func countSectSecretRealmWeeklyOpenTx(tx *gorm.DB, sectID int64, now time.Time) 
 	return count, err
 }
 
-func getActiveSectSecretRealmTx(tx *gorm.DB, sectID int64, now time.Time) (SectSecretRealmEvent, bool) {
-	event, err := getActiveSectSecretRealmTxChecked(tx, sectID, now)
-	return event, err == nil
-}
-
 func getActiveSectSecretRealmTxChecked(tx *gorm.DB, sectID int64, now time.Time) (SectSecretRealmEvent, error) {
 	if tx == nil {
 		tx = DB
@@ -885,11 +810,6 @@ func canJoinSectSecretRealmAt(event SectSecretRealmEvent, now time.Time) bool {
 		return false
 	}
 	return !now.Before(event.StartAt) && now.Before(event.EndAt)
-}
-
-func getActiveOrLatestSectSecretRealm(sectID int64, now time.Time) (SectSecretRealmEvent, bool) {
-	event, err := getActiveOrLatestSectSecretRealmChecked(sectID, now)
-	return event, err == nil
 }
 
 func getActiveOrLatestSectSecretRealmChecked(sectID int64, now time.Time) (SectSecretRealmEvent, error) {
@@ -1717,15 +1637,6 @@ func rollbackSectSecretRealmSettlement(realmID string, reason error) {
 	log.Printf("↩️ 宗门秘境结算已回滚 active: realm=%s reason=%s", formatPlainValue(realmID), formatPlainValue(formatPlainError(reason)))
 }
 
-func calculateSectSecretRealmRewards(deltaHours float64) (points int, contribution int, prestige int) {
-	return calculateSectSecretRealmRewardsForRealm(deltaHours, 0)
-}
-
-func calculateSectSecretRealmRewardsForRealm(deltaHours float64, majorRealm int) (points int, contribution int, prestige int) {
-	profile, _ := defaultSectSecretRealmConfig().profile(sectSecretRealmProfileNormal)
-	return calculateSectSecretRealmRewardsForProfile(deltaHours, majorRealm, profile)
-}
-
 func sectSecretRealmPointRateForProfile(profile SectSecretRealmProfileConfig) float64 {
 	if normalizeSectSecretRealmProfileKey(profile.Key) == sectSecretRealmProfileHigh {
 		return sectSecretRealmHighPointRate
@@ -2344,14 +2255,6 @@ func handleSectSecretRealmDetail(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, ar
 		participant.RewardPrestige,
 		dropText,
 	))
-}
-
-func getSectSecretRealmEffectiveListeningHours(absUserID string) (float64, error) {
-	snapshot, err := getSectSecretRealmListeningSnapshot(absUserID)
-	if err != nil {
-		return 0, err
-	}
-	return snapshot.EffectiveHours, nil
 }
 
 func getSectSecretRealmListeningSnapshot(absUserID string) (sectSecretRealmListeningSnapshot, error) {

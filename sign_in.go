@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -24,12 +24,6 @@ func signInDateKey(t time.Time) string {
 	return t.In(loc).Format("2006-01-02")
 }
 
-func daysInMonth(t time.Time) int {
-	firstOfNextMonth := time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, t.Location())
-	lastOfThisMonth := firstOfNextMonth.AddDate(0, 0, -1)
-	return lastOfThisMonth.Day()
-}
-
 func randomIntRange(min int, max int) int {
 	if max <= min {
 		return min
@@ -41,34 +35,6 @@ func randomIntRange(min int, max int) int {
 	}
 
 	return int(nBig.Int64()) + min
-}
-
-func calculateSignStreakReward(streak *MonthlySignInStreak, now time.Time) (int, string) {
-	fullDays := daysInMonth(now)
-
-	switch {
-	case streak.StreakDays == 3 && !streak.Rewarded3Days:
-		streak.Rewarded3Days = true
-		return 1, "连续签到3天奖励"
-
-	case streak.StreakDays == 7 && !streak.Rewarded7Days:
-		streak.Rewarded7Days = true
-		return 2, "连续签到7天奖励"
-
-	case streak.StreakDays == 14 && !streak.Rewarded14Days:
-		streak.Rewarded14Days = true
-		return randomIntRange(3, 5), "连续签到14天奖励"
-
-	case streak.StreakDays == 21 && !streak.Rewarded21Days:
-		streak.Rewarded21Days = true
-		return randomIntRange(5, 7), "连续签到21天奖励"
-
-	case streak.StreakDays == fullDays && !streak.RewardedFull:
-		streak.RewardedFull = true
-		return randomIntRange(8, 15), "本月全勤奖励"
-	}
-
-	return 0, ""
 }
 
 func isUniqueConstraintError(err error) bool {

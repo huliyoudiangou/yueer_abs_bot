@@ -283,10 +283,26 @@ func dispatchTelegramUpdate(bot *tgbotapi.BotAPI, jobs chan<- telegramMessageJob
 			if cb.From == nil {
 				return
 			}
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("⚠️ 处理 callback 时发生 panic，已恢复: user=%d data=%s panic=%s\nstack:\n%s",
+						cb.From.ID, formatPlainValue(cb.Data), formatPlainValue(r), string(debug.Stack()))
+				}
+			}()
 			defer logCallbackHandlingDuration(cb, time.Now())
 			startDelayedCallbackAck(bot, cb.ID)
 			unlock := lockUser(cb.From.ID)
 			defer unlock()
+			// 官方群成员门禁与消息路径（interactive.go）保持一致：
+			// 防止已退群用户继续通过历史面板上的按钮触发功能。
+			if AppConfig != nil && AppConfig.NoticeGroupID != 0 && !isUserInGroup(bot, cb.From.ID, AppConfig.NoticeGroupID) {
+				ack := tgbotapi.NewCallback(cb.ID, "⚠️ 访问受限：请先加入官方交流群再使用本功能。")
+				ack.ShowAlert = true
+				if _, err := bot.Request(ack); err != nil && !isOldTelegramCallbackError(err) {
+					log.Printf("⚠️ 拒绝非群成员 callback 应答失败: user=%d err=%s", cb.From.ID, formatTelegramSendError(err))
+				}
+				return
+			}
 			if handleGardenCallback(bot, cb) {
 				return
 			}

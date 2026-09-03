@@ -361,11 +361,6 @@ func recordDailyListeningRefreshStateWriteFailure(bot *tgbotapi.BotAPI, key stri
 	notifySuperAdminsPlain(bot, fmt.Sprintf("每日听书缓存刷新已执行完成，但状态写入失败，请人工核查，避免重复批量刷新 ABS。\n\n配置：%s\n错误：%s", formatPlainValue(key), formatPlainError(err)))
 }
 
-func refreshAllDailyListeningStats() (int, int) {
-	success, total, _ := refreshAllDailyListeningStatsWithOptions(true)
-	return success, total
-}
-
 func refreshAllDailyListeningStatsWithOptions(force bool) (int, int, int) {
 	var users []User
 	if err := DB.Select("telegram_id", "abs_user_id").Where("abs_user_id <> ''").Find(&users).Error; err != nil {
@@ -1002,15 +997,6 @@ func notifySuperAdminsPlain(bot *tgbotapi.BotAPI, text string) {
 	}
 }
 
-func getSystemConfigString(key string) string {
-	value, err := getSystemConfigStringChecked(key)
-	if err != nil {
-		log.Printf("⚠️ 读取系统配置失败: key=%s err=%s", formatPlainValue(key), formatPlainError(err))
-		return ""
-	}
-	return value
-}
-
 func getSystemConfigStringChecked(key string) (string, error) {
 	if DB == nil || strings.TrimSpace(key) == "" {
 		return "", nil
@@ -1270,17 +1256,6 @@ func formatBackgroundStatusReport() string {
 		formatSystemConfigErrorForMarkdown(backupError),
 		formatRuntimeMetricsReport(),
 	)
-}
-
-func runDailyOperations(bot *tgbotapi.BotAPI) {
-	if _, err := sendEncryptedBackupToTelegram(bot, "daily_auto"); err != nil {
-		log.Printf("⚠️ 每日加密备份失败: %s", formatPlainError(err))
-	}
-
-	if err := runDailyLifecycleOperations(bot); err != nil {
-		setSystemConfigError(dailyLifecycleLastErrorKey, err)
-		log.Printf("⚠️ 每日用户生命周期巡检失败: err=%s", formatPlainError(err))
-	}
 }
 
 func runDailyLifecycleOperations(bot *tgbotapi.BotAPI) error {
