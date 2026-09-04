@@ -55,7 +55,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 				session := getSession(userID)
 				session.SetTemp("referral_code", code)
 				session.SetStep("WAITING_REG_USER")
-				replyText(bot, chatID, "🎧 欢迎领取新人体验。\n\n通过邀请链接注册可获得 `7` 天体验权限；体验期内听书满 `10` 小时，可领取 `7` 天体验延期。\n\n第一步：请输入您想要的用户名\n仅限 3-20 位字母、数字或下划线。")
+				replyText(bot, chatID, fmt.Sprintf("🎧 欢迎领取新人体验。\n\n通过邀请链接注册可获得 `%d` 天体验权限；体验期内累计听书满 `%.0f` 小时，系统将**自动**为您延长 `%d` 天体验，无需手动领取。\n\n第一步：请输入您想要的用户名\n仅限 3-20 位字母、数字或下划线。", referralTrialDays, referralTaskHours, referralTrialDays))
 				UserSessions.Store(userID, session)
 				return
 			}
@@ -3277,7 +3277,7 @@ func handleInteractiveMessage(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		}
 
 		if referralCode != "" {
-			replyText(bot, chatID, "🎉 新人体验注册成功。\n\n已获得 `7` 天听书体验权限。体验期内累计听书满 `10` 小时后，发送 `新人任务` 可领取 `7` 天体验延期。")
+			replyText(bot, chatID, fmt.Sprintf("🎉 新人体验注册成功。\n\n已获得 `%d` 天听书体验权限。体验期内累计听书满 `%.0f` 小时后，系统会**自动**为您延长 `%d` 天体验并私信提醒，无需手动领取。", referralTrialDays, referralTaskHours, referralTrialDays))
 			clearSession(userID)
 			return
 		}

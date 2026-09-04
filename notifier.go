@@ -86,6 +86,10 @@ func runBackgroundSchedulerTickSafely(bot *tgbotapi.BotAPI) {
 	// 求书工单滞留巡检：自带 1 小时节流，不依赖每日运营窗口（超时阈值需要小时级精度）。
 	runBookRequestStalePatrolIfNeeded(bot, now)
 
+	// 新人任务自动结算：试用时长以天计、听书进度随时增长，必须 24 小时持续巡检
+	// （自带 5 分钟节流），不能放进每日 03:00 运营窗口。
+	runReferralAutoClaimIfNeeded(bot, now)
+
 	if !isDailyOperationsWindowOpen(now) {
 		return
 	}

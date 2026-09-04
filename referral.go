@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -18,8 +19,8 @@ const (
 
 	referralStartPrefix = "ref_"
 
-	referralTrialDays          = 7
-	referralTaskHours          = 10.0
+	referralTrialDays          = 3
+	referralTaskHours          = 5.0
 	referralRewardPoints       = 10
 	referralDailyActivationMax = 3
 	referralMonthlyRewardMax   = 150
@@ -28,6 +29,12 @@ const (
 
 	referralStatusActive    = "active"
 	referralStatusEffective = "effective"
+	referralStatusExpired   = "expired"
+
+	referralAutoClaimLastRunAtKey = "referral_auto_claim_last_run_at"
+	referralAutoClaimInterval     = 5 * time.Minute
+	referralAutoClaimScanLimit    = 50
+	referralAutoClaimRequestDelay = 80 * time.Millisecond
 )
 
 type referralStats struct {
@@ -576,52 +583,71 @@ func capReferralTrialTaskSeconds(seconds float64, start time.Time, end time.Time
 	return seconds
 }
 
-func claimReferralTrialTask(userID int64, now time.Time) (float64, time.Time, int, bool, error) {
-	var u User
-	if err := DB.Where("telegram_id = ?", userID).First(&u).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return 0, time.Time{}, 0, false, errUserNotFound
-		}
-		return 0, time.Time{}, 0, false, err
-	}
-	if !isTrialAccount(u) || strings.TrimSpace(u.AbsUserID) == "" {
-		return 0, time.Time{}, 0, false, errReferralNoActivation
-	}
+// referralTrialTaskOutcome 汇总一次新人任务结算（或进度检查）的结果。
+type referralTrialTaskOutcome struct {
+	ActivationID  uint
+	InviteeID     int64
+	InviterID     int64
+	RawSeconds    float64
+	NewExpireAt   time.Time
+	RewardPoints  int
+	RewardGranted bool
+}
 
-	var activation ReferralActivation
-	if err := DB.Where("invitee_id = ?", userID).First(&activation).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return 0, time.Time{}, 0, false, errReferralNoActivation
-		}
-		return 0, time.Time{}, 0, false, err
+// settlementAttemptAt 返回本次统计的截止时刻：试用未到期时取当前时间，
+// 已到期时取试用到期时间，保证"到期前确实听满"的记录即使扫描滞后也能公平结算。
+func settlementAttemptAt(now time.Time, trialEndsAt time.Time) time.Time {
+	if now.After(trialEndsAt) {
+		return trialEndsAt
+	}
+	return now
+}
+
+// settleReferralTrialTaskIfDue 检查单个试用用户的新人任务：事务外刷新 ABS 听书统计，
+// 达标后在同一事务内完成体验延期、邀请者积分（月度配额内）和激活状态落库。
+// allowAfterTrialEnd=true（后台自动结算）时，试用到期前已听满的记录仍可公平补结算。
+func settleReferralTrialTaskIfDue(activation ReferralActivation, now time.Time, allowAfterTrialEnd bool) (referralTrialTaskOutcome, bool, error) {
+	outcome := referralTrialTaskOutcome{
+		ActivationID: activation.ID,
+		InviteeID:    activation.InviteeID,
+		InviterID:    activation.InviterID,
 	}
 	if activation.EffectiveAt != nil {
-		exp := time.Time{}
-		if u.ExpireAt != nil {
-			exp = *u.ExpireAt
-		}
-		return activation.RawSecondsAtEffective, exp, activation.RewardPoints, false, errReferralAlreadyEffective
+		return outcome, false, errReferralAlreadyEffective
 	}
+
+	attemptAt := settlementAttemptAt(now, activation.TrialEndsAt)
 	if now.After(activation.TrialEndsAt) {
-		return 0, time.Time{}, 0, false, errReferralTrialExpired
+		if !allowAfterTrialEnd {
+			return outcome, false, errReferralTrialExpired
+		}
 	}
 
-	if _, ok := refreshDailyListeningStatsFromABS(userID, u.AbsUserID); !ok {
-		log.Printf("referral task refresh failed: user=%d abs=%s", userID, formatPlainValue(u.AbsUserID))
+	var u User
+	if err := DB.Where("telegram_id = ?", activation.InviteeID).First(&u).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return outcome, false, errUserNotFound
+		}
+		return outcome, false, err
+	}
+	if !isTrialAccount(u) || strings.TrimSpace(u.AbsUserID) == "" {
+		return outcome, false, errReferralNoActivation
 	}
 
-	rawSeconds, err := sumReferralTrialRawSeconds(userID, activation.TrialStartedAt, activation.TrialEndsAt)
+	if _, ok := refreshDailyListeningStatsFromABS(activation.InviteeID, u.AbsUserID); !ok {
+		log.Printf("referral task refresh failed: user=%d abs=%s", activation.InviteeID, formatPlainValue(u.AbsUserID))
+	}
+
+	rawSeconds, err := sumReferralTrialRawSeconds(activation.InviteeID, activation.TrialStartedAt, activation.TrialEndsAt)
 	if err != nil {
-		return 0, time.Time{}, 0, false, err
+		return outcome, false, err
 	}
-	rawSeconds = capReferralTrialTaskSeconds(rawSeconds, activation.TrialStartedAt, activation.TrialEndsAt, now)
+	rawSeconds = capReferralTrialTaskSeconds(rawSeconds, activation.TrialStartedAt, activation.TrialEndsAt, attemptAt)
+	outcome.RawSeconds = rawSeconds
 	if rawSeconds < referralTaskHours*3600 {
-		return rawSeconds, time.Time{}, 0, false, errReferralTaskNotComplete
+		return outcome, false, errReferralTaskNotComplete
 	}
 
-	var newExpireAt time.Time
-	rewardPoints := 0
-	rewardGranted := false
 	err = DB.Transaction(func(tx *gorm.DB) error {
 		var locked ReferralActivation
 		if err := tx.Where("id = ?", activation.ID).First(&locked).Error; err != nil {
@@ -632,7 +658,7 @@ func claimReferralTrialTask(userID int64, now time.Time) (float64, time.Time, in
 		}
 
 		var invitee User
-		if err := tx.Where("telegram_id = ?", userID).First(&invitee).Error; err != nil {
+		if err := tx.Where("telegram_id = ?", activation.InviteeID).First(&invitee).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return errUserNotFound
 			}
@@ -664,7 +690,7 @@ func claimReferralTrialTask(userID int64, now time.Time) (float64, time.Time, in
 				locked.InviterID,
 				txRewardPoints,
 				"referral_reward",
-				fmt.Sprintf("邀请新人 %d 试用期内听书满 %.0f 小时", userID, referralTaskHours),
+				fmt.Sprintf("邀请新人 %d 试用期内听书满 %.0f 小时", activation.InviteeID, referralTaskHours),
 				"referral",
 				fmt.Sprintf("%d", locked.ID),
 			); err != nil {
@@ -673,9 +699,18 @@ func claimReferralTrialTask(userID int64, now time.Time) (float64, time.Time, in
 			txRewardGranted = true
 		}
 
+		inviteeUpdates := map[string]interface{}{
+			"expire_at": txNewExpireAt,
+		}
+		// 自动结算可能晚于试用到期：若期间生命周期巡检已停用账号，延期到账时一并恢复本地状态，
+		// 与管理端补续期的恢复语义一致；ABS 侧状态由生命周期巡检按新 expire_at 修复。
+		if invitee.IsSuspended || (invitee.Status != "" && invitee.Status != "active") {
+			inviteeUpdates["is_suspended"] = false
+			inviteeUpdates["status"] = "active"
+		}
 		inviteeRes := tx.Model(&User{}).
 			Where("id = ? AND account_type = ? AND abs_user_id = ?", invitee.ID, accountTypeTrial, invitee.AbsUserID).
-			Update("expire_at", txNewExpireAt)
+			Updates(inviteeUpdates)
 		if inviteeRes.Error != nil {
 			return inviteeRes.Error
 		}
@@ -696,7 +731,7 @@ func claimReferralTrialTask(userID int64, now time.Time) (float64, time.Time, in
 			updates["rewarded_at"] = effectiveAt
 		}
 		activationRes := tx.Model(&ReferralActivation{}).
-			Where("id = ? AND invitee_id = ? AND status = ? AND effective_at IS NULL", locked.ID, userID, referralStatusActive).
+			Where("id = ? AND invitee_id = ? AND status = ? AND effective_at IS NULL", locked.ID, activation.InviteeID, referralStatusActive).
 			Updates(updates)
 		if activationRes.Error != nil {
 			return activationRes.Error
@@ -707,24 +742,28 @@ func claimReferralTrialTask(userID int64, now time.Time) (float64, time.Time, in
 
 		if err := writeAuditLogInTx(
 			tx,
-			userID,
+			activation.InviteeID,
 			"REFERRAL_TRIAL_TASK_CLAIM",
 			fmt.Sprintf("referral_activation_id=%d", locked.ID),
 			0,
 			fmt.Sprintf("invitee=%d completed referral trial task; raw_hours=%.2f extension_days=%d inviter=%d reward_points=%d expire_at=%s",
-				userID, rawSeconds/3600.0, referralTrialDays, locked.InviterID, txRewardPoints, txNewExpireAt.Format(time.RFC3339)),
+				activation.InviteeID, rawSeconds/3600.0, referralTrialDays, locked.InviterID, txRewardPoints, txNewExpireAt.Format(time.RFC3339)),
 		); err != nil {
 			return err
 		}
-		newExpireAt = txNewExpireAt
-		rewardPoints = txRewardPoints
-		rewardGranted = txRewardGranted
+		outcome.NewExpireAt = txNewExpireAt
+		outcome.RewardPoints = txRewardPoints
+		outcome.RewardGranted = txRewardGranted
 		return nil
 	})
 	if err != nil {
-		return rawSeconds, time.Time{}, 0, false, err
+		// 事务失败或提交失败：结果一律清空，调用方不得发布任何未生效的延期或奖励。
+		outcome.NewExpireAt = time.Time{}
+		outcome.RewardPoints = 0
+		outcome.RewardGranted = false
+		return outcome, false, err
 	}
-	return rawSeconds, newExpireAt, rewardPoints, rewardGranted, nil
+	return outcome, true, nil
 }
 
 func showMyReferral(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
@@ -751,42 +790,131 @@ func showMyReferral(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	}
 
 	replyText(bot, msg.Chat.ID, fmt.Sprintf(
-		"🔗 **我的邀请链接**\n\n链接：`%s`\n\n规则：炼气初期及以上正式账号可邀请新人；新人通过链接注册后获得 `7` 天体验；体验期内听书满 `10` 小时可获得 `7` 天体验延期；邀请者获得 `10` 积分。\n\n限制：同一邀请链接每日最多激活 `3` 名新人；每月邀请奖励最多 `%d` 积分。\n\n%s",
+		"🔗 **我的邀请链接**\n\n链接：`%s`\n\n规则：炼气初期及以上正式账号可邀请新人；新人通过链接注册后获得 `%d` 天体验；体验期内听书满 `%.0f` 小时将**自动**获得 `%d` 天体验延期（无需手动领取）；邀请者获得 `%d` 积分。\n\n限制：同一邀请链接每日最多激活 `%d` 名新人；每月邀请奖励最多 `%d` 积分。\n\n%s",
 		referralLink(bot, code.Code),
+		referralTrialDays,
+		referralTaskHours,
+		referralTrialDays,
+		referralRewardPoints,
+		referralDailyActivationMax,
 		referralMonthlyRewardMax,
 		statsText,
 	))
 }
 
-func handleReferralTaskCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
-	rawSeconds, newExpireAt, rewardPoints, rewardGranted, err := claimReferralTrialTask(msg.From.ID, time.Now())
-	switch {
-	case err == nil:
-		rewardText := "邀请者本月奖励已达上限，本次不再发放积分。"
-		if rewardGranted {
-			rewardText = fmt.Sprintf("邀请者获得 `%d` 积分奖励。", rewardPoints)
+// referralAutoClaimMu 保证同一时刻只有一轮自动结算在跑。
+var referralAutoClaimMu sync.Mutex
+
+// runReferralAutoClaimIfNeeded 后台自动结算新人任务：
+// 扫描试用中/到期的 active 邀请激活记录，刷新听书统计后自动为达标用户结算延期与奖励，
+// 并分别私信提醒被邀请者与邀请者。与手动命令无关，24 小时持续运行。
+func runReferralAutoClaimIfNeeded(bot *tgbotapi.BotAPI, now time.Time) {
+	if bot == nil || DB == nil {
+		return
+	}
+
+	lastAt, err := getSystemConfigTimeChecked(referralAutoClaimLastRunAtKey)
+	if err != nil {
+		log.Printf("⚠️ 新人任务自动结算状态读取失败，本轮跳过: err=%s", formatPlainError(err))
+		return
+	}
+	if !lastAt.IsZero() && now.Sub(lastAt) < referralAutoClaimInterval {
+		return
+	}
+
+	if !referralAutoClaimMu.TryLock() {
+		return
+	}
+	defer referralAutoClaimMu.Unlock()
+
+	// 双重检查：拿到锁后再确认没有其他 goroutine 刚刚跑过。
+	lastAt, err = getSystemConfigTimeChecked(referralAutoClaimLastRunAtKey)
+	if err != nil {
+		log.Printf("⚠️ 新人任务自动结算状态读取失败，本轮跳过: err=%s", formatPlainError(err))
+		return
+	}
+	if !lastAt.IsZero() && now.Sub(lastAt) < referralAutoClaimInterval {
+		return
+	}
+
+	var activations []ReferralActivation
+	if err := DB.
+		Where("status = ? AND effective_at IS NULL AND trial_ends_at > ?", referralStatusActive, now.AddDate(0, 0, -1)).
+		Order("trial_ends_at ASC").
+		Limit(referralAutoClaimScanLimit).
+		Find(&activations).Error; err != nil {
+		log.Printf("⚠️ 新人任务自动结算扫描失败: err=%s", formatPlainError(err))
+		return
+	}
+
+	for _, activation := range activations {
+		outcome, settled, err := settleReferralTrialTaskIfDue(activation, time.Now(), true)
+		if err != nil {
+			switch {
+			case errors.Is(err, errReferralTaskNotComplete), errors.Is(err, errReferralAlreadyEffective):
+				// 正常未达标或已被处理，静默跳过。
+			case errors.Is(err, errUserNotFound), errors.Is(err, errReferralNoActivation):
+				log.Printf("新人任务自动结算跳过: activation=%d invitee=%d err=%s", activation.ID, activation.InviteeID, formatPlainError(err))
+			default:
+				log.Printf("⚠️ 新人任务自动结算失败: activation=%d invitee=%d err=%s", activation.ID, activation.InviteeID, formatPlainError(err))
+			}
+		} else if settled {
+			notifyReferralAutoClaimResult(bot, outcome)
 		}
-		replyText(bot, msg.Chat.ID, fmt.Sprintf(
-			"✅ 新人任务完成。\n\n体验期内听书：`%.2f/10` 小时\n已获得 `7` 天新人体验延期。\n新的到期时间：`%s`\n%s",
-			rawSeconds/3600.0,
-			newExpireAt.Format("2006-01-02"),
-			rewardText,
-		))
-	case errors.Is(err, errReferralTaskNotComplete):
-		remain := referralTaskHours - rawSeconds/3600.0
-		if remain < 0 {
-			remain = 0
-		}
-		replyText(bot, msg.Chat.ID, fmt.Sprintf("📖 新人任务尚未完成。\n\n体验期内听书：`%.2f/10` 小时\n还需约 `%.2f` 小时。", rawSeconds/3600.0, remain))
-	case errors.Is(err, errReferralAlreadyEffective):
-		replyText(bot, msg.Chat.ID, "✅ 新人任务已领取过，体验延期不会重复发放。")
-	case errors.Is(err, errReferralTrialExpired):
-		replyText(bot, msg.Chat.ID, "⏳ 新人体验期已结束，无法再领取体验延期。")
-	case errors.Is(err, errReferralNoActivation), errors.Is(err, errUserNotFound):
-		replyText(bot, msg.Chat.ID, "❌ 未检测到可领取的新人邀请任务。")
-	default:
-		log.Printf("claim referral task failed: user=%d err=%s", msg.From.ID, formatPlainError(err))
-		replyText(bot, msg.Chat.ID, "❌ 新人任务检查失败，请稍后重试。")
+		time.Sleep(referralAutoClaimRequestDelay)
+	}
+
+	// 已过补结算窗口（试用到期超过 24h）仍未达标的记录：标记为 expired 终态，避免永久滞留 active。
+	// 不影响统计口径（累计激活统计全部记录，有效新人只统计 effective）；
+	// invitee_id 唯一约束依旧生效，过期后也不能再次被邀请。
+	if err := DB.Model(&ReferralActivation{}).
+		Where("status = ? AND effective_at IS NULL AND trial_ends_at <= ?", referralStatusActive, now.AddDate(0, 0, -1)).
+		Update("status", referralStatusExpired).Error; err != nil {
+		log.Printf("⚠️ 新人任务过期状态标记失败: err=%s", formatPlainError(err))
+	}
+
+	if err := setSystemConfigStringChecked(referralAutoClaimLastRunAtKey, time.Now().Format(time.RFC3339)); err != nil {
+		log.Printf("⚠️ 新人任务自动结算状态写入失败: err=%s", formatPlainError(err))
+	}
+}
+
+// notifyReferralAutoClaimResult 自动结算成功后分别私信被邀请者（延期到账）与邀请者（积分奖励）。
+// 发送失败只记日志，不影响已落库的结算结果。
+func notifyReferralAutoClaimResult(bot *tgbotapi.BotAPI, outcome referralTrialTaskOutcome) {
+	inviteeText := fmt.Sprintf(
+		"🎉 **新人任务自动完成**\n\n体验期内累计听书：`%.2f/%.0f` 小时\n已自动为您延长 `%d` 天体验，无需任何操作。\n\n新的到期时间：`%s`\n感谢体验，期待您的继续使用！",
+		outcome.RawSeconds/3600.0,
+		referralTaskHours,
+		referralTrialDays,
+		outcome.NewExpireAt.Format("2006-01-02"),
+	)
+	sendReferralNotify(bot, outcome.InviteeID, inviteeText)
+
+	var inviterText string
+	if outcome.RewardGranted {
+		inviterText = fmt.Sprintf(
+			"🎁 **邀请奖励到账**\n\n您邀请的新人已完成新人任务（体验期内听书满 `%.0f` 小时）。\n\n奖励：`+%d` 积分",
+			referralTaskHours,
+			outcome.RewardPoints,
+		)
+	} else {
+		inviterText = fmt.Sprintf(
+			"🎁 **邀请奖励通知**\n\n您邀请的新人已完成新人任务（体验期内听书满 `%.0f` 小时），其体验已自动延期 `%d` 天。\n\n本月邀请积分奖励已达 `%d` 分上限，本次不再发放积分。",
+			referralTaskHours,
+			referralTrialDays,
+			referralMonthlyRewardMax,
+		)
+	}
+	sendReferralNotify(bot, outcome.InviterID, inviterText)
+}
+
+func sendReferralNotify(bot *tgbotapi.BotAPI, chatID int64, text string) {
+	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = "Markdown"
+	// 去重键必须包含业务维度（这里是毫秒级触发序号）：
+	// 同一邀请者同轮可能有多个新人达标，用固定 chatID 会被调度器去重吞掉后续通知。
+	if !enqueueNoAutoDelete(bot, msg, "referral_auto_claim_notice", telegramAsyncPriorityNormal, "") {
+		log.Printf("⚠️ 新人任务自动结算通知入队失败: chat=%d", chatID)
 	}
 }
 
@@ -812,7 +940,7 @@ func HandleReferralCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text str
 	if !msg.Chat.IsPrivate() {
 		switch text {
 		case "我的邀请", "邀请链接", "拉新链接", "邀请统计", "新人任务", "检查新人任务":
-			sendPlainText(bot, msg.Chat.ID, "邀请链接和新人任务请私聊 Bot 执行。")
+			sendPlainText(bot, msg.Chat.ID, "邀请链接和邀请统计请私聊 Bot 执行。")
 			return true
 		default:
 			return false
@@ -824,7 +952,8 @@ func HandleReferralCommand(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, text str
 		showMyReferral(bot, msg)
 		return true
 	case "新人任务", "检查新人任务":
-		handleReferralTaskCommand(bot, msg)
+		// 新人任务已改为自动结算：无需手动领取，达标的延期和奖励会自动到账并私信提醒。
+		replyText(bot, msg.Chat.ID, fmt.Sprintf("✅ 新人任务已支持自动完成，无需手动领取。\n\n体验期内累计听书满 `%.0f` 小时，系统会自动为新人延长 `%d` 天体验，并为邀请者发放积分奖励。\n\n如需查询邀请进度，请发送 `邀请统计`。", referralTaskHours, referralTrialDays))
 		return true
 	case "邀请统计":
 		showReferralStats(bot, msg)
