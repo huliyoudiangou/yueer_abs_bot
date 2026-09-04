@@ -280,6 +280,11 @@ type ReferralActivation struct {
 	ExtendedAt     *time.Time
 	RewardedAt     *time.Time
 
+	// TrialEndDaySeconds 到期日当天、试用中最后一次自动结算扫描刷新的听书秒数快照。
+	// 生命周期巡检每日 03:00 才停用到期账号，到期日整日聚合值包含到期后的听书；
+	// 到期后的补结算用该快照替代到期日整日聚合值，防止到期后的听书计入新人任务。
+	TrialEndDaySeconds float64
+
 	RawSecondsAtEffective float64
 	RewardPoints          int
 	ActivationDayKey      string `gorm:"index"`

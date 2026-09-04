@@ -550,19 +550,76 @@ func convertTrialToFormalWithInviteCode(userID int64, inviteHash string) (time.T
 	return nextExpireAt, nil
 }
 
-func sumReferralTrialRawSeconds(userID int64, start time.Time, end time.Time) (float64, error) {
+// sumReferralTrialRawSeconds 汇总试用窗口 [start, end) 内的听书日聚合秒数。
+// absUserID 必须传入试用账号当前绑定：同一 Telegram 账号被删除档案后重新注册试用时，
+// 历史绑定在同日的统计不得计入任务；excludeDayKey 非空时排除该日（到期日由快照补回）。
+func sumReferralTrialRawSeconds(userID int64, absUserID string, start time.Time, end time.Time, excludeDayKey string) (float64, error) {
 	if end.Before(start) {
 		return 0, nil
 	}
 	startKey := sectDayKey(start)
 	endExclusiveKey := sectDayKey(end.AddDate(0, 0, 1))
 
+	query := DB.Model(&DailyListeningStat{}).
+		Where("user_id = ? AND abs_user_id = ? AND day_key >= ? AND day_key < ?", userID, strings.TrimSpace(absUserID), startKey, endExclusiveKey)
+	if strings.TrimSpace(excludeDayKey) != "" {
+		query = query.Where("day_key <> ?", strings.TrimSpace(excludeDayKey))
+	}
+
 	var total float64
-	err := DB.Model(&DailyListeningStat{}).
-		Where("user_id = ? AND day_key >= ? AND day_key < ?", userID, startKey, endExclusiveKey).
+	err := query.
 		Select("COALESCE(SUM(capped_seconds), 0)").
 		Scan(&total).Error
 	return total, err
+}
+
+// loadReferralTrialDaySeconds 读取指定单日的听书日聚合秒数（无记录返回 0）。
+func loadReferralTrialDaySeconds(userID int64, absUserID string, dayKey string) (float64, error) {
+	var stat DailyListeningStat
+	err := DB.Where("user_id = ? AND abs_user_id = ? AND day_key = ?", userID, strings.TrimSpace(absUserID), dayKey).
+		First(&stat).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return stat.CappedSeconds, nil
+}
+
+// referralTrialEndDaySnapshotDue 纯函数判定：当前扫描是否需要维护到期日快照。
+// 只有试用尚未到期、且当前正好处于到期日当天时，才把当日听书值写入快照，
+// 供到期后（生命周期巡检停用账号前）的补结算使用。
+func referralTrialEndDaySnapshotDue(now time.Time, trialEndsAt time.Time) bool {
+	if now.After(trialEndsAt) {
+		return false
+	}
+	return sectDayKey(now) == sectDayKey(trialEndsAt)
+}
+
+// referralTrialSettleUsesEndDaySnapshot 纯函数判定：本次结算是否属于到期后的补结算路径。
+// 补结算不得使用到期日整日聚合值（其中包含到期后、次日 03:00 生命周期巡检前的听书），
+// 必须用试用中维护的到期日快照替代。
+func referralTrialSettleUsesEndDaySnapshot(now time.Time, trialEndsAt time.Time) bool {
+	return now.After(trialEndsAt)
+}
+
+// updateReferralTrialEndDaySnapshot 维护到期日听书快照（最新值语义：跨日回填修正后以最新值为准）。
+// 仅当记录仍处于 active 且未生效时写入；失败只记日志，不阻断结算流程。
+func updateReferralTrialEndDaySnapshot(activationID uint, inviteeID int64, seconds float64) {
+	if activationID == 0 || inviteeID == 0 {
+		return
+	}
+	res := DB.Model(&ReferralActivation{}).
+		Where("id = ? AND invitee_id = ? AND status = ? AND effective_at IS NULL", activationID, inviteeID, referralStatusActive).
+		Update("trial_end_day_seconds", seconds)
+	if res.Error != nil {
+		log.Printf("⚠️ 新人任务到期日快照写入失败: activation=%d invitee=%d err=%s", activationID, inviteeID, formatPlainError(res.Error))
+		return
+	}
+	if res.RowsAffected == 0 {
+		log.Printf("新人任务到期日快照跳过（记录状态已变化）: activation=%d invitee=%d", activationID, inviteeID)
+	}
 }
 
 func capReferralTrialTaskSeconds(seconds float64, start time.Time, end time.Time, now time.Time) float64 {
@@ -638,17 +695,41 @@ func settleReferralTrialTaskIfDue(activation ReferralActivation, now time.Time, 
 		log.Printf("referral task refresh failed: user=%d abs=%s", activation.InviteeID, formatPlainValue(u.AbsUserID))
 	}
 
-	rawSeconds, err := sumReferralTrialRawSeconds(activation.InviteeID, activation.TrialStartedAt, activation.TrialEndsAt)
-	if err != nil {
-		return outcome, false, err
+	endDayKey := sectDayKey(activation.TrialEndsAt)
+	var rawSeconds float64
+	if referralTrialSettleUsesEndDaySnapshot(now, activation.TrialEndsAt) {
+		// 到期后补结算：到期日整日聚合值包含到期后的听书（生命周期巡检每日 03:00 才停用账号），
+		// 不得计入任务；改用试用中最后一次扫描维护的到期日快照。
+		preEndDaySeconds, err := sumReferralTrialRawSeconds(activation.InviteeID, u.AbsUserID, activation.TrialStartedAt, activation.TrialEndsAt, endDayKey)
+		if err != nil {
+			return outcome, false, err
+		}
+		rawSeconds = preEndDaySeconds + activation.TrialEndDaySeconds
+	} else {
+		// 试用中实时结算：窗口右端只可能包含“今天”，今日统计刚完成 ABS 刷新、
+		// 全部发生在当前时刻之前，必然处于试用窗口内，可安全整日计入。
+		var err error
+		rawSeconds, err = sumReferralTrialRawSeconds(activation.InviteeID, u.AbsUserID, activation.TrialStartedAt, activation.TrialEndsAt, "")
+		if err != nil {
+			return outcome, false, err
+		}
+		// 当前正好处于到期日当天：维护到期日快照，供到期后的公平补结算使用。
+		if referralTrialEndDaySnapshotDue(now, activation.TrialEndsAt) {
+			endDaySeconds, err := loadReferralTrialDaySeconds(activation.InviteeID, u.AbsUserID, endDayKey)
+			if err != nil {
+				return outcome, false, err
+			}
+			updateReferralTrialEndDaySnapshot(activation.ID, activation.InviteeID, endDaySeconds)
+		}
 	}
+
 	rawSeconds = capReferralTrialTaskSeconds(rawSeconds, activation.TrialStartedAt, activation.TrialEndsAt, attemptAt)
 	outcome.RawSeconds = rawSeconds
 	if rawSeconds < referralTaskHours*3600 {
 		return outcome, false, errReferralTaskNotComplete
 	}
 
-	err = DB.Transaction(func(tx *gorm.DB) error {
+	err := DB.Transaction(func(tx *gorm.DB) error {
 		var locked ReferralActivation
 		if err := tx.Where("id = ?", activation.ID).First(&locked).Error; err != nil {
 			return err
