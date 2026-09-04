@@ -82,6 +82,43 @@ func lockUser(userID int64) func() {
 	}
 }
 
+// tryLockUser 尝试获取用户级锁：锁空闲时立即返回释放函数，被占用时返回 false。
+// 供轮询协程上的快速路径使用——绝不能在轮询协程上阻塞等待 worker 持有的锁，
+// 否则一个慢处理会拖住整个 getUpdates 循环。
+func tryLockUser(userID int64) (func(), bool) {
+	now := time.Now()
+
+	lockValue, _ := userLocks.LoadOrStore(userID, &userLockEntry{
+		lastUsed: now,
+	})
+
+	entry := lockValue.(*userLockEntry)
+
+	if !entry.mu.TryLock() {
+		entry.metaMu.Lock()
+		entry.lastUsed = now
+		entry.metaMu.Unlock()
+		return nil, false
+	}
+
+	entry.metaMu.Lock()
+	entry.inUse++
+	entry.lastUsed = now
+	entry.metaMu.Unlock()
+
+	return func() {
+		entry.mu.Unlock()
+
+		entry.metaMu.Lock()
+		entry.inUse--
+		if entry.inUse < 0 {
+			entry.inUse = 0
+		}
+		entry.lastUsed = time.Now()
+		entry.metaMu.Unlock()
+	}, true
+}
+
 func newTelegramHTTPClient() *telegramHTTPClient {
 	return &telegramHTTPClient{
 		longPoll: &http.Client{Timeout: telegramHTTPClientTimeout},
@@ -339,6 +376,17 @@ func handlePrivateStartFastPath(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) boo
 
 	userID := msg.From.ID
 	chatID := msg.Chat.ID
+
+	// 快速路径必须与 worker 持有同一把用户锁后才能清理会话：
+	// 否则 worker 正在处理的上一条消息可能在 clearSession 后把旧会话重新写回（会话复活），
+	// 下一条用户消息会被复活的中途步骤拦截。
+	// 锁被占用说明该用户有消息在途——此时回退到正常队列，由 worker 持锁按序处理 /start。
+	unlock, locked := tryLockUser(userID)
+	if !locked {
+		return false
+	}
+	defer unlock()
+
 	clearSession(userID)
 	log.Printf("⚡ 私聊 /start 快速响应: user=%d chat=%d message_id=%d", userID, chatID, msg.MessageID)
 
