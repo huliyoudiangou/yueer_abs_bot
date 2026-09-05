@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"strings"
 	"time"
@@ -780,9 +781,10 @@ func ExecuteBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 		if err != nil {
 			return errRandomFailed
 		}
-		roll = int(nBig.Int64())
+		// 掷点口径为 1~100：掷点 <= 成功率百分数即成功；历史 BreakthroughAttempt.Roll 为 0~99 旧口径，新旧记录不可混用统计。
+		roll = int(nBig.Int64()) + 1
 
-		isSuccess = isGuaranteed || roll < int(finalRate*100)
+		isSuccess = isGuaranteed || roll <= int(math.Round(finalRate*100))
 
 		if isSuccess {
 			newMajor = req.ToMajorRealm
