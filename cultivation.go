@@ -397,7 +397,7 @@ func HandleBreakthroughRequest(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	cul := GetOrCreateCultivation(userID)
 	if cul == nil {
 		log.Printf("⚠️ 突破前修仙档案读取失败: user=%d", userID)
-		replyText(bot, chatID, "❌ 修仙档案读取失败，请稍后再尝试突破。")
+		replyTextToMessage(bot, msg, "❌ 修仙档案读取失败，请稍后再尝试突破。")
 		return
 	}
 
@@ -429,7 +429,7 @@ func HandleBreakthroughRequest(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	var u User
 	if err := DB.Where("telegram_id = ?", userID).First(&u).Error; err != nil {
 		log.Printf("⚠️ 突破前钱包读取失败: user=%d err=%s", userID, formatPlainError(err))
-		replyText(bot, chatID, "❌ 钱包读取失败，请稍后再尝试突破。")
+		replyTextToMessage(bot, msg, "❌ 钱包读取失败，请稍后再尝试突破。")
 		return
 	}
 
@@ -441,7 +441,7 @@ func HandleBreakthroughRequest(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 			hasPill = true
 		} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Printf("⚠️ 突破前丹药库存读取失败: user=%d item=%s err=%s", userID, formatPlainValue(req.PillName), formatPlainError(err))
-			replyText(bot, chatID, "❌ 乾坤袋读取失败，请稍后再尝试突破。")
+			replyTextToMessage(bot, msg, "❌ 乾坤袋读取失败，请稍后再尝试突破。")
 			return
 		}
 	}
@@ -452,35 +452,35 @@ func HandleBreakthroughRequest(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		// 凡人引灵入体
 		session.SetTemp("bt_mode", "USE_INVENTORY")
 		session.SetStep("WAITING_CONFIRM_BREAKTHROUGH")
-		replyText(bot, chatID, "⚡️ 检测到您闭关苦修已感知天地灵气，是否立即【引灵入体】，正式踏上仙途？\n👉 请回复 `确认渡劫` 或 `取消`。")
+		replyTextToMessage(bot, msg, "⚡️ 检测到您闭关苦修已感知天地灵气，是否立即【引灵入体】，正式踏上仙途？\n👉 请回复 `确认渡劫` 或 `取消`。")
 		UserSessions.Store(userID, session)
 	} else if isCultivationTreasureItemName(req.PillName) {
 		// 至宝突破：必须持有对应至宝 + 足够积分，不允许代购（至宝仅 Boss 掉落）。
 		if !hasPill {
-			replyText(bot, chatID, fmt.Sprintf("❌ 突破所需至宝**【%s】**不在乾坤袋中。此等天地至宝仅能从灵墟 Boss 与世界 Boss 处获得，无法购买，请道友继续历练。", inventoryItemMarkdownName(req.PillName)))
+			replyTextToMessage(bot, msg, fmt.Sprintf("❌ 突破所需至宝**【%s】**不在乾坤袋中。此等天地至宝仅能从灵墟 Boss 与世界 Boss 处获得，无法购买，请道友继续历练。", inventoryItemMarkdownName(req.PillName)))
 		} else if u.Points < req.PointsCost {
-			replyText(bot, chatID, fmt.Sprintf("❌ 至宝虽已入手，但渡劫需缴纳 `%d` 积分祭炼费，您当前仅有 `%d` 积分。", req.PointsCost, u.Points))
+			replyTextToMessage(bot, msg, fmt.Sprintf("❌ 至宝虽已入手，但渡劫需缴纳 `%d` 积分祭炼费，您当前仅有 `%d` 积分。", req.PointsCost, u.Points))
 		} else {
 			session.SetTemp("bt_mode", "USE_INVENTORY")
 			session.SetStep("WAITING_CONFIRM_BREAKTHROUGH")
-			replyText(bot, chatID, fmt.Sprintf("⚡️ 乾坤袋中至宝**【%s】**已就位。是否献祭此宝并缴纳 `%d` 积分渡劫费，引动九重天劫？\n👉 请回复 `确认渡劫` 或 `取消`。", inventoryItemMarkdownName(req.PillName), req.PointsCost))
+			replyTextToMessage(bot, msg, fmt.Sprintf("⚡️ 乾坤袋中至宝**【%s】**已就位。是否献祭此宝并缴纳 `%d` 积分渡劫费，引动九重天劫？\n👉 请回复 `确认渡劫` 或 `取消`。", inventoryItemMarkdownName(req.PillName), req.PointsCost))
 			UserSessions.Store(userID, session)
 		}
 	} else if hasPill {
 		// 背包有药
 		session.SetTemp("bt_mode", "USE_INVENTORY")
 		session.SetStep("WAITING_CONFIRM_BREAKTHROUGH")
-		replyText(bot, chatID, fmt.Sprintf("⚡️ 检测到乾坤袋中备有**【%s】**，是否立即吞服并引动雷劫？\n👉 请回复 `确认渡劫` 或 `取消`。", inventoryItemMarkdownName(req.PillName)))
+		replyTextToMessage(bot, msg, fmt.Sprintf("⚡️ 检测到乾坤袋中备有**【%s】**，是否立即吞服并引动雷劫？\n👉 请回复 `确认渡劫` 或 `取消`。", inventoryItemMarkdownName(req.PillName)))
 		UserSessions.Store(userID, session)
 	} else if u.Points >= req.PointsCost {
 		// 背包无药，但钱够代购
 		session.SetTemp("bt_mode", "AUTO_BUY")
 		session.SetStep("WAITING_CONFIRM_BREAKTHROUGH")
-		replyText(bot, chatID, fmt.Sprintf("⚡️ 您乾坤袋中暂无【%s】。\n💰 您的积分充足，是否授权天道商行自动扣除 `%d` 积分代购**【%s】**并立即开始渡劫？\n👉 请回复 `确认代购并渡劫` 或 `取消`。", inventoryItemMarkdownName(req.PillName), req.PointsCost, inventoryItemMarkdownName(req.PillName)))
+		replyTextToMessage(bot, msg, fmt.Sprintf("⚡️ 您乾坤袋中暂无【%s】。\n💰 您的积分充足，是否授权天道商行自动扣除 `%d` 积分代购**【%s】**并立即开始渡劫？\n👉 请回复 `确认代购并渡劫` 或 `取消`。", inventoryItemMarkdownName(req.PillName), req.PointsCost, inventoryItemMarkdownName(req.PillName)))
 		UserSessions.Store(userID, session)
 	} else {
 		// 没钱没药，无情驳回
-		replyText(bot, chatID, fmt.Sprintf("❌ 突破失败。您既无**【%s】**，也缺少积分在聚宝斋购买（当前仅有 `%d` 积分，需要 `%d` 积分）。请努力积攒灵石！", inventoryItemMarkdownName(req.PillName), u.Points, req.PointsCost))
+		replyTextToMessage(bot, msg, fmt.Sprintf("❌ 突破失败。您既无**【%s】**，也缺少积分在聚宝斋购买（当前仅有 `%d` 积分，需要 `%d` 积分）。请努力积攒灵石！", inventoryItemMarkdownName(req.PillName), u.Points, req.PointsCost))
 	}
 }
 
@@ -1016,28 +1016,28 @@ func ExecuteBreakthrough(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, mode strin
 	if err != nil {
 		switch cultivationErrorCode(err) {
 		case "CULTIVATION_NOT_FOUND":
-			replyText(bot, chatID, "❌ 未找到您的修仙档案，请先发送 `听书报告` 或 `我的信息` 初始化档案。")
+			replyTextToMessage(bot, msg, "❌ 未找到您的修仙档案，请先发送 `听书报告` 或 `我的信息` 初始化档案。")
 		case "MAX_REALM_REACHED":
-			replyText(bot, chatID, "⚡️ 您已达到本界天道天花板，无法继续突破。")
+			replyTextToMessage(bot, msg, "⚡️ 您已达到本界天道天花板，无法继续突破。")
 		case "CONSOLIDATING":
-			replyText(bot, chatID, "⚠️ 您仍处于境界巩固期，暂时无法再次渡劫。")
+			replyTextToMessage(bot, msg, "⚠️ 您仍处于境界巩固期，暂时无法再次渡劫。")
 		case "NOT_READY":
-			replyText(bot, chatID, "❌ 您尚未达到当前境界大圆满，无法引动雷劫。")
+			replyTextToMessage(bot, msg, "❌ 您尚未达到当前境界大圆满，无法引动雷劫。")
 		case "INSUFFICIENT_CULTIVATION":
-			replyText(bot, chatID, "❌ 当前总修为不足，无法突破。")
+			replyTextToMessage(bot, msg, "❌ 当前总修为不足，无法突破。")
 		case "INSUFFICIENT_POINTS":
-			replyText(bot, chatID, "❌ 积分不足，无法完成突破消耗（丹药代购或至宝渡劫费）。")
+			replyTextToMessage(bot, msg, "❌ 积分不足，无法完成突破消耗（丹药代购或至宝渡劫费）。")
 		case "NO_PILL":
-			replyText(bot, chatID, "❌ 乾坤袋内突破丹药不足，无法渡劫。")
+			replyTextToMessage(bot, msg, "❌ 乾坤袋内突破丹药不足，无法渡劫。")
 		case "INVALID_BREAKTHROUGH_MODE":
-			replyText(bot, chatID, "❌ 突破模式异常，请重新发送 `突破` 指令。")
+			replyTextToMessage(bot, msg, "❌ 突破模式异常，请重新发送 `突破` 指令。")
 		case "CULTIVATION_STATE_CHANGED":
-			replyText(bot, chatID, "⚠️ 您的境界状态刚刚发生变化，请重新发送 `突破` 指令确认。")
+			replyTextToMessage(bot, msg, "⚠️ 您的境界状态刚刚发生变化，请重新发送 `突破` 指令确认。")
 		case "RANDOM_FAILED":
-			replyText(bot, chatID, "❌ 天机骰盅异常，突破未执行，资源未扣除，请稍后重试。")
+			replyTextToMessage(bot, msg, "❌ 天机骰盅异常，突破未执行，资源未扣除，请稍后重试。")
 		default:
 			log.Printf("❌ 突破事务失败: user=%d mode=%s err=%s", userID, formatPlainValue(mode), formatPlainError(err))
-			replyText(bot, chatID, "❌ 渡劫执行失败，本次资源未扣除，请稍后重试。")
+			replyTextToMessage(bot, msg, "❌ 渡劫执行失败，本次资源未扣除，请稍后重试。")
 		}
 		return
 	}

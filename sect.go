@@ -1023,15 +1023,14 @@ func handleConfirmRenameSect(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawNam
 }
 
 func handleJoinSect(bot *tgbotapi.BotAPI, message *tgbotapi.Message, args string) {
-	chatID := message.Chat.ID
 
 	name, ok := validateSectName(args)
 	if !ok {
-		replyText(bot, chatID, sectNameInvalidText)
+		replyTextToMessage(bot, message, sectNameInvalidText)
 		return
 	}
 
-	replyText(bot, chatID, fmt.Sprintf(
+	replyTextToMessage(bot, message, fmt.Sprintf(
 		"加入宗门 **%s** 将消耗 `%d` 积分，加入后会增加等额个人贡献。\n\n确认请发送：`确认加入宗门 %s`",
 		escapeMarkdown(name),
 		sectJoinCost,
@@ -1040,13 +1039,12 @@ func handleJoinSect(bot *tgbotapi.BotAPI, message *tgbotapi.Message, args string
 }
 
 func handleConfirmJoinSect(bot *tgbotapi.BotAPI, message *tgbotapi.Message, args string) {
-	chatID := message.Chat.ID
 	userID := message.From.ID
 	userName := getTelegramDisplayName(message.From)
 
 	name, ok := validateSectName(args)
 	if !ok {
-		replyText(bot, chatID, sectNameInvalidText)
+		replyTextToMessage(bot, message, sectNameInvalidText)
 		return
 	}
 
@@ -1140,21 +1138,21 @@ func handleConfirmJoinSect(bot *tgbotapi.BotAPI, message *tgbotapi.Message, args
 	if err != nil {
 		switch {
 		case errors.Is(err, errAlreadyInSect):
-			replyText(bot, chatID, "你已经加入宗门，不能重复加入。")
+			replyTextToMessage(bot, message, "你已经加入宗门，不能重复加入。")
 		case errors.Is(err, errSectNotFound):
-			replyText(bot, chatID, "未找到该宗门。")
+			replyTextToMessage(bot, message, "未找到该宗门。")
 		case errors.Is(err, errSectFull):
-			replyText(bot, chatID, "该宗门成员已满。")
+			replyTextToMessage(bot, message, "该宗门成员已满。")
 		case errors.Is(err, errPointsNotEnough):
-			replyText(bot, chatID, fmt.Sprintf("积分不足，加入宗门需要 `%d` 积分。", sectJoinCost))
+			replyTextToMessage(bot, message, fmt.Sprintf("积分不足，加入宗门需要 `%d` 积分。", sectJoinCost))
 		default:
 			log.Printf("join sect failed: user=%d sect=%s err=%s", userID, formatPlainValue(name), formatPlainError(err))
-			replyText(bot, chatID, "加入宗门失败，请稍后再试。")
+			replyTextToMessage(bot, message, "加入宗门失败，请稍后再试。")
 		}
 		return
 	}
 
-	replyText(bot, chatID, fmt.Sprintf("已加入宗门 **%s**。\n\n消耗积分：`%d`\n个人贡献：`+%d`", escapeMarkdown(joinedSectName), sectJoinCost, sectJoinCost))
+	replyTextToMessage(bot, message, fmt.Sprintf("已加入宗门 **%s**。\n\n消耗积分：`%d`\n个人贡献：`+%d`", escapeMarkdown(joinedSectName), sectJoinCost, sectJoinCost))
 }
 func handleMySect(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	var member SectMember
@@ -1965,11 +1963,10 @@ func sectTotalContributionSelectExpr() string {
 
 func handleDonateSect(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawAmount string) {
 	userID := msg.From.ID
-	chatID := msg.Chat.ID
 
 	amount, err := strconv.Atoi(strings.TrimSpace(rawAmount))
 	if err != nil || amount <= 0 || amount > 100000 {
-		replyText(bot, chatID, "捐献数量必须是 1-100000 的整数。\n示例：`捐献宗门 100`")
+		replyTextToMessage(bot, msg, "捐献数量必须是 1-100000 的整数。\n示例：`捐献宗门 100`")
 		return
 	}
 
@@ -2055,17 +2052,17 @@ func handleDonateSect(bot *tgbotapi.BotAPI, msg *tgbotapi.Message, rawAmount str
 	if err != nil {
 		switch {
 		case errors.Is(err, errNotInSect):
-			replyText(bot, chatID, "你尚未加入宗门，无法捐献。")
+			replyTextToMessage(bot, msg, "你尚未加入宗门，无法捐献。")
 		case errors.Is(err, errPointsNotEnough):
-			replyText(bot, chatID, "积分不足，无法完成宗门捐献。")
+			replyTextToMessage(bot, msg, "积分不足，无法完成宗门捐献。")
 		default:
 			log.Printf("⚠️ 宗门捐献失败: user=%d amount=%d err=%s", userID, amount, formatPlainError(err))
-			replyText(bot, chatID, "宗门捐献失败，请稍后再试。")
+			replyTextToMessage(bot, msg, "宗门捐献失败，请稍后再试。")
 		}
 		return
 	}
 
-	replyText(bot, chatID, fmt.Sprintf("已向宗门 **%s** 捐献 `%d` 积分。", escapeMarkdown(sectName), amount))
+	replyTextToMessage(bot, msg, fmt.Sprintf("已向宗门 **%s** 捐献 `%d` 积分。", escapeMarkdown(sectName), amount))
 }
 
 func parseSectShopRewardAmount(rawAmount string) (int, error) {
@@ -4298,7 +4295,6 @@ func formatSectWeeklyTaskExcessText(actual float64, target float64) string {
 
 func handleClaimSectTaskReward(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	userID := msg.From.ID
-	chatID := msg.Chat.ID
 
 	now := time.Now()
 	dayKey := sectDayKey(now)
@@ -4410,14 +4406,14 @@ func handleClaimSectTaskReward(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	if err != nil {
 		switch sectErrorCode(err) {
 		case "NOT_IN_SECT":
-			replyText(bot, chatID, "道友尚未加入宗门，无法领取宗门任务奖励。")
+			replyTextToMessage(bot, msg, "道友尚未加入宗门，无法领取宗门任务奖励。")
 		case "SECT_DAILY_TASK_NOT_ALL_COMPLETED":
-			replyText(bot, chatID, sectDailyTaskIncompleteText(incompleteTaskSummaries))
+			replyTextToMessage(bot, msg, sectDailyTaskIncompleteText(incompleteTaskSummaries))
 		case "ALREADY_CLAIMED":
-			replyText(bot, chatID, "今日宗门任务奖励已经领取过了。")
+			replyTextToMessage(bot, msg, "今日宗门任务奖励已经领取过了。")
 		default:
 			log.Printf("宗门每日任务领奖失败: user=%d err=%s", userID, formatPlainError(err))
-			replyText(bot, chatID, "宗门任务奖励领取失败，请稍后再试。")
+			replyTextToMessage(bot, msg, "宗门任务奖励领取失败，请稍后再试。")
 		}
 		return
 	}
@@ -4427,7 +4423,7 @@ func handleClaimSectTaskReward(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		completedTaskText = "none"
 	}
 
-	replyText(bot, chatID, fmt.Sprintf(
+	replyTextToMessage(bot, msg, fmt.Sprintf(
 		"宗门 **%s** 今日任务奖励已领取。\n"+
 			"完成任务：`%d` 项（%s）\n"+
 			"个人贡献：`+%d`\n"+

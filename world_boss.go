@@ -960,17 +960,17 @@ func awardWorldBossSectRewardTx(tx *gorm.DB, userID int64, contribution int, pre
 func handleJoinWorldBoss(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	event, eventErr := getActiveWorldBossChecked()
 	if errors.Is(eventErr, gorm.ErrRecordNotFound) {
-		replyText(bot, msg.Chat.ID, "📜 当前没有开放中的世界Boss。\n\n开放时间：每周六、周日 `21:00 - 22:00`。")
+		replyTextToMessage(bot, msg, "📜 当前没有开放中的世界Boss。\n\n开放时间：每周六、周日 `21:00 - 22:00`。")
 		return
 	}
 	if eventErr != nil {
 		log.Printf("⚠️ 世界Boss参加活动读取失败: user=%d err=%s", msg.From.ID, formatPlainError(eventErr))
-		replyText(bot, msg.Chat.ID, "❌ 世界Boss状态读取失败，请稍后重试。")
+		replyTextToMessage(bot, msg, "❌ 世界Boss状态读取失败，请稍后重试。")
 		return
 	}
 	now := time.Now()
 	if !canJoinWorldBossAt(event, now) {
-		replyText(bot, msg.Chat.ID, fmt.Sprintf(
+		replyTextToMessage(bot, msg, fmt.Sprintf(
 			"⚠️ 本期世界Boss已进入最后 `%d` 分钟冲刺阶段，停止新道友加入。\n\n请等待下一场 Boss 降临。",
 			int(worldBossJoinCloseBeforeEnd.Minutes()),
 		))
@@ -981,30 +981,30 @@ func handleJoinWorldBoss(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	if err := DB.Where("telegram_id = ?", msg.From.ID).First(&u).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Printf("⚠️ 世界Boss参加读取本地档案失败: user=%d err=%s", msg.From.ID, formatPlainError(err))
-			replyText(bot, msg.Chat.ID, "❌ 参加世界Boss读取本地档案失败，请稍后重试。")
+			replyTextToMessage(bot, msg, "❌ 参加世界Boss读取本地档案失败，请稍后重试。")
 			return
 		}
-		replyText(bot, msg.Chat.ID, "❌ 参加世界Boss需要先绑定有效 ABS 听书账号。")
+		replyTextToMessage(bot, msg, "❌ 参加世界Boss需要先绑定有效 ABS 听书账号。")
 		return
 	}
 	if u.AbsUserID == "" {
-		replyText(bot, msg.Chat.ID, "❌ 参加世界Boss需要先绑定有效 ABS 听书账号。")
+		replyTextToMessage(bot, msg, "❌ 参加世界Boss需要先绑定有效 ABS 听书账号。")
 		return
 	}
 	usable, statusErr := userHasUsableLocalAbsAccountAt(u, now)
 	if statusErr != nil {
 		log.Printf("⚠️ 世界Boss参加状态读取失败: user=%d abs=%s err=%s", msg.From.ID, formatPlainValue(u.AbsUserID), formatPlainError(statusErr))
-		replyText(bot, msg.Chat.ID, "❌ 账号状态读取失败，请稍后重试。")
+		replyTextToMessage(bot, msg, "❌ 账号状态读取失败，请稍后重试。")
 		return
 	}
 	if !usable {
-		replyText(bot, msg.Chat.ID, "❌ 参加世界Boss需要当前有效且未暂停的 ABS 听书账号。")
+		replyTextToMessage(bot, msg, "❌ 参加世界Boss需要当前有效且未暂停的 ABS 听书账号。")
 		return
 	}
 
 	baseHours, err := getWorldBossRawListeningHours(u.AbsUserID)
 	if err != nil {
-		replyText(bot, msg.Chat.ID, "❌ 读取当前实际听书时长失败，请稍后重试。")
+		replyTextToMessage(bot, msg, "❌ 读取当前实际听书时长失败，请稍后重试。")
 		return
 	}
 
@@ -1016,7 +1016,7 @@ func handleJoinWorldBoss(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		BaseHours: baseHours,
 	})
 	if err != nil {
-		replyText(bot, msg.Chat.ID, "❌ 参加失败，请稍后重试。")
+		replyTextToMessage(bot, msg, "❌ 参加失败，请稍后重试。")
 		return
 	}
 
@@ -1036,7 +1036,7 @@ func handleJoinWorldBoss(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 	ensureWorldBossLiveBoard(bot, event)
 
-	replyText(bot, msg.Chat.ID, fmt.Sprintf(
+	replyTextToMessage(bot, msg, fmt.Sprintf(
 		"✅ 已加入世界Boss讨伐。\n\nBoss：**%s**\n当前基线实际听书：%s\n当前血量：`%.2f/%d`\n参与人数：`%d`\n\n请在 `22:00` 前实际听书，结算时仅按参与后的 Boss 时段实际听书时长造成伤害。",
 		escapeMarkdown(event.Name),
 		baseHoursText,

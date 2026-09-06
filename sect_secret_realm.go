@@ -1234,13 +1234,13 @@ func handleJoinSectSecretRealm(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 	event, activeErr := getActiveSectSecretRealmTxChecked(DB, member.SectID, time.Now())
 	if errors.Is(activeErr, errSectSecretRealmNotActive) {
-		replyText(bot, chatID, "📜 当前宗门没有开放中的秘境。")
+		replyTextToMessage(bot, msg, "📜 当前宗门没有开放中的秘境。")
 		return
 	}
 
 	if activeErr != nil {
 		log.Printf("⚠️ 宗门秘境进入活动读取失败: sect=%d user=%d err=%s", member.SectID, userID, formatPlainError(activeErr))
-		replyText(bot, chatID, "❌ 宗门秘境状态读取失败，请稍后重试。")
+		replyTextToMessage(bot, msg, "❌ 宗门秘境状态读取失败，请稍后重试。")
 		return
 	}
 
@@ -1248,21 +1248,21 @@ func handleJoinSectSecretRealm(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	if err := DB.Where("telegram_id = ?", userID).First(&u).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Printf("⚠️ 进入宗门秘境读取本地档案失败: user=%d realm=%s err=%s", userID, formatPlainValue(event.RealmID), formatPlainError(err))
-			replyText(bot, chatID, "❌ 进入宗门秘境读取本地档案失败，请稍后重试。")
+			replyTextToMessage(bot, msg, "❌ 进入宗门秘境读取本地档案失败，请稍后重试。")
 			return
 		}
-		replyText(bot, chatID, "❌ 进入宗门秘境需要先绑定有效 ABS 听书账号。")
+		replyTextToMessage(bot, msg, "❌ 进入宗门秘境需要先绑定有效 ABS 听书账号。")
 		return
 	}
 	if strings.TrimSpace(u.AbsUserID) == "" {
-		replyText(bot, chatID, "❌ 进入宗门秘境需要先绑定有效 ABS 听书账号。")
+		replyTextToMessage(bot, msg, "❌ 进入宗门秘境需要先绑定有效 ABS 听书账号。")
 		return
 	}
 
 	baseSnapshot, err := getSectSecretRealmListeningSnapshot(u.AbsUserID)
 	if err != nil {
 		log.Printf("⚠️ 进入宗门秘境读取 ABS 失败: user=%d realm=%s err=%s", userID, formatPlainValue(event.RealmID), formatPlainError(err))
-		replyText(bot, chatID, "❌ 读取当前净修为失败，请稍后重试。")
+		replyTextToMessage(bot, msg, "❌ 读取当前净修为失败，请稍后重试。")
 		return
 	}
 
@@ -1271,11 +1271,11 @@ func handleJoinSectSecretRealm(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 	profile, err := sectSecretRealmProfileFromSnapshotChecked(event.ProfileKey, event.ConfigSnapshot)
 	if err != nil {
 		log.Printf("⚠️ 进入宗门秘境读取配置快照失败: realm=%s user=%d err=%s", formatPlainValue(event.RealmID), userID, formatPlainError(err))
-		replyText(bot, chatID, "❌ 宗门秘境配置快照读取失败，请稍后重试。")
+		replyTextToMessage(bot, msg, "❌ 宗门秘境配置快照读取失败，请稍后重试。")
 		return
 	}
 	if majorRealm < profile.MinMajorRealm {
-		replyText(bot, chatID, fmt.Sprintf("❌ 进入%s需要境界达到 %s。", escapeMarkdown(profile.Name), sectSecretRealmRealmMarkdown(profile.MinMajorRealm, 0)))
+		replyTextToMessage(bot, msg, fmt.Sprintf("❌ 进入%s需要境界达到 %s。", escapeMarkdown(profile.Name), sectSecretRealmRealmMarkdown(profile.MinMajorRealm, 0)))
 		return
 	}
 
@@ -1307,9 +1307,9 @@ func handleJoinSectSecretRealm(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 
 	if err != nil {
 		if errors.Is(err, errSectSecretRealmNotActive) {
-			replyText(bot, chatID, "📜 秘境刚刚关闭，请等待下次开启。")
+			replyTextToMessage(bot, msg, "📜 秘境刚刚关闭，请等待下次开启。")
 		} else {
-			replyText(bot, chatID, "❌ 进入秘境失败，请稍后重试。")
+			replyTextToMessage(bot, msg, "❌ 进入秘境失败，请稍后重试。")
 		}
 		return
 	}
@@ -1326,7 +1326,7 @@ func handleJoinSectSecretRealm(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) {
 		baseHoursText = fmt.Sprintf("`%.1f` 小时", participant.BaseHours)
 	}
 
-	replyText(bot, chatID, fmt.Sprintf(
+	replyTextToMessage(bot, msg, fmt.Sprintf(
 		"✅ 已进入宗门秘境【%s】。\n\n"+
 			"档位：`%s`\n"+
 			"当前境界：%s\n"+

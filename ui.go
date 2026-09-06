@@ -113,3 +113,23 @@ func replyText(bot *tgbotapi.BotAPI, chatID int64, text string) {
 		log.Printf("发送 Telegram 消息失败: chat=%d err=%s", chatID, formatTelegramSendError(err))
 	}
 }
+
+// replyTextToMessage 在群聊中引用用户原始消息回复，方便多人并发操作时确认反馈归属；
+// 私聊保持普通回复，引用发送失败时退回普通发送，避免反馈丢失。
+func replyTextToMessage(bot *tgbotapi.BotAPI, sourceMsg *tgbotapi.Message, text string) {
+	if bot == nil || sourceMsg == nil || sourceMsg.Chat == nil {
+		return
+	}
+	if sourceMsg.Chat.IsPrivate() {
+		replyText(bot, sourceMsg.Chat.ID, text)
+		return
+	}
+	msg := tgbotapi.NewMessage(sourceMsg.Chat.ID, text)
+	msg.ParseMode = "Markdown"
+	msg.ReplyToMessageID = sourceMsg.MessageID
+
+	if _, err := sendAutoDelete(bot, msg); err != nil {
+		log.Printf("发送 Telegram 引用回复失败: chat=%d message=%d err=%s", sourceMsg.Chat.ID, sourceMsg.MessageID, formatTelegramSendError(err))
+		replyText(bot, sourceMsg.Chat.ID, text)
+	}
+}

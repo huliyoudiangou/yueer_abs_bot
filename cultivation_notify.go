@@ -248,7 +248,7 @@ func handleBreakthroughConfirmation(bot *tgbotapi.BotAPI, msg *tgbotapi.Message,
 		// 将控制权移交给底层渡劫处决引擎
 		ExecuteBreakthrough(bot, msg, mode)
 	} else {
-		replyText(bot, msg.Chat.ID, "🛑 您已压制体内翻涌的气血，取消了本次渡劫。")
+		replyTextToMessage(bot, msg, "🛑 您已压制体内翻涌的气血，取消了本次渡劫。")
 	}
 	clearSession(msg.From.ID)
 }
