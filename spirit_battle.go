@@ -534,12 +534,10 @@ func PveSweep(userID int64, chapterID, stageID int) (int, error) {
 	return reward, nil
 }
 
-// PveSweepAll 一键扫荡：扫荡所有已解锁章节中三星关的剩余每日次数。
-// 每关每日 3 次上限、三星门槛与奖励口径完全复用 PveSweep，不新增资产规则；
-// 每次扫荡各自事务（与单关扫荡一致），中途异常只跳过该关，已完成的扫荡不回滚。
-// 返回 (总扫荡次数, 总奖励灵晶, error)。
-func PveSweepAll(userID int64) (int, int, error) {
-	// 境界读取在事务外（GetOrCreateCultivation 走全局连接池，事务内调用会死等）
+// listSweepableProgress 列出当前可扫荡的关卡进度（三星 + 章节已解锁，按章节/关卡升序）。
+// 「一键扫荡」与推图主页按钮计数必须共用这一筛选口径，否则按钮显示的可扫次数会与实际扫荡范围不一致。
+// 境界读取在事务外（GetOrCreateCultivation 走全局连接池，事务内调用会死等）。
+func listSweepableProgress(userID int64) ([]SpiritStageProgress, error) {
 	cul := GetOrCreateCultivation(userID)
 	majorRealm := 0
 	if cul != nil {
@@ -549,21 +547,45 @@ func PveSweepAll(userID int64) (int, int, error) {
 	var progs []SpiritStageProgress
 	if err := db.Where("user_id = ? AND stars >= ?", userID, 3).
 		Order("chapter_id asc, stage_id asc").Find(&progs).Error; err != nil {
+		return nil, err
+	}
+
+	out := make([]SpiritStageProgress, 0, len(progs))
+	for _, p := range progs {
+		zone := chapterZone(p.ChapterID)
+		if zone == nil || majorRealm < zone.Tier {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// remainingSweepsFor 某关今日剩余可扫荡次数（跨天按满额，已用尽为 0）。
+func remainingSweepsFor(p SpiritStageProgress, today string) int {
+	if p.SweepDay == today {
+		if remain := sweepDailyLimit - p.SweepCount; remain > 0 {
+			return remain
+		}
+		return 0
+	}
+	return sweepDailyLimit
+}
+
+// PveSweepAll 一键扫荡：扫荡所有已解锁章节中三星关的剩余每日次数。
+// 每关每日 3 次上限、三星门槛与奖励口径完全复用 PveSweep，不新增资产规则；
+// 每次扫荡各自事务（与单关扫荡一致），中途异常只跳过该关，已完成的扫荡不回滚。
+// 返回 (总扫荡次数, 总奖励灵晶, error)。
+func PveSweepAll(userID int64) (int, int, error) {
+	progs, err := listSweepableProgress(userID)
+	if err != nil {
 		return 0, 0, err
 	}
 
 	today := time.Now().Format("20060102")
 	totalSweeps, totalReward := 0, 0
 	for _, p := range progs {
-		zone := chapterZone(p.ChapterID)
-		if zone == nil || majorRealm < zone.Tier {
-			continue
-		}
-		remaining := sweepDailyLimit
-		if p.SweepDay == today {
-			remaining = sweepDailyLimit - p.SweepCount
-		}
-		for i := 0; i < remaining; i++ {
+		for i := 0; i < remainingSweepsFor(p, today); i++ {
 			reward, err := PveSweep(userID, p.ChapterID, p.StageID)
 			if err != nil {
 				// 该关已用尽或状态变化：跳过，继续下一关
@@ -579,22 +601,17 @@ func PveSweepAll(userID int64) (int, int, error) {
 	return totalSweeps, totalReward, nil
 }
 
-// countSweepableStages 统计用户当前剩余可扫荡次数（三星关且未达每日上限），供推图主页按钮展示。
+// countSweepableStages 统计用户当前剩余可扫荡次数，供推图主页按钮展示。
+// 与 PveSweepAll 共用 listSweepableProgress，保证「显示的可扫次数」=「实际会扫的次数」。
 func countSweepableStages(userID int64) int {
-	var progs []SpiritStageProgress
-	if err := db.Where("user_id = ? AND stars >= ?", userID, 3).Find(&progs).Error; err != nil {
+	progs, err := listSweepableProgress(userID)
+	if err != nil {
 		return 0
 	}
 	today := time.Now().Format("20060102")
 	total := 0
 	for _, p := range progs {
-		if p.SweepDay == today {
-			if remain := sweepDailyLimit - p.SweepCount; remain > 0 {
-				total += remain
-			}
-			continue
-		}
-		total += sweepDailyLimit
+		total += remainingSweepsFor(p, today)
 	}
 	return total
 }
