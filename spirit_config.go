@@ -198,6 +198,21 @@ var SpiritRopes = []SpiritRope{
 	{Key: "xuanling", Name: "玄灵索", Cost: 120, Bonus: 0.15},
 }
 
+// defaultSpiritRope 一键捕捉使用的默认灵索：取成本最低的一条（当前为缚灵索）。
+// 通过比较 Cost 选出，避免按钮逻辑硬编码索引。
+func defaultSpiritRope() *SpiritRope {
+	if len(SpiritRopes) == 0 {
+		return nil
+	}
+	best := &SpiritRopes[0]
+	for i := range SpiritRopes {
+		if SpiritRopes[i].Cost < best.Cost {
+			best = &SpiritRopes[i]
+		}
+	}
+	return best
+}
+
 // 天品保底阈值
 const TianPityThreshold = 30
 

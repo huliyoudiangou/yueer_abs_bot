@@ -50,6 +50,7 @@ scripts/
 docs/
 docs/agent/
 AGENTS.md
+.workbuddy-ai/
 
 # Local notes
 *.local.md

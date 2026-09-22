@@ -44,11 +44,13 @@ const (
 	spCbExPrefix       = "sp:ex:"         // sp:ex:100 / sp:ex:300 / sp:ex:500 / sp:ex:1000
 	spCbExToken        = "sp:ex:token"    // sp:ex:token 秘境信物兑换灵晶
 	spCbZonePrefix     = "sp:zone:"       // sp:zone:qingzhu
+	spCbCatchAllPrefix = "sp:catchall:"   // sp:catchall:{zone} 一键捕捉（缚灵索连抽至灵晶不足）
 	spPullPrefix       = "sp:pull:"       // sp:pull:qingzhu:fusu
 	spCbChapterPrefix  = "sp:chapter:"    // sp:chapter:1
 	spCbStagePrefix    = "sp:stage:"      // sp:stage:1:3
 	spCbFightPrefix    = "sp:fight:"      // sp:fight:1:3
 	spCbSweepPrefix    = "sp:sweep:"      // sp:sweep:1:3
+	spCbSweepAll       = "sp:sweepall"    // sp:sweepall 一键扫荡（全部已解锁章节的三星关）
 	spCbEggs           = "sp:eggs"        // sp:eggs
 	spEggHatchPrefix   = "sp:eggs:hatch:" // sp:eggs:hatch:{eggID}（可追加页码：sp:eggs:hatch:{eggID}:{page}）
 	spCbEggsPagePrefix = "sp:eggs:page:"  // sp:eggs:page:{page} 灵侍蛋分页（每页10枚）
@@ -365,6 +367,18 @@ func spiritPanelZoneDetail(userID int64, zoneKey string) (string, tgbotapi.Inlin
 			tgbotapi.NewInlineKeyboardButtonData(label, cb),
 		))
 	}
+	// 一键捕捉：默认灵索（缚灵索）连续捕捉，直到灵晶不足再抽一次为止
+	if batchRope := defaultSpiritRope(); batchRope != nil {
+		batchLabel := fmt.Sprintf("🔁 一键捕捉（%s·连抽至灵晶不足）", batchRope.Name)
+		batchCb := spCbCatchAllPrefix + zone.Key
+		if lingjing < batchRope.Cost {
+			batchLabel = "❌ " + batchLabel
+			batchCb = "sp:nojing"
+		}
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(batchLabel, batchCb),
+		))
+	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 灵墟", spCbCatch)))
 	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
@@ -418,6 +432,67 @@ func spiritPanelCatchResult(userID int64, result *CatchResult, zoneKey string) (
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)),
 	)
 	return b.String(), kb
+}
+
+// spiritPanelBatchCatchResult 一键捕捉结果面板（连抽汇总 + 捕获清单）
+func spiritPanelBatchCatchResult(sum *SpiritBatchCatchSummary) (string, tgbotapi.InlineKeyboardMarkup) {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("🏹 一键捕捉 · %s\n", sum.ZoneName))
+	b.WriteString("━━━━━━━━━━━━━━\n")
+	b.WriteString(fmt.Sprintf("灵索：%s（%d 灵晶/次）\n", sum.RopeName, sum.CostPerPull))
+	b.WriteString(fmt.Sprintf("抽取：%d 次｜成功 %d 只｜逃脱 %d 次\n", sum.Pulls, sum.Success, sum.Escaped))
+	b.WriteString(fmt.Sprintf("消耗灵晶：%d｜剩余：%d\n", sum.TotalCost, sum.LingjingLeft))
+
+	var qParts []string
+	for _, q := range SpiritQualityNames {
+		if n := sum.QualityCount[q]; n > 0 {
+			qParts = append(qParts, fmt.Sprintf("%s×%d", q, n))
+		}
+	}
+	if len(qParts) > 0 {
+		b.WriteString("品阶：" + strings.Join(qParts, " ") + "\n")
+	}
+
+	if sum.Pity != nil {
+		b.WriteString(fmt.Sprintf("天品保底：%d/%d抽\n", sum.Pity.TianPity, TianPityThreshold))
+		if th, ok := ShengPityThreshold[sum.ZoneKey]; ok {
+			b.WriteString(fmt.Sprintf("圣品保底：%d/%d抽\n", sum.Pity.ShengPity, th))
+		}
+	}
+
+	switch sum.StopReason {
+	case spiritBatchStopNoLingjing:
+		b.WriteString("\n💎 灵晶已不足再抽一次，本次结束。")
+	case spiritBatchStopLimit:
+		b.WriteString(fmt.Sprintf("\n⏸ 已达单次上限 %d 次，可再次点击继续。", spiritBatchCatchMaxPulls))
+	case spiritBatchStopError:
+		b.WriteString(fmt.Sprintf("\n⚠️ 提前中断：%v", sum.StopErr))
+	}
+
+	if len(sum.Servants) > 0 {
+		b.WriteString("\n━━━━━━━━━━━━━━\n捕获灵侍：\n")
+		const maxShow = 15
+		for i := range sum.Servants {
+			if i >= maxShow {
+				b.WriteString(fmt.Sprintf("…… 共 %d 只\n", len(sum.Servants)))
+				break
+			}
+			s := sum.Servants[i]
+			b.WriteString(fmt.Sprintf("  %d. %s品·%s（战力 %d）\n", i+1, s.Quality, s.Name, GetBattlePower(&s)))
+		}
+	}
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	if sum.LingjingLeft >= sum.CostPerPull {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("🔁 继续一键捕捉", spCbCatchAllPrefix+sum.ZoneKey)))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🏹 区域详情", spCbZonePrefix+sum.ZoneKey),
+		tgbotapi.NewInlineKeyboardButtonData("🏹 灵墟", spCbCatch),
+	))
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
+	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
 // spiritPanelTeam 出战队列：已上阵队伍（战力高→低）+ 编队调整（分页、上阵/下阵）
@@ -511,10 +586,10 @@ func spiritPanelHelp() (string, tgbotapi.InlineKeyboardMarkup) {
 		"· 灵尘：1 灵晶 = 100 灵尘，为最小计量单位\n" +
 		"· 灵侍品阶：凡/灵/玄/地/天/圣，共六阶\n" +
 		"· 灵侍属性：金木水火土阴阳（阴阳仅地阶以上可得）\n" +
-		"· 捕捉：灵墟按境界逐级开放（凡人 → 道祖共十四域），需消耗缚灵索\n" +
+		"· 捕捉：灵墟按境界逐级开放（凡人 → 道祖共十四域），需消耗缚灵索；区域详情页可「🔁 一键捕捉」，用缚灵索连续捕捉直到灵晶不足\n" +
 		"· 升星：星级上限 凡3/灵4/玄5/地6/天7/圣9；每星 +5% 一级基础属性。在图鉴中点选灵侍进入升星界面（显示「本次升星：⭐X → ⭐Y」），消耗一只符合条件的祭品灵侍升 1 星（升星后等级重置为 1）：升至 3 星及以下需同品阶、同属性祭品（星级不限）；升至 4-6 星需同品阶、同属性且祭品星级 = 当前星级；升至 7-9 星需同名且祭品星级 = 当前星级。锁定、出战中或穿戴装备的灵侍不能作祭品（装备需先卸下）。道具可替代祭品：升至 6 星及以下可直接消耗 1 个灵魄升星（无需灵侍祭品）；升至 7 星及以上可消耗 1 个万能真身碎片替代同名要求（祭品仅需同品质+同星级）\n" +
 		"· 吞噬：万灵阁「灵侍吞噬」选择宿主吞噬其他灵侍换取属性点（按被吞品阶：凡+2/灵+4/玄+8/地+16/天+32/圣+64，星级每 +1 额外 +1；属性点按宿主五维基础值比例分配）；出战中、已锁定、穿戴装备的灵侍不可被吞噬；一键吞噬按品阶及以下批量吞噬（凡/灵/玄/地/天及以下），需二次确认；逐只吞噬同样二次确认；被吞噬灵侍永久消失（功法修习随之失效），不可恢复\n" +
-		"· 推图：灵墟章节（随境界逐级开放）各 10 关 + Boss，神行符 10/日，三星可扫荡\n" +
+		"· 推图：灵墟章节（随境界逐级开放）各 10 关 + Boss，神行符 10/日，三星可扫荡；推图主页可「🔄 一键扫荡」全部三星关的剩余次数\n" +
 		"· 出战队列：上阵/下阵灵侍组成出战队伍（上限 5 只，出战顺序按含装备战力高→低），推图/镜场/PVP 需先上阵\n" +
 		"· 战力：图鉴/养成/出战队列/装备选择均按战力（含装备加成）高→低排列，分页展示\n" +
 		"· 镜场：上架镜像供道友挑战，胜 30 / 负 10 灵晶，10 次/日，24h 内可复仇\n" +
@@ -584,6 +659,13 @@ func spiritPanelPush(db *gorm.DB, userID int64) (string, tgbotapi.InlineKeyboard
 					fmt.Sprintf("🔒 %s（需%s）", z.Name, cultivationRealmDisplayName(z.Tier)), "sp:chlocked")))
 		}
 	}
+	sweepable := countSweepableStages(userID)
+	sweepLabel := "🔄 一键扫荡（暂无可扫）"
+	if sweepable > 0 {
+		sweepLabel = fmt.Sprintf("🔄 一键扫荡（可扫 %d 次）", sweepable)
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(sweepLabel, spCbSweepAll)))
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 		tgbotapi.NewInlineKeyboardButtonData("🔙 返回万灵阁", spCbHome)))
 	return b.String(), tgbotapi.NewInlineKeyboardMarkup(rows...)
@@ -1972,6 +2054,29 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 			ackText = fmt.Sprintf("💨 %s品灵侍逃跑了！", result.EncounterQ)
 		}
 		text, kb = spiritPanelCatchResult(userID, result, zoneKey)
+	case strings.HasPrefix(cb.Data, spCbCatchAllPrefix):
+		// 一键捕捉：sp:catchall:{zone}，默认灵索连续捕捉直到灵晶不足
+		zoneKey := strings.TrimPrefix(cb.Data, spCbCatchAllPrefix)
+		rope := defaultSpiritRope()
+		if rope == nil {
+			ackText = "灵索配置缺失，无法一键捕捉"
+			text, kb = spiritPanelZoneDetail(userID, zoneKey)
+			break
+		}
+		sum, err := CatchSpiritServantBatch(userID, zoneKey, rope.Key)
+		if err != nil {
+			log.Printf("[灵侍] 一键捕捉失败 user=%d zone=%s err=%s", userID, zoneKey, formatTelegramSendError(err))
+			ackText = fmt.Sprintf("一键捕捉失败：%v", err)
+			text, kb = spiritPanelZoneDetail(userID, zoneKey)
+			break
+		}
+		if sum.Pulls == 0 {
+			ackText = "灵晶不足，无法一键捕捉，请前往灵晶斋兑换"
+			text, kb = spiritPanelZoneDetail(userID, zoneKey)
+			break
+		}
+		ackText = fmt.Sprintf("🔁 一键捕捉：%d 次，成功 %d 只（-%d 灵晶）", sum.Pulls, sum.Success, sum.TotalCost)
+		text, kb = spiritPanelBatchCatchResult(sum)
 	case cb.Data == "sp:locked":
 		ackText = "该区域尚未解锁，请提升修为境界"
 		text, kb = spiritPanelCatch(db, userID)
@@ -2028,6 +2133,18 @@ func handleSpiritCallback(bot *tgbotapi.BotAPI, cb *tgbotapi.CallbackQuery) bool
 			ackText = fmt.Sprintf("💀 不敌 %s，稍作休整再战", res.EnemyName)
 		}
 		text, kb = spiritPanelStageDetail(userID, ch, st)
+	case cb.Data == spCbSweepAll:
+		// 一键扫荡：扫荡所有已解锁章节中三星关的剩余每日次数
+		sweeps, reward, err := PveSweepAll(userID)
+		if err != nil {
+			log.Printf("[灵侍] 一键扫荡失败 user=%d err=%s", userID, formatTelegramSendError(err))
+			ackText = fmt.Sprintf("一键扫荡失败：%v", err)
+		} else if sweeps == 0 {
+			ackText = "暂无可扫荡的关卡（需三星通关且未达每日 3 次上限）"
+		} else {
+			ackText = fmt.Sprintf("🔄 一键扫荡完成：%d 次，+%d 灵晶", sweeps, reward)
+		}
+		text, kb = spiritPanelPush(db, userID)
 	case strings.HasPrefix(cb.Data, spCbSweepPrefix):
 		ch, st, ok := parseSpStageData(cb.Data, spCbSweepPrefix)
 		if !ok {

@@ -175,6 +175,10 @@ func ExchangeSectSecretRealmTokenToLingjing(tx *gorm.DB, userID int64) (int, err
 	return amount, err
 }
 
+// errLingjingNotEnough 灵晶余额不足（SpendLingjing 条件更新未命中）。
+// 单独定义哨兵错误，便于「一键捕捉」等批量循环区分「余额不足自然结束」与其他异常。
+var errLingjingNotEnough = errors.New("灵晶不足")
+
 // SpendLingjing 灵侍消耗灵晶
 func SpendLingjing(tx *gorm.DB, userID int64, amount int, expenseType, description string) error {
 	if amount <= 0 {
@@ -187,7 +191,7 @@ func SpendLingjing(tx *gorm.DB, userID int64, amount int, expenseType, descripti
 			return fmt.Errorf("灵晶扣除失败: %w", result.Error)
 		}
 		if result.RowsAffected == 0 {
-			return fmt.Errorf("灵晶不足")
+			return errLingjingNotEnough
 		}
 		// 累加消耗统计
 		ttx.Model(&UserLingjingBalance{}).Where("user_id = ?", userID).

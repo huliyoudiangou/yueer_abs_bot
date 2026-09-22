@@ -221,3 +221,120 @@ func CheckZoneUnlocked(userID int64, zone SpiritZone) bool {
 	}
 	return cul.MajorRealm >= zone.Tier
 }
+
+// ==========================================
+// 一键捕捉（批量连抽）
+// ==========================================
+
+// spiritBatchCatchMaxPulls 单次「一键捕捉」最多连抽次数。
+// 兜住极端余额下的回调耗时与事务数量；达到上限后用户可再次点击继续。
+const spiritBatchCatchMaxPulls = 500
+
+// 一键捕捉停止原因
+const (
+	spiritBatchStopNoLingjing = "no_lingjing" // 灵晶不足，无法再抽一次
+	spiritBatchStopLimit      = "limit"       // 达到单次上限
+	spiritBatchStopError      = "error"       // 其他异常中断（已完成的捕捉保留）
+)
+
+// SpiritBatchCatchSummary 一键捕捉汇总
+type SpiritBatchCatchSummary struct {
+	ZoneKey      string
+	ZoneName     string
+	RopeName     string
+	CostPerPull  int
+	Pulls        int            // 实际抽取次数
+	Success      int            // 成功捕捉数
+	Escaped      int            // 逃脱次数
+	TotalCost    int            // 累计消耗灵晶
+	QualityCount map[string]int // 各品阶成功数（凡/灵/玄/地/天/圣）
+	Servants     []UserSpiritServant
+	Pity         *SpiritZonePity
+	LingjingLeft int
+	StopReason   string
+	StopErr      error
+}
+
+// CatchSpiritServantBatch 一键捕捉：用指定灵索连续捕捉，直到灵晶不足、达到单次上限或异常。
+// 每次捕捉各自单事务（灵晶/保底/灵侍同生共死），中途失败只影响当前这一次，已完成的捕捉不回滚。
+// 调用方需持有用户锁（与单次捕捉一致，避免同一用户并发捕捉）。
+func CatchSpiritServantBatch(userID int64, zoneKey, ropeKey string) (*SpiritBatchCatchSummary, error) {
+	var zone *SpiritZone
+	for i := range SpiritZones {
+		if SpiritZones[i].Key == zoneKey {
+			zone = &SpiritZones[i]
+			break
+		}
+	}
+	if zone == nil {
+		return nil, fmt.Errorf("未知灵墟区域")
+	}
+	var rope *SpiritRope
+	for i := range SpiritRopes {
+		if SpiritRopes[i].Key == ropeKey {
+			rope = &SpiritRopes[i]
+			break
+		}
+	}
+	if rope == nil {
+		return nil, fmt.Errorf("未知灵索")
+	}
+
+	sum := &SpiritBatchCatchSummary{
+		ZoneKey:      zone.Key,
+		ZoneName:     zone.Name,
+		RopeName:     rope.Name,
+		CostPerPull:  rope.Cost,
+		QualityCount: map[string]int{},
+	}
+
+	for i := 0; i < spiritBatchCatchMaxPulls; i++ {
+		var result *CatchResult
+		err := db.Transaction(func(tx *gorm.DB) error {
+			var cerr error
+			result, cerr = CatchSpiritServant(tx, userID, zoneKey, ropeKey)
+			return cerr
+		})
+		if err != nil {
+			if errors.Is(err, errLingjingNotEnough) {
+				sum.StopReason = spiritBatchStopNoLingjing
+				break
+			}
+			// 首次即失败（如境界不足）直接返回错误；已有成功捕捉则停止并保留已得结果
+			if sum.Pulls == 0 {
+				return nil, err
+			}
+			sum.StopReason = spiritBatchStopError
+			sum.StopErr = err
+			break
+		}
+		if result == nil {
+			sum.StopReason = spiritBatchStopError
+			sum.StopErr = fmt.Errorf("捕捉结果缺失")
+			break
+		}
+		sum.Pulls++
+		sum.TotalCost += rope.Cost
+		if result.Success && result.Servant != nil {
+			sum.Success++
+			sum.QualityCount[result.Servant.Quality]++
+			sum.Servants = append(sum.Servants, *result.Servant)
+		} else if result.Escape {
+			sum.Escaped++
+		}
+		sum.Pity = result.Pity
+	}
+	if sum.StopReason == "" {
+		sum.StopReason = spiritBatchStopLimit
+	}
+
+	if left, err := GetUserWalletBalance(db, userID); err == nil {
+		sum.LingjingLeft = left
+	}
+	if sum.Pity == nil {
+		sum.Pity = GetUserZonePity(userID, zoneKey)
+	}
+	log.Printf("[灵侍] 一键捕捉 user=%d zone=%s rope=%s pulls=%d success=%d escaped=%d cost=%d stop=%s",
+		userID, zoneKey, ropeKey, sum.Pulls, sum.Success, sum.Escaped, sum.TotalCost, sum.StopReason)
+	return sum, nil
+}

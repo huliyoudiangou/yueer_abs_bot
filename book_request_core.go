@@ -47,7 +47,7 @@ const (
 	bookRequestNeedInfoCancelAfter   = 48 * time.Hour
 	bookRequestStalePatrolInterval   = time.Hour
 
-	bookRequestLinkRequirementText = "必须以 https:// 开头，仅支持 ximalaya.com / www.ximalaya.com / m.ximalaya.com / xima.tv，路径不能为首页，且不能包含空格、换行、制表符、URL 账号密码信息或其他控制/分隔字符"
+	bookRequestLinkRequirementText = "必须以 https:// 开头，仅支持 ximalaya.com / www.ximalaya.com / m.ximalaya.com / xima.tv，路径应为专辑首页，不能为专辑中单集的地址，且不能包含空格、换行、制表符、URL 账号密码信息或其他控制/分隔字符"
 	bookRequestNoteInvalidText     = "内容不符合要求，请输入最多 300 字、可换行且不含制表符或其他控制字符的说明。"
 )
 
