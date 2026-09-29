@@ -337,16 +337,31 @@ func userEquipBonusMap(userID int64) map[uint]servantEquipBonus {
 	return equipBonusMap(db, userID)
 }
 
-// EnhancedBattlePower 含装备与功法的战力（与战斗引擎 enhanceServantStats 后的口径一致）
-// 无装备、无功法时等于 GetBattlePower。
+// EnhancedBattlePower 含装备与功法的战力，与 enhanceServantStats 后送进战斗的数值一致。
+// 功法是乘法，加在装备之后；战力按有效攻击/生存/先手折算，不再五维相加。
 func EnhancedBattlePower(bonusMap map[uint]servantEquipBonus, manualMap map[uint]int, s *UserSpiritServant) int {
-	b := bonusMap[s.ID]
-	total := ScaledHP(s) + b.HP + ScaledATK(s) + b.ATK + ScaledDEF(s) + b.DEF + ScaledSPD(s) + b.SPD + ScaledMAG(s) + b.MAG
-	p := int(float64(total) * QualityGrowth[s.Quality])
-	if pct := manualMap[s.ID]; pct > 0 {
-		p = int(float64(p) * (1 + float64(pct)/100))
+	if s == nil {
+		return 0
 	}
-	return p
+	b := bonusMap[s.ID]
+	view := UserSpiritServant{
+		Quality:   s.Quality,
+		Attribute: s.Attribute,
+		HP:        ScaledHP(s) + b.HP,
+		ATK:       ScaledATK(s) + b.ATK,
+		DEF:       ScaledDEF(s) + b.DEF,
+		SPD:       ScaledSPD(s) + b.SPD,
+		MAG:       ScaledMAG(s) + b.MAG,
+	}
+	if pct := manualMap[s.ID]; pct > 0 {
+		mul := 1 + float64(pct)/100
+		view.HP = int(float64(view.HP) * mul)
+		view.ATK = int(float64(view.ATK) * mul)
+		view.DEF = int(float64(view.DEF) * mul)
+		view.SPD = int(float64(view.SPD) * mul)
+		view.MAG = int(float64(view.MAG) * mul)
+	}
+	return ServantBattlePower(&view)
 }
 
 // sortServantsWithBonus 按战力（含装备+功法）高→低就地排序，同战力按 id 升序（稳定分页）

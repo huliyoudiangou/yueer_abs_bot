@@ -139,9 +139,21 @@ func ScaledMAG(s *UserSpiritServant) int {
 	return int(float64(s.MAG) * LevelGrowthMult(s.Level) * StarGrowthMult(s.Star))
 }
 
+// GetBattlePower 不含装备/功法的战斗战力。数据库存的是一级基础值，这里先缩放再折算。
+// 不再把气血、速度、灵识按 1:1 相加。
 func GetBattlePower(s *UserSpiritServant) int {
-	total := ScaledHP(s) + ScaledATK(s) + ScaledDEF(s) + ScaledSPD(s) + ScaledMAG(s)
-	return int(float64(total) * QualityGrowth[s.Quality])
+	if s == nil {
+		return 0
+	}
+	return ServantBattlePower(&UserSpiritServant{
+		Quality:   s.Quality,
+		Attribute: s.Attribute,
+		HP:        ScaledHP(s),
+		ATK:       ScaledATK(s),
+		DEF:       ScaledDEF(s),
+		SPD:       ScaledSPD(s),
+		MAG:       ScaledMAG(s),
+	})
 }
 
 func GetLevelUpRequirement(s *UserSpiritServant) int {

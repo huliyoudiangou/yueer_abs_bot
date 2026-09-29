@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math/rand"
 	"time"
 
 	"gorm.io/gorm"
@@ -44,119 +43,14 @@ type TeamBattleResult struct {
 	HPTotalA int
 	HPTotalB int
 	Rounds   int
+	Brief    string
 }
 
-// runTeamBattle 双队回合制引擎（PVP 镜场；A=攻方，B=守方）
-// 复用 calcDamage（属性克制/阴阳相冲/品阶压制），与 PVE 引擎共享数值规则
-func runTeamBattle(teamA, teamB []*BattleFighter) *TeamBattleResult {
-	res := &TeamBattleResult{}
-	for _, f := range teamA {
-		res.HPTotalA += f.MaxHP
-	}
-	for _, f := range teamB {
-		res.HPTotalB += f.MaxHP
-	}
-
-	for round := 1; round <= maxBattleRounds; round++ {
-		res.Rounds = round
-
-		type actor struct {
-			f    *BattleFighter
-			side int // 0=A(攻) 1=B(守)
-		}
-		var order []actor
-		for _, f := range teamA {
-			if f.HP > 0 {
-				order = append(order, actor{f: f, side: 0})
-			}
-		}
-		for _, f := range teamB {
-			if f.HP > 0 {
-				order = append(order, actor{f: f, side: 1})
-			}
-		}
-		// SPD 降序，同速攻方先手
-		for i := 1; i < len(order); i++ {
-			for j := i; j > 0; j-- {
-				a, b := order[j], order[j-1]
-				if a.f.SPD > b.f.SPD || (a.f.SPD == b.f.SPD && a.side < b.side) {
-					order[j], order[j-1] = b, a
-				} else {
-					break
-				}
-			}
-		}
-
-		for _, a := range order {
-			if a.f.HP <= 0 {
-				continue
-			}
-			var pool []*BattleFighter
-			if a.side == 0 {
-				for _, f := range teamB {
-					if f.HP > 0 {
-						pool = append(pool, f)
-					}
-				}
-			} else {
-				for _, f := range teamA {
-					if f.HP > 0 {
-						pool = append(pool, f)
-					}
-				}
-			}
-			if len(pool) == 0 {
-				break
-			}
-			target := pool[rand.Intn(len(pool))]
-			target.HP -= calcDamage(a.f, target)
-			if target.HP < 0 {
-				target.HP = 0
-			}
-		}
-
-		deadA, deadB := true, true
-		for _, f := range teamA {
-			if f.HP > 0 {
-				deadA = false
-			}
-		}
-		for _, f := range teamB {
-			if f.HP > 0 {
-				deadB = false
-			}
-		}
-		if deadB && !deadA {
-			res.Win = true
-			break
-		}
-		if deadA && !deadB {
-			res.Win = false
-			break
-		}
-		if deadA && deadB {
-			res.Win = false // 同归于尽：守方胜利（攻方需明确取胜）
-			break
-		}
-	}
-
-	for _, f := range teamA {
-		res.HPLeftA += f.HP
-	}
-	for _, f := range teamB {
-		res.HPLeftB += f.HP
-	}
-	// 超时（25 回合未分胜负）：按剩余血量占比判定，平局守方胜
-	if res.HPTotalA > 0 && res.HPTotalB > 0 {
-		ratioA := float64(res.HPLeftA) / float64(res.HPTotalA)
-		ratioB := float64(res.HPLeftB) / float64(res.HPTotalB)
-		if ratioA < ratioB {
-			res.Win = false
-		} else if ratioA > ratioB {
-			res.Win = true
-		}
-	}
-	return res
+// runTeamBattle 双队回合制（PVP 镜场；A=攻方，B=守方）。
+// 与 PVE 共用 resolveBattle：属性技能、站位、五行阵眼、品阶压制口径一致。
+// heaven 为当日天时，只加成攻方对应属性。
+func runTeamBattle(teamA, teamB []*BattleFighter, heaven string) *TeamBattleResult {
+	return resolveBattle(teamA, teamB, "", heaven, nil)
 }
 
 // ==========================================
@@ -186,7 +80,7 @@ func SetupMirror(userID int64) (int, error) {
 		if err != nil {
 			return fmt.Errorf("镜像生成失败: %s", formatTelegramSendError(err))
 		}
-		power = CalculateTeamPower(team, 0)
+		power = TeamFighterPower(fighters)
 		now := time.Now()
 
 		var mirror SpiritMirror
@@ -271,6 +165,8 @@ type PvpAttackResult struct {
 	HPTotal       int
 	Remaining     int // 本次战后今日剩余次数
 	IsRevenge     bool
+	Brief         string
+	Heaven        string
 }
 
 // PvpAttack 攻击镜场镜像（defenderID=0 随机匹配；>0 定向复仇/反击）
@@ -301,7 +197,8 @@ func PvpAttack(userID int64, defenderID int64) (*PvpAttackResult, error) {
 			return fmt.Errorf("尚未编排出战灵侍，请先在出战队列编队")
 		}
 		team = enhanceServantStats(tx, userID, team) // 并入装备加成
-		myPower := CalculateTeamPower(team, 0)
+		myFighters := teamToFighters(team)
+		myPower := TeamFighterPower(myFighters)
 
 		// 3. 目标选择
 		var target SpiritMirror
@@ -336,10 +233,13 @@ func PvpAttack(userID int64, defenderID int64) (*PvpAttackResult, error) {
 		for i := range defenders {
 			enemyTeam = append(enemyTeam, &defenders[i])
 		}
-		battle := runTeamBattle(teamToFighters(team), enemyTeam)
+		heaven := TodayHeavenElement(time.Now())
+		result.Heaven = heaven
+		battle := runTeamBattle(myFighters, enemyTeam, heaven)
 		result.Win = battle.Win
 		result.HPLeft = battle.HPLeftA
 		result.HPTotal = battle.HPTotalA
+		result.Brief = battle.Brief
 
 		// 5. 奖励（胜 30 / 负 10，发攻方）
 		reward := pvpLoseReward
@@ -434,6 +334,20 @@ func GetPvpDailyRemaining(userID int64) int {
 }
 
 // spiritPvpUserName 查询用户名（失败回退编号显示）
+// loadMirrorFighters 解析镜像快照。旧快照没有站位，这里按速度重排后再展示。
+func loadMirrorFighters(raw string) ([]BattleFighter, error) {
+	var defenders []BattleFighter
+	if err := json.Unmarshal([]byte(raw), &defenders); err != nil {
+		return nil, err
+	}
+	ptrs := make([]*BattleFighter, 0, len(defenders))
+	for i := range defenders {
+		ptrs = append(ptrs, &defenders[i])
+	}
+	assignBattleRows(ptrs)
+	return defenders, nil
+}
+
 func spiritPvpUserName(userID int64) string {
 	var u User
 	if err := db.Select("username").Where("telegram_id = ?", userID).First(&u).Error; err != nil || u.Username == "" {

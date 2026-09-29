@@ -256,15 +256,12 @@ func CheckDuplicateName(userID int64, name string) bool {
 	return count > 0
 }
 
-// 队伍战力估算（骨架：个体战力和 + 品阶多样性加成）
+// CalculateTeamPower 已废弃。镜场匹配、上架、面板必须走 TeamFighterPower / ServantBattlePower。
+// 保留函数是为了避免外部脚本按旧名链接失败；新代码不得调用。
+// 这里不再把五维相加当成战力，而是先折成战斗实体再算，避免两条口径并存。
 func CalculateTeamPower(team []UserSpiritServant, level int) int {
-	power := 0
-	uniqueQual := make(map[string]bool)
-	for _, s := range team {
-		uniqueQual[s.Quality] = true
-		power += int(float64(s.HP+s.ATK+s.DEF+s.SPD+s.MAG) * QualityGrowth[s.Quality])
-	}
-	return int(float64(power) * (1 + float64(len(uniqueQual))*0.05))
+	fighters := teamToFighters(team)
+	return TeamFighterPower(fighters)
 }
 
 // 随机生成一只灵侍模板（不落库，骨架用）

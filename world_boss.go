@@ -113,8 +113,9 @@ const (
 	worldBossValidDamage              = 3.0
 	worldBossCultivationBonusPerStage = 0.01
 	worldBossCultivationBonusCap      = 0.25
-	// 藏经阁功法灵侍讨伐加成：Σ(出战且已修习功法战力增量)/1000，封顶 +20%
-	worldBossServantManualBonusDivisor = 1000.0
+	// 藏经阁功法灵侍讨伐加成：Σ(出战且已修习功法战力增量)/4000，封顶 +20%。
+	// 2026-09 战力改为有效输出口径后数字变小，除数从 1000 调到 4000，避免同一套功法直接顶满 +20%。
+	worldBossServantManualBonusDivisor = 4000.0
 	worldBossServantManualBonusCap     = 0.20
 	worldBossLiveRefreshInterval       = 2 * time.Minute
 	worldBossJoinCloseBeforeEnd        = 15 * time.Minute
@@ -1463,7 +1464,7 @@ func getWorldBossSectDamageBonusChecked(userID int64) (float64, error) {
 }
 
 // getWorldBossServantManualDamageBonusChecked 藏经阁功法灵侍讨伐加成：
-// Σ(出战且已修习功法的灵侍 · 功法战力增量) / 1000，封顶 +20%。
+// Σ(出战且已修习功法的灵侍 · 功法战力增量) / 4000，封顶 +20%。
 // 读取失败（除「未入宗/无出战」外）返回错误，由加成链统一抛错，不得静默当 0。
 func getWorldBossServantManualDamageBonusChecked(userID int64) (float64, error) {
 	team, err := pickDeployedTeamTx(db, userID)
